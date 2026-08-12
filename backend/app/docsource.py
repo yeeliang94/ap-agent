@@ -54,6 +54,28 @@ class LocalFolderSource:
 # 408 and 429 are deliberately absent — those ARE worth retrying.
 NO_RETRY_STATUSES = {400, 401, 403, 404, 405, 410, 501}
 
+# Markers of a name-resolution failure, across platforms: Windows raises
+# WSAHOST_NOT_FOUND (11001), Unix EAI_NONAME (8). The run's error text is
+# read by a reviewer, not an engineer, so "ConnectError" gets translated.
+_DNS_MARKERS = ("getaddrinfo", "11001", "nodename nor servname",
+                "name or service not known", "temporary failure in name resolution")
+
+
+def _describe(exc: Exception) -> str:
+    """A short, safe label for a transport failure — no URLs, no secrets."""
+    text = str(exc).lower()
+    if any(m in text for m in _DNS_MARKERS):
+        return ("the server name could not be looked up — this usually means "
+                "the VPN or corporate network is not connected")
+    if "certificate" in text or "ssl" in text or "tls" in text:
+        return ("the server's security certificate was rejected — the "
+                "corporate certificate may not be trusted by this app")
+    if "timed out" in text or isinstance(exc, httpx.TimeoutException):
+        return "the server did not answer in time"
+    if isinstance(exc, httpx.ConnectError):
+        return "the server refused the connection or could not be reached"
+    return type(exc).__name__
+
 
 class McpSource:
     """Fetch through the (fake or real) SharePoint MCP contract.
@@ -119,7 +141,7 @@ class McpSource:
                 # Exception text can contain URLs — log it, don't raise it.
                 # exc_info gives the full chain, which is the only way to tell
                 # a TLS trust failure from a proxy refusal from a DNS miss.
-                last_error = type(exc).__name__
+                last_error = _describe(exc)
                 log.warning("MCP %s attempt %d failed calling %s: %s",
                             tool, attempt, url, exc, exc_info=True)
                 time.sleep(0.2 * attempt)
@@ -165,7 +187,7 @@ class McpSource:
                             name, attempt, exc.response.status_code)
                 time.sleep(0.2 * attempt)
             except httpx.HTTPError as exc:
-                last_error = type(exc).__name__
+                last_error = _describe(exc)
                 log.warning("download of %s attempt %d failed: %s",
                             name, attempt, exc, exc_info=True)
                 time.sleep(0.2 * attempt)
