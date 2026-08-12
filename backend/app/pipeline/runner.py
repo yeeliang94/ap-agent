@@ -12,7 +12,7 @@ from pathlib import Path
 
 from ..db import SessionLocal
 from ..models import Document, Flag, Run
-from . import output
+from . import output, reference
 from .checks import run_checks
 from .extract import extract_all
 from .images import document_to_pngs
@@ -24,6 +24,17 @@ async def process_run(run_id: str, workspace: Path) -> None:
     try:
         run = db.get(Run, run_id)
         docs = db.query(Document).filter(Document.run_id == run_id).all()
+        folder_url = run.snapshot.get("sharepoint_folder_url")
+
+        # Resolve the reference files FIRST. An unreachable folder or an
+        # ambiguous file name is fatal, and finding that out before the AI
+        # reads a single page avoids paying for a run that cannot finish.
+        # Recorded on the run so its record shows what it was judged
+        # against — a None role means that check did not happen.
+        # Reassigned, not mutated: SQLAlchemy only persists JSON on rebind.
+        run.snapshot = {**run.snapshot,
+                        "reference_files": reference.resolve_reference_files(folder_url)}
+        db.commit()
 
         # ---- sort -------------------------------------------------------
         _set(db, run, status="sorting", progress={"done": 0, "total": len(docs)})
@@ -53,7 +64,6 @@ async def process_run(run_id: str, workspace: Path) -> None:
 
         # ---- check ------------------------------------------------------
         _set(db, run, status="checking", progress={})
-        folder_url = run.snapshot.get("sharepoint_folder_url")
         flag_dicts = await run_checks(docs, folder_url=folder_url)
         for fd in flag_dicts:
             db.add(Flag(run_id=run_id, **fd))

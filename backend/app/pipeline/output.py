@@ -73,6 +73,10 @@ def build_outputs(docs: list, excluded_doc_ids: set[str],
     headers = reference.load_maybank_headers(folder_url)
     listed_numbers = {r["invoice_number"] for r in listing}
 
+    # No template in the folder means no bank upload block. Omitting it is
+    # safe and visible; inventing a column layout for money values is not.
+    bank_skipped = not headers
+
     unknown_headers = [h for h in headers if h.lower() not in _BANK_COLUMN_VALUES]
     if unknown_headers:
         raise UnsupportedTemplate(
@@ -89,8 +93,10 @@ def build_outputs(docs: list, excluded_doc_ids: set[str],
                                  str(d.fields.get("invoice_number", ""))))
 
     # Only MYR invoices belong in the Maybank block (checks flagged others).
-    bank_docs = [d for d in approved
-                 if str(d.fields.get("currency", "")).upper() == "MYR"]
+    bank_docs = [] if bank_skipped else [
+        d for d in approved
+        if str(d.fields.get("currency", "")).upper() == "MYR"
+    ]
     # Only invoices NOT already in the listing get new rows.
     new_docs = [d for d in approved
                 if str(d.fields.get("invoice_number", "")) not in listed_numbers]
@@ -128,12 +134,17 @@ def build_outputs(docs: list, excluded_doc_ids: set[str],
         ).replace(" ", "_"))
 
     # ---- reconciliation that can actually fail --------------------------
-    amount_col = [h.lower() for h in headers].index("amount (rm)")
     listing_total = _tsv_total(listing_rows, 4)
-    bank_total = _tsv_total(bank_rows, amount_col)
     source_new = sum((Decimal(str(d.fields["amount"])) for d in new_docs), Decimal("0"))
-    source_bank = sum((Decimal(str(d.fields["amount"])) for d in bank_docs), Decimal("0"))
-    match = (listing_total == source_new) and (bank_total == source_bank)
+    match = listing_total == source_new
+    if bank_skipped:
+        bank_total = Decimal("0")
+    else:
+        amount_col = [h.lower() for h in headers].index("amount (rm)")
+        bank_total = _tsv_total(bank_rows, amount_col)
+        source_bank = sum((Decimal(str(d.fields["amount"])) for d in bank_docs),
+                          Decimal("0"))
+        match = match and (bank_total == source_bank)
 
     return {
         "listing_header": "\t".join(["No.", "Date", "Vendor", "Invoice No.", "Amount (RM)", "Status"]),
@@ -141,7 +152,9 @@ def build_outputs(docs: list, excluded_doc_ids: set[str],
         "already_listed": len(approved) - len(new_docs),
         "bank_header": "\t".join(headers),
         "bank_rows": bank_rows,
-        "excluded_non_myr": len(approved) - len(bank_docs),
+        # True = no bank template in the folder, so no upload block was built.
+        "bank_skipped": bank_skipped,
+        "excluded_non_myr": 0 if bank_skipped else len(approved) - len(bank_docs),
         "filenames": filenames,
         "new_vendors": sorted(set(new_vendors)),
         "totals": {

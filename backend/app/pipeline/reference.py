@@ -13,16 +13,104 @@ from openpyxl import load_workbook
 
 from ..docsource import get_source
 
+# --- finding the files ------------------------------------------------------
+# Client folders use human names, so each role is matched by the words that
+# must ALL appear in the file name. Deliberately keyword matching and not
+# similarity scoring: "FY2025 Payment Listing" and "FY2026 Payment Listing"
+# score almost identically, and quietly checking invoices against last
+# year's listing is the worst outcome this module can produce.
+ROLE_KEYWORDS = {
+    "payment_listing": ("payment", "listing"),
+    "policy_sheet": ("policy",),
+    "bank_template": ("template",),
+}
 
-def _open(name: str, folder_url: str | None = None):
-    return load_workbook(
-        io.BytesIO(get_source(folder_url).get_reference(name)), read_only=True
-    )
+# The fixed names used by the samples folder and the tests. An exact match
+# wins outright, so development and CI never depend on keyword matching.
+CANONICAL_NAMES = {
+    "payment_listing": "payment_listing.xlsx",
+    "policy_sheet": "policy_sheet.xlsx",
+    "bank_template": "maybank_template.xlsx",
+}
+
+# Only these roles stop a run when absent. Missing policy or bank template
+# degrade the run instead: see load_policy_clauses / load_maybank_headers.
+REQUIRED_ROLES = ("payment_listing",)
+
+_SPREADSHEET_SUFFIXES = (".xlsx", ".xlsm")
+
+
+class AmbiguousReference(Exception):
+    """More than one file could be this role, so the pipeline refuses to pick."""
+
+
+class MissingReference(Exception):
+    """A file the pipeline cannot work without is not in the folder."""
+
+
+def _candidates(role: str, names: list[str]) -> list[str]:
+    keywords = ROLE_KEYWORDS[role]
+    out = []
+    for name in names:
+        # "~$..." are Excel's lock files, created whenever someone has the
+        # real workbook open. They are not documents and must never match.
+        if name.startswith("~$") or not name.lower().endswith(_SPREADSHEET_SUFFIXES):
+            continue
+        stem = name.rsplit(".", 1)[0].lower()
+        if all(word in stem for word in keywords):
+            out.append(name)
+    return out
+
+
+def resolve_name(role: str, names: list[str]) -> str | None:
+    """Which file in `names` plays `role`? None means there isn't one.
+
+    Raises AmbiguousReference when several files match, rather than guessing.
+    """
+    canonical = CANONICAL_NAMES[role]
+    for name in names:
+        if name.lower() == canonical.lower():
+            return name
+    matches = _candidates(role, names)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise AmbiguousReference(
+            f"Found {len(matches)} files that could be the {role.replace('_', ' ')}: "
+            f"{', '.join(sorted(matches))}. Leave one in the folder (or rename the "
+            f"others) so there is no doubt which one this run is judged against."
+        )
+    return None
+
+
+def resolve_reference_files(folder_url: str | None = None) -> dict[str, str | None]:
+    """The role → file name map for a folder, for recording on the run.
+
+    Runs once at the start of a run so the run's record shows exactly which
+    files it used, and which roles had no file at all.
+    """
+    names = get_source(folder_url).list_names()
+    return {role: resolve_name(role, names) for role in ROLE_KEYWORDS}
+
+
+def _open(role: str, folder_url: str | None = None):
+    """Open the workbook for `role`, or return None if the folder has none."""
+    source = get_source(folder_url)
+    name = resolve_name(role, source.list_names())
+    if name is None:
+        if role in REQUIRED_ROLES:
+            raise MissingReference(
+                f"No {role.replace('_', ' ')} found in the reference folder. "
+                f"Expected a spreadsheet whose name contains: "
+                f"{', '.join(ROLE_KEYWORDS[role])}."
+            )
+        return None
+    return load_workbook(io.BytesIO(source.get_reference(name)), read_only=True)
 
 
 def load_payment_listing(folder_url: str | None = None) -> list[dict]:
     """Every row of the payment listing as {no, date, vendor, invoice_number, amount, status}."""
-    wb = _open("payment_listing.xlsx", folder_url)
+    wb = _open("payment_listing", folder_url)  # required: raises if absent
     ws = wb.active
     rows = []
     for row in ws.iter_rows(min_row=2, values_only=True):
@@ -37,8 +125,15 @@ def load_payment_listing(folder_url: str | None = None) -> list[dict]:
 
 
 def load_policy_clauses(folder_url: str | None = None) -> list[dict]:
-    """Every policy clause as {clause, category, cap, currency, text}."""
-    wb = _open("policy_sheet.xlsx", folder_url)
+    """Every policy clause as {clause, category, cap, currency, text}.
+
+    Returns [] when the folder has no policy sheet. Callers treat an empty
+    list as "no policy to test against", which means no spending cap is
+    checked — recorded on the run by resolve_reference_files.
+    """
+    wb = _open("policy_sheet", folder_url)
+    if wb is None:
+        return []
     ws = wb.active
     clauses = []
     for row in ws.iter_rows(min_row=2, values_only=True):
@@ -53,8 +148,14 @@ def load_policy_clauses(folder_url: str | None = None) -> list[dict]:
 
 
 def load_maybank_headers(folder_url: str | None = None) -> list[str]:
-    """The column layout of the bank upload template — learned, not hardcoded."""
-    wb = _open("maybank_template.xlsx", folder_url)
+    """The column layout of the bank upload template — learned, not hardcoded.
+
+    Returns [] when the folder has no template. build_outputs then omits the
+    bank upload block entirely rather than inventing a column layout.
+    """
+    wb = _open("bank_template", folder_url)
+    if wb is None:
+        return []
     ws = wb.active
     headers = [str(c) for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
     wb.close()

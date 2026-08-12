@@ -315,12 +315,16 @@ function Output({ run }: { run: RunDetailData }) {
         text={[out.listing_header, ...out.listing_rows].join("\n")}
         preview={out.listing_rows}
       />
-      <CopyBlock
-        title={`Maybank entry rows (${out.bank_rows.length})`}
-        hint="Format learned from the uploaded Maybank template — account numbers must be filled from the vendor master"
-        text={[out.bank_header, ...out.bank_rows].join("\n")}
-        preview={out.bank_rows}
-      />
+      {/* No template in the reference folder means no column layout to
+          follow, so the block is omitted rather than shown empty. */}
+      {!out.bank_skipped && (
+        <CopyBlock
+          title={`Maybank entry rows (${out.bank_rows.length})`}
+          hint="Format learned from the uploaded Maybank template — account numbers must be filled from the vendor master"
+          text={[out.bank_header, ...out.bank_rows].join("\n")}
+          preview={out.bank_rows}
+        />
+      )}
       <CopyBlock
         title={`Proposed file names (${out.filenames.length})`}
         hint="Apply when filing the invoices"

@@ -37,6 +37,11 @@ class LocalFolderSource:
     def __init__(self) -> None:
         self.folder = config.REPO_ROOT / "samples" / "generated" / "reference"
 
+    def list_names(self) -> list[str]:
+        if not self.folder.is_dir():
+            return []
+        return sorted(p.name for p in self.folder.iterdir() if p.is_file())
+
     def get_reference(self, name: str) -> bytes:
         path = self.folder / name
         if not path.is_file():
@@ -110,6 +115,22 @@ class McpSource:
         raise SourceUnavailable(
             f"SharePoint source unavailable after {attempts} attempt(s) "
             f"calling {tool} ({last_error}). Details are in the server log."
+        )
+
+    def list_names(self) -> list[str]:
+        """Every file name in the configured folder.
+
+        Needed because real client folders use human file names ("ICMR -
+        FY2026 Payment Listing.xlsx"), so the pipeline must look at what is
+        actually there rather than demand fixed names.
+        """
+        resolved = self._call("resolve_folder_url", {"url": self.folder_url})
+        items = self._call("list_library_items", {
+            "site_id": resolved["site_id"], "library": resolved["library"],
+        }).get("items", [])
+        return sorted(
+            str(i.get("name", "")) for i in items
+            if i.get("kind", "file") == "file" and i.get("name")
         )
 
     def get_reference(self, name: str) -> bytes:

@@ -79,6 +79,8 @@ export interface Outputs {
   already_listed: number;
   bank_header: string;
   bank_rows: string[];
+  /** True when the reference folder had no bank template, so no block exists. */
+  bank_skipped: boolean;
   excluded_non_myr: number;
   filenames: string[];
   new_vendors: string[];
