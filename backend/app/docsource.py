@@ -197,11 +197,210 @@ class McpSource:
         )
 
 
+class RealMcpSource:
+    """The enterprise SharePoint service, over the real MCP protocol.
+
+    McpSource above speaks a bespoke REST contract that only the local
+    fake implements. A genuine MCP server is a JSON-RPC conversation with
+    an `initialize` handshake and a `tools/list` catalogue, so this class
+    discovers the server's own tool names instead of assuming them.
+
+    Every deployment names its tools differently. Keyword discovery
+    covers the common spellings; when it cannot decide, set the name
+    explicitly in .env (MCP_TOOL_RESOLVE_FOLDER, MCP_TOOL_LIST_ITEMS,
+    MCP_TOOL_GET_DOCUMENT) — the error message lists exactly what the
+    server offers, so filling those in is a copy-paste job.
+    """
+
+    # Candidate spellings per role, most specific first. The enterprise
+    # gateway's documented tools are whoami / site discovery /
+    # list_document_libraries / list_library_items / download_document —
+    # note it has NO resolve-folder tool, so that step is optional.
+    RESOLVE_KEYWORDS = (("resolve", "folder"), ("folder", "url"),
+                        ("resolve", "path"))
+    LIST_KEYWORDS = (("list", "library", "item"), ("list", "item"),
+                     ("list", "file"), ("list", "children"),
+                     ("list", "folder"), ("list", "drive"))
+    DOCUMENT_KEYWORDS = (("download", "document"), ("download",),
+                         ("get", "document"), ("document", "metadata"),
+                         ("get", "file"), ("read", "file"))
+    # Optional identity check: the documented gateway exposes whoami, and
+    # calling it first turns "everything fails" into "sign-in is missing".
+    WHOAMI_KEYWORDS = (("whoami",), ("who", "am", "i"), ("current", "user"))
+
+    def __init__(self, folder_url: str | None = None) -> None:
+        from . import settings_store
+
+        self.url = os.getenv("MCP_URL", "")
+        header = os.getenv("MCP_AUTH_HEADER", "").strip()
+        value = os.getenv("MCP_AUTH_VALUE", "").strip()
+        self.headers = {header: value} if header and value else {}
+        self.folder_url = folder_url or settings_store.get_setting("sharepoint_folder_url")
+        log.info("real MCP source: url=%s folder=%s auth_header=%s",
+                 self.url, self.folder_url,
+                 next(iter(self.headers), "(none set)"))
+
+    def _tool(self, session, env_var: str, keywords) -> str:
+        override = os.getenv(env_var, "").strip()
+        if override:
+            if override not in session.tool_names:
+                raise SourceUnavailable(
+                    f"{env_var}={override!r} is not a tool this server offers. "
+                    f"It offers: {', '.join(session.tool_names) or '(none)'}")
+            return override
+        return session.find_tool(*keywords)
+
+    async def _resolve(self, session) -> dict:
+        """Turn the folder URL into whatever identifiers this server uses.
+
+        Optional by design: the documented enterprise gateway has no
+        resolve-folder tool at all (it goes site discovery ->
+        list_document_libraries -> list_library_items). When no such tool
+        exists we carry the raw URL forward and let the schema filter
+        decide what the next tool actually wants.
+        """
+        from .mcp_client import McpError
+
+        try:
+            tool = self._tool(session, "MCP_TOOL_RESOLVE_FOLDER",
+                              self.RESOLVE_KEYWORDS)
+        except (McpError, SourceUnavailable):
+            log.info("no resolve-folder tool on this server; passing the "
+                     "folder URL straight through")
+            return {"url": self.folder_url}
+        resolved = await session.call(tool, {"url": self.folder_url})
+        return resolved if isinstance(resolved, dict) else {"result": resolved}
+
+    async def _alist_names(self) -> list[str]:
+        from .mcp_client import McpSession
+
+        async with McpSession(self.url, self.headers) as session:
+            resolved = await self._resolve(session)
+            tool = self._tool(session, "MCP_TOOL_LIST_ITEMS", self.LIST_KEYWORDS)
+            payload = await session.call(tool, _folder_args(resolved, self.folder_url))
+        return sorted(_names_from(payload))
+
+    async def _aget_reference(self, name: str) -> bytes:
+        from .mcp_client import McpSession
+
+        async with McpSession(self.url, self.headers) as session:
+            resolved = await self._resolve(session)
+            tool = self._tool(session, "MCP_TOOL_GET_DOCUMENT", self.DOCUMENT_KEYWORDS)
+            args = _folder_args(resolved, self.folder_url)
+            payload = await session.call(tool, {**args, "item_id": name, "name": name})
+            # Servers answer either with bytes inline (base64) or with a
+            # temporary download link. The link is bearer-like: fetch it
+            # here, never log it, never return it.
+            data = _inline_bytes(payload)
+            if data is not None:
+                return data
+            link = _download_link(payload)
+            if not link:
+                raise SourceUnavailable(
+                    f"The document tool returned neither file content nor a "
+                    f"download link for {name!r}. Keys returned: "
+                    f"{sorted(payload) if isinstance(payload, dict) else type(payload).__name__}")
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.get(link, headers=self.headers)
+                r.raise_for_status()
+                return r.content
+
+    def _guarded(self, coro, what: str):
+        from .mcp_client import McpError, run_sync
+
+        try:
+            return run_sync(coro)
+        except McpError as exc:
+            log.warning("MCP %s failed: %s", what, exc, exc_info=True)
+            raise SourceUnavailable(str(exc)) from exc
+        except Exception as exc:
+            log.warning("MCP %s failed: %s", what, exc, exc_info=True)
+            raise SourceUnavailable(
+                f"SharePoint source unavailable ({_describe(exc)}). "
+                "Details are in the server log.") from exc
+
+    def list_names(self) -> list[str]:
+        return self._guarded(self._alist_names(), "list_names")
+
+    def get_reference(self, name: str) -> bytes:
+        return self._guarded(self._aget_reference(name), f"get_reference {name!r}")
+
+
+def _folder_args(resolved: dict, folder_url: str) -> dict:
+    """Whatever identifiers the resolve step produced, plus the raw URL.
+
+    Servers disagree on what identifies a folder (site_id + library, a
+    drive_id, a path). Passing through everything resolve returned, with
+    the original URL as a fallback, avoids hardcoding one server's shape.
+    """
+    args = {k: v for k, v in resolved.items()
+            if isinstance(v, (str, int)) and k not in ("name", "kind")}
+    args.setdefault("url", folder_url)
+    return args
+
+
+def _names_from(payload) -> list[str]:
+    """File names out of a list-items result, whatever it is wrapped in."""
+    if isinstance(payload, dict):
+        for key in ("items", "files", "value", "children", "documents", "results"):
+            if isinstance(payload.get(key), list):
+                payload = payload[key]
+                break
+    if not isinstance(payload, list):
+        return []
+    names = []
+    for item in payload:
+        if isinstance(item, str):
+            names.append(item)
+        elif isinstance(item, dict):
+            if item.get("kind") not in (None, "file") or item.get("folder"):
+                continue  # a subfolder, not a document
+            name = item.get("name") or item.get("displayName") or item.get("title")
+            if name:
+                names.append(str(name))
+    return names
+
+
+def _inline_bytes(payload) -> bytes | None:
+    import base64
+
+    if not isinstance(payload, dict):
+        return None
+    for key in ("content_base64", "contentBytes", "base64", "data"):
+        raw = payload.get(key)
+        if isinstance(raw, str) and raw:
+            try:
+                return base64.b64decode(raw, validate=True)
+            except Exception:
+                return None
+    return None
+
+
+def _download_link(payload) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("download_url", "downloadUrl",
+                "@microsoft.graph.downloadUrl", "url", "href"):
+        link = payload.get(key)
+        if isinstance(link, str) and link.startswith("http"):
+            return link
+    return ""
+
+
 def get_source(folder_url: str | None = None):
-    """Pick the source from .env: DOC_SOURCE=local (default) or mcp.
+    """Pick the source from .env.
+
+    DOC_SOURCE=local (default) reads the samples folder. DOC_SOURCE=mcp
+    goes to SharePoint, and MCP_PROTOCOL decides how:
+      rest (default) — the bespoke contract the local fake implements
+      mcp            — the real Model Context Protocol, for the enterprise
+                       gateway. Set this on Windows.
 
     folder_url is a run's snapshotted SharePoint folder; None means the
     current on-screen setting. The local development source ignores it.
     """
-    kind = os.getenv("DOC_SOURCE", "local").lower()
-    return McpSource(folder_url) if kind == "mcp" else LocalFolderSource()
+    if os.getenv("DOC_SOURCE", "local").lower() != "mcp":
+        return LocalFolderSource()
+    if os.getenv("MCP_PROTOCOL", "rest").lower() == "mcp":
+        return RealMcpSource(folder_url)
+    return McpSource(folder_url)
