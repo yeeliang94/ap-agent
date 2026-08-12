@@ -1,16 +1,21 @@
 """Stage 4 — Checks: judgment by AI, arithmetic by code.
 
-The AI decides WHICH policy clause applies to a claim (and must quote it).
-Code then does everything mechanical: listing lookups, date age, cap
-arithmetic, duplicates. "Not sure" from the AI always becomes a flag —
-never a silent pass.
+The AI decides WHICH policy clause applies to a claim — and its quoted
+policy line is verified against the real clause text, because a citation
+the reviewer can't trust is worse than none. Code does everything
+mechanical: listing lookups (number AND status AND amount AND vendor),
+date age, duplicates, cap arithmetic. "Not sure" from the AI always
+becomes a flag — never a silent pass. Documents the pipeline couldn't
+place (unknown kind, orphan receipts) are flagged too: nothing uploaded
+may silently vanish.
 """
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime
 
-from ..model_layer import create_agent
+from ..model_layer import USAGE_LIMITS, create_agent
 from ..schemas_ai import CategoryJudgment
 from . import reference
 
@@ -20,7 +25,8 @@ OLD_DAYS = 90
 
 _JUDGE_INSTRUCTIONS = (
     "You categorise ONE staff expense claim against a client's expense policy. "
-    "Pick the applicable clause and quote the exact policy line you relied on. "
+    "Pick the applicable clause and quote the exact policy line you relied on, "
+    "verbatim — it is checked against the policy text. "
     "sure=true when exactly one clause plainly covers this kind of expense — "
     "minor wording differences (subscription vs subsidy, taxi vs e-hailing) do "
     "NOT make it unsure. sure=false ONLY when: two clauses could genuinely "
@@ -35,11 +41,16 @@ def _mk_flag(doc_id: str, code: str, reason: str, basis: str = "") -> dict:
     return {"document_id": doc_id, "code": code, "reason": reason, "basis": basis}
 
 
+def _norm(text: str) -> str:
+    """Lowercase and collapse whitespace/punctuation, for tolerant comparison."""
+    return re.sub(r"[^a-z0-9%]+", " ", str(text).lower()).strip()
+
+
 async def run_checks(docs: list) -> list[dict]:
     """Return flag dicts for everything a human must decide."""
     flags: list[dict] = []
     listing = reference.load_payment_listing()
-    listed_numbers = {r["invoice_number"] for r in listing}
+    listing_by_number = {r["invoice_number"]: r for r in listing}
     clauses = reference.load_policy_clauses()
     today = date.today()
 
@@ -49,7 +60,7 @@ async def run_checks(docs: list) -> list[dict]:
         if d.kind != "invoice" or d.status != "extracted":
             continue
         f = d.fields
-        number = str(f.get("invoice_number", ""))
+        number = str(f.get("invoice_number", "")).strip()
 
         if number in seen_numbers:
             flags.append(_mk_flag(d.id, "DUPLICATE",
@@ -58,10 +69,37 @@ async def run_checks(docs: list) -> list[dict]:
                 "Rule: one invoice number may appear only once per batch."))
         seen_numbers.setdefault(number, d.filename)
 
-        if number not in listed_numbers:
+        listed = listing_by_number.get(number)
+        if listed is None:
             flags.append(_mk_flag(d.id, "NOT_IN_LISTING",
                 f"Invoice {number} ({f.get('vendor')}) is not in the payment listing.",
                 "Rule: every invoice must match a planned-payment row in the listing."))
+        else:
+            # A number match alone is not enough — the matched row must
+            # actually be this invoice, and must not already be paid.
+            if "paid" in str(listed["status"]).lower():
+                flags.append(_mk_flag(d.id, "ALREADY_PAID",
+                    f"Invoice {number} matches a listing row marked "
+                    f"'{listed['status']}' — paying it again would be a duplicate payment.",
+                    "Rule: invoices matching a Paid listing row need review."))
+            if abs(float(f.get("amount", 0)) - listed["amount"]) > 0.01:
+                flags.append(_mk_flag(d.id, "AMOUNT_MISMATCH",
+                    f"Invoice {number}: document reads {f.get('currency')} "
+                    f"{f.get('amount'):.2f} but the listing row says {listed['amount']:.2f}.",
+                    "Rule: extracted amount must equal the listing row's amount."))
+            v_doc, v_listing = _norm(f.get("vendor", "")), _norm(listed["vendor"])
+            if v_doc and v_listing and v_doc not in v_listing and v_listing not in v_doc:
+                flags.append(_mk_flag(d.id, "VENDOR_MISMATCH",
+                    f"Invoice {number}: document vendor '{f.get('vendor')}' does not "
+                    f"match the listing row's vendor '{listed['vendor']}'.",
+                    "Rule: the matched listing row must belong to the same vendor."))
+
+        if str(f.get("currency", "")).upper() != "MYR":
+            flags.append(_mk_flag(d.id, "NON_MYR_INVOICE",
+                f"Invoice {number} is in {f.get('currency')} — the Maybank file "
+                "carries RM amounts only, so this invoice is excluded from the "
+                "bank block and needs separate handling.",
+                "Rule: only MYR invoices go into the Maybank upload rows."))
 
         try:
             inv_date = datetime.strptime(str(f.get("date", "")), "%Y-%m-%d").date()
@@ -76,7 +114,7 @@ async def run_checks(docs: list) -> list[dict]:
                 f"Could not read a valid date on invoice {number} "
                 f"(got: {f.get('date')!r})."))
 
-    # ---- claims: AI picks the clause, code does the cap math ----------
+    # ---- claims: AI picks the clause, code verifies and does the math --
     policy_text = "\n".join(
         f"Clause {c['clause']} [{c['category']}] (cap {c['currency']} {c['cap']:.2f}): {c['text']}"
         for c in clauses
@@ -87,12 +125,14 @@ async def run_checks(docs: list) -> list[dict]:
         if d.kind != "claim" or d.status != "extracted":
             continue
         f = d.fields
-        agent = create_agent("judge", CategoryJudgment, _JUDGE_INSTRUCTIONS)
+        agent = create_agent("judge", CategoryJudgment, _JUDGE_INSTRUCTIONS,
+                             temperature=0)
         try:
             result = await agent.run(
-                f"Client ABC's expense policy:\n{policy_text}\n\n"
+                f"The client's expense policy:\n{policy_text}\n\n"
                 f"The claim:\n{json.dumps(f, indent=2)}\n\n"
-                "Which clause applies?"
+                "Which clause applies?",
+                usage_limits=USAGE_LIMITS,
             )
         except Exception as exc:
             flags.append(_mk_flag(d.id, "JUDGMENT_FAILED",
@@ -114,6 +154,26 @@ async def run_checks(docs: list) -> list[dict]:
                 f"{f.get('claimant')}'s claim.",))
             continue
 
+        # Trust, then verify: the quoted line must actually appear in the
+        # cited clause, and the named category must be that clause's
+        # category. A fabricated citation shown to a reviewer as authority
+        # would be worse than no citation.
+        if _norm(judgment.quoted_policy_line) not in _norm(clause["text"]):
+            flags.append(_mk_flag(d.id, "QUOTE_MISMATCH",
+                f"For {f.get('claimant')}'s claim, the AI quoted a policy line "
+                f"that does not appear in clause {clause['clause']}. Its "
+                f"categorisation cannot be trusted without a human look.",
+                f"AI quoted: \"{judgment.quoted_policy_line}\" — actual clause "
+                f"{clause['clause']}: \"{clause['text']}\""))
+            continue
+        if _norm(judgment.category) != _norm(clause["category"]):
+            flags.append(_mk_flag(d.id, "AMBIGUOUS_CATEGORY",
+                f"AI named category '{judgment.category}' but cited clause "
+                f"{clause['clause']}, which is '{clause['category']}'. "
+                "Inconsistent — needs a human decision.",
+                f"Policy {clause['clause']}: \"{clause['text']}\""))
+            continue
+
         # Cap arithmetic — plain code, so it is repeatable and auditable.
         if str(f.get("currency", "")).upper() != clause["currency"].upper():
             flags.append(_mk_flag(d.id, "CURRENCY_MISMATCH",
@@ -132,6 +192,19 @@ async def run_checks(docs: list) -> list[dict]:
             flags.append(_mk_flag(d.id, "RECEIPT_MISMATCH",
                 f"Receipts for {f.get('claimant')}'s claim do not support the claimed amount.",
                 "Rule: every claim needs receipts matching the amount."))
+
+    # ---- nothing may silently vanish -----------------------------------
+    for d in docs:
+        if d.kind == "unknown":
+            flags.append(_mk_flag(d.id, "UNCLASSIFIED",
+                f"{d.filename} does not look like an invoice, claim, or receipt. "
+                "It is excluded from all output until a person decides what it is.",
+                "Rule: every uploaded file must be accounted for."))
+        elif d.kind == "receipt" and not d.parent_id:
+            flags.append(_mk_flag(d.id, "UNATTACHED_RECEIPT",
+                f"{d.filename} is a receipt that could not be matched to any "
+                "claim in this batch.",
+                "Rule: every receipt must belong to a claim."))
 
     # ---- both kinds: reading confidence --------------------------------
     for d in docs:

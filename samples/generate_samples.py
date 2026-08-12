@@ -47,13 +47,14 @@ CLAIMS = [
 ]
 
 GROUND_TRUTH = {
-    "documents": {},   # filename -> {"kind": ..., "fields": {...}}
+    "documents": {},   # filename -> {"kind": ..., "fields": {...}, "in_listing": bool}
     "expected_flags": [
         {"code": "OLD_DATED",        "match": "MX-2214",  "why": "invoice dated 2026-01-12, 7 months old"},
         {"code": "NOT_IN_LISTING",   "match": "ARW-0808", "why": "invoice absent from July payment listing"},
         {"code": "OVER_CAP",         "match": "Tan W.L.", "why": "wi-fi USD 95 exceeds USD 80 cap (policy 4.2)"},
         {"code": "AMBIGUOUS_CATEGORY", "match": "S. Priya", "why": "team lunch: staff welfare vs client entertainment (policy 5.1)"},
         {"code": "LOW_CONFIDENCE",   "match": "CP-3302",  "why": "deliberately blurry scan"},
+        {"code": "UNCLASSIFIED",     "match": "memo",     "why": "an office memo is not an AP document; must be surfaced, not dropped"},
     ],
 }
 
@@ -188,6 +189,8 @@ def main() -> None:
             "kind": "invoice",
             "fields": {"vendor": vendor, "invoice_number": number,
                        "date": date, "amount": amount, "currency": "MYR"},
+            # MX-2214 is excluded from the listing on purpose (see _payment_listing)
+            "in_listing": _in_listing and number != "MX-2214",
         }
 
     for i, (claimant, desc, amount, currency, shop) in enumerate(CLAIMS, 1):
@@ -201,6 +204,16 @@ def main() -> None:
                        "amount": amount, "currency": currency},
         }
         GROUND_TRUTH["documents"][rname] = {"kind": "receipt", "fields": {"vendor": shop}}
+
+    # One document that is none of the three kinds — the pipeline must
+    # surface it as UNCLASSIFIED, never silently drop it.
+    memo = Image.new("RGB", (900, 500), "white")
+    d = ImageDraw.Draw(memo)
+    d.text((60, 60), "INTERNAL MEMO", font=FONT_BIG, fill="black")
+    d.text((60, 140), "Reminder: office closed this Friday", font=FONT, fill="black")
+    d.text((60, 180), "for the building maintenance day.", font=FONT, fill="black")
+    memo.save(BATCH / "memo.png")
+    GROUND_TRUTH["documents"]["memo.png"] = {"kind": "unknown", "fields": {}}
 
     _payment_listing()
     _policy_sheet()

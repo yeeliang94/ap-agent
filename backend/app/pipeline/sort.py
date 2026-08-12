@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pydantic_ai import BinaryContent
 
-from ..model_layer import create_agent
+from ..model_layer import USAGE_LIMITS, create_agent
 from ..schemas_ai import SortResult
 
 _INSTRUCTIONS = (
@@ -26,7 +26,8 @@ async def sort_document(path: Path, first_page_png: bytes) -> SortResult:
     agent = create_agent("sort", SortResult, _INSTRUCTIONS)
     result = await agent.run(
         ["Classify this document.",
-         BinaryContent(data=first_page_png, media_type="image/png")]
+         BinaryContent(data=first_page_png, media_type="image/png")],
+        usage_limits=USAGE_LIMITS,
     )
     return result.output
 

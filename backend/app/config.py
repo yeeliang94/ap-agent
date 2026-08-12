@@ -40,6 +40,17 @@ EXTRACT_CONCURRENCY = 5
 # make more than this many requests (their limit is 40; ours are tiny anyway).
 MAX_AGENT_REQUESTS = 40
 
+# The single client this MVP is configured for. The API rejects any other
+# name — silently applying Client ABC's policy to a different client's
+# documents would be worse than an error.
+CLIENT_NAME = os.getenv("CLIENT_NAME", "Client ABC")
+
+# Upload quotas: generous for a monthly AP batch, small enough that a wrong
+# file (or a zip bomb) cannot exhaust memory or the AI budget.
+MAX_ZIP_MB = 50          # compressed upload size
+MAX_FILE_MB = 20         # any single document, uncompressed
+MAX_BATCH_FILES = 200    # documents per batch
+
 
 def ensure_dirs() -> None:
     """Create the data folders on first start so nothing crashes on a fresh clone."""

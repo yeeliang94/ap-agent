@@ -74,8 +74,16 @@ Rules inherited from the enterprise repo, already honored in code:
 ## Honest limitations (MVP)
 
 - Single user, no login; "reviewer" is hardcoded in the audit trail.
-- One client config (Client ABC's policy sheet); per-client config files are designed but not built.
-- A blurred scan can still be read *confidently wrong* in principle — the listing
-  lookup caught our test case, but production should add a second-read
-  comparison for low-quality scans before trusting amounts.
-- Claim receipts pair by filename convention; unmatched receipts are left visible, not guessed.
+- One client config, enforced: the API rejects any client other than the
+  configured one. Per-client config files are designed but not built.
+- Bank rows never contain account numbers — there is no vendor master yet,
+  so every account cell says `[ACCOUNT UNKNOWN - fill from vendor master]`.
+  A vendor master reference file is the intended next data source.
+- Reviewers can accept or exclude a flagged document, but cannot *correct*
+  an extracted value in the app yet (e.g. fix a misread date). An
+  untrustworthy read must be excluded and handled outside the app.
+- Every document is read twice ("double-read"): disagreement between the two
+  independent reads marks the document low-confidence, because models can
+  misread degraded scans *confidently*. This doubles extraction cost
+  (~US$0.10 per demo batch) and is worth every cent.
+- Claim receipts pair by filename convention; unmatched receipts are flagged, not guessed.

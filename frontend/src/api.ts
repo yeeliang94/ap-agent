@@ -34,8 +34,10 @@ export interface FlagItem {
 export interface Outputs {
   listing_header: string;
   listing_rows: string[];
+  already_listed: number;
   bank_header: string;
   bank_rows: string[];
+  excluded_non_myr: number;
   filenames: string[];
   new_vendors: string[];
   totals: { listing: number; bank: number; match: boolean };

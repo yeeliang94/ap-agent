@@ -173,11 +173,11 @@ function Output({ run }: { run: RunDetailData }) {
   return (
     <div>
       <div className="totals">
-        <TotalCard label="Payment listing total" value={`RM ${out.totals.listing.toFixed(2)}`} />
+        <TotalCard label="New listing rows total" value={`RM ${out.totals.listing.toFixed(2)}`} />
         <TotalCard label="Bank entries total" value={`RM ${out.totals.bank.toFixed(2)}`} />
         <TotalCard
           label="Reconciliation"
-          value={out.totals.match ? "Totals match ✓" : "MISMATCH ✗"}
+          value={out.totals.match ? "Totals verified ✓" : "MISMATCH ✗"}
           good={out.totals.match}
         />
       </div>
@@ -187,14 +187,16 @@ function Output({ run }: { run: RunDetailData }) {
         </p>
       )}
       <CopyBlock
-        title={`Payment listing rows (${out.listing_rows.length})`}
-        hint="Paste into the payment listing workbook — one value per cell"
+        title={`New payment listing rows (${out.listing_rows.length})`}
+        hint={`Only invoices not already in the listing${
+          out.already_listed ? ` — ${out.already_listed} already listed, nothing to paste for those` : ""
+        }`}
         text={[out.listing_header, ...out.listing_rows].join("\n")}
         preview={out.listing_rows}
       />
       <CopyBlock
         title={`Maybank entry rows (${out.bank_rows.length})`}
-        hint="Format learned from the uploaded Maybank template"
+        hint="Format learned from the uploaded Maybank template — account numbers must be filled from the vendor master"
         text={[out.bank_header, ...out.bank_rows].join("\n")}
         preview={out.bank_rows}
       />

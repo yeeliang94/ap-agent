@@ -34,3 +34,13 @@ def health() -> dict:
 from .routes import router  # noqa: E402
 
 app.include_router(router, prefix="/api")
+
+# On Windows the frontend is built once (start.bat) and served from here,
+# so one process serves the whole app. /api routes above take precedence.
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+
+from . import config  # noqa: E402
+
+_dist = config.REPO_ROOT / "frontend" / "dist"
+if _dist.is_dir():
+    app.mount("/", StaticFiles(directory=_dist, html=True), name="frontend")

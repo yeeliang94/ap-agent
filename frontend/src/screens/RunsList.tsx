@@ -13,7 +13,7 @@ const STAGE_LABEL: Record<string, string> = {
 // Screen A: your runs. A run starts only when you upload a batch here.
 export default function RunsList({ onOpen }: { onOpen: (id: string) => void }) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
-  const [client, setClient] = useState("Client ABC");
+  const client = "Client ABC"; // single-client MVP; becomes per-client config later
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -53,11 +53,9 @@ export default function RunsList({ onOpen }: { onOpen: (id: string) => void }) {
           <b>Start a new run</b>
           <span className="sub">Upload a client's batch zip — nothing runs until you do</span>
         </div>
-        <input
-          value={client}
-          onChange={(e) => setClient(e.target.value)}
-          placeholder="Client name"
-        />
+        {/* Single-client MVP: the backend rejects any other name, so the
+            field is fixed rather than pretending to be a choice. */}
+        <input value={client} readOnly title="Single-client MVP — per-client config comes later" />
         <input
           ref={fileInput}
           type="file"

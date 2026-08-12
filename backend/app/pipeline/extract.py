@@ -12,7 +12,7 @@ from pathlib import Path
 from pydantic_ai import BinaryContent
 
 from .. import config
-from ..model_layer import create_agent
+from ..model_layer import USAGE_LIMITS, create_agent
 from ..schemas_ai import ClaimFields, InvoiceFields
 from .images import document_to_pngs
 
@@ -41,6 +41,14 @@ async def extract_all(docs: list, workspace: Path, on_progress) -> None:
         if d.kind == "receipt" and d.parent_id:
             receipts_by_parent.setdefault(d.parent_id, []).append(d)
 
+    # Fields whose disagreement between two independent reads marks the
+    # whole document as untrustworthy. These identify the document and the
+    # money — exactly what must never be confidently wrong.
+    KEY_FIELDS = {
+        "invoice": ("vendor", "invoice_number", "date", "amount", "currency"),
+        "claim": ("claimant", "amount", "currency"),
+    }
+
     async def worker(doc) -> None:
         async with sem:
             try:
@@ -50,15 +58,32 @@ async def extract_all(docs: list, workspace: Path, on_progress) -> None:
                 ]
                 if doc.kind == "invoice":
                     agent = create_agent("extract", InvoiceFields, _INVOICE_INSTRUCTIONS)
-                    result = await agent.run(["Extract the invoice fields.", *pages])
+                    prompt = ["Extract the invoice fields.", *pages]
                 else:  # claim — include its receipts in the same look
                     for r in receipts_by_parent.get(doc.id, []):
                         for png in document_to_pngs(workspace / r.filename):
                             pages.append(BinaryContent(data=png, media_type="image/png"))
                     agent = create_agent("extract", ClaimFields, _CLAIM_INSTRUCTIONS)
-                    result = await agent.run(["Extract the claim fields.", *pages])
-                doc.fields = result.output.model_dump(exclude={"low_confidence"})
-                doc.confidence = result.output.low_confidence
+                    prompt = ["Extract the claim fields.", *pages]
+
+                # Double-read: two INDEPENDENT reads of the same document.
+                # A crisp document reads identically twice; a degraded one
+                # doesn't — and models misread degraded scans confidently,
+                # so self-reported doubt alone cannot be trusted.
+                r1, r2 = await asyncio.gather(
+                    agent.run(prompt, usage_limits=USAGE_LIMITS),
+                    agent.run(prompt, usage_limits=USAGE_LIMITS),
+                )
+                first, second = r1.output, r2.output
+                doc.fields = first.model_dump(exclude={"low_confidence"})
+                confidence = {**second.low_confidence, **first.low_confidence}
+                for key in KEY_FIELDS[doc.kind]:
+                    v1, v2 = getattr(first, key), getattr(second, key)
+                    if v1 != v2:
+                        confidence[key] = (
+                            f"two independent reads disagree: {v1!r} vs {v2!r}"
+                        )
+                doc.confidence = confidence
                 doc.status = "extracted"
             except Exception as exc:  # one bad document must not sink the batch
                 doc.status = "error"

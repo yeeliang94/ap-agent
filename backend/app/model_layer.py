@@ -10,8 +10,14 @@ from __future__ import annotations
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.usage import UsageLimits
 
 from . import config
+
+# Passed to every agent.run(): hard cap on requests per conversation,
+# counting retries. Mirrors the enterprise 40-request rule — declared AND
+# enforced, so a retry loop can never multiply spend unnoticed.
+USAGE_LIMITS = UsageLimits(request_limit=config.MAX_AGENT_REQUESTS)
 
 # Which .env model name each pipeline role uses.
 _ROLE_MODELS = {
@@ -38,16 +44,23 @@ def create_model(role: str) -> OpenAIChatModel:
     return OpenAIChatModel(model_name, provider=provider)
 
 
-def create_agent(role: str, output_type: type, instructions: str) -> Agent:
+def create_agent(role: str, output_type: type, instructions: str,
+                 temperature: float | None = None) -> Agent:
     """An Agent = model + instructions + a required answer shape.
 
     output_type is a Pydantic class (a fill-in-the-blanks form): the model's
     reply MUST fit it — wrong shapes are rejected and retried automatically.
     That is our first validation layer, enforced before any human looks.
+
+    temperature=0 pins the model to its most likely answer — used for the
+    judge, where categorisation should be stable reasoning. Extraction
+    deliberately keeps the default: run-to-run variance on a blurry scan is
+    exactly what the double-read uses to detect an untrustworthy read.
     """
     return Agent(
         create_model(role),
         output_type=output_type,
         instructions=instructions,
         retries=2,  # malformed answers get two more chances, then error out
+        model_settings=None if temperature is None else {"temperature": temperature},
     )

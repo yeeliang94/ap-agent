@@ -63,6 +63,20 @@ Build a working thin slice of the AP agent: a user uploads a small demo batch (i
 
 - [x] 🟩 **Step 13: Windows handoff pack** — `README.md` (local-vs-enterprise .env table, inherited enterprise rules, 4-point Windows test checklist mapped to design doc §9), `start.sh` + `start.bat` (sets `PYTHONUTF8=1`), `.env.example` extended with `DOC_SOURCE`/`MCP_URL`/`SHAREPOINT_FOLDER_URL`.
 
+## Peer-review fix pass (2026-08-12, after MVP completion)
+
+An external peer review found 12 issues; 10 confirmed, 2 partially valid, 0 invalid. All fixed and re-verified (two consecutive clean end-to-end runs):
+- **No synthesized bank accounts** (was CRITICAL): every account cell is an explicit `[ACCOUNT UNKNOWN]` marker until a vendor master exists.
+- **Server-side human gate**: the API returns no outputs while any flag is open.
+- **Deeper listing match**: Paid-status, amount, and vendor of the matched row are checked; listing block emits only genuinely new rows.
+- **Real reconciliation**: totals recomputed independently from the emitted text with `Decimal`; bank rows built by template-header mapping (unknown headers refuse loudly); non-MYR invoices flagged out of the bank block.
+- **Double-read extraction** (promoted from follow-up after three runs showed *confident* misreads of the blurry scan): two independent reads per document; key-field disagreement ⇒ low-confidence flag. Judge runs at temperature 0.
+- **Citation verification**: the AI's quoted policy line must appear in the cited clause; category must match the clause; strict field constraints (positive finite amounts, real dates, currency codes).
+- **Nothing vanishes**: unknown documents and orphan receipts are flagged; unknown docs never enter output.
+- Plus: zip quotas, enforced 40-request cap, fixed-client guard, redacted source errors with fresh-URL download retries, TSV/formula/filename sanitization, FastAPI serves `frontend/dist` so `start.bat` yields a working app.
+- **Verifier hardened**: asserts all 56 declared fields (correct-or-excused), tests the gate, recomputes totals independently, simulates a competent reviewer (excludes hard-to-read documents that also contradict the listing), reports false positives.
+- **Deferred follow-up:** audited in-app field correction at review time.
+
 ## Rollback Plan
 - Every step lands as its own git commit — `git revert` any step cleanly.
 - The app never writes to SharePoint or user workbooks, so there is no external state to undo; worst case is deleting the local SQLite file and per-run workspace folders.

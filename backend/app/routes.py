@@ -22,6 +22,16 @@ ALLOWED = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
 
 @router.post("/runs")
 async def create_run(client: str = Form(...), batch: UploadFile = File(...)) -> dict:
+    # Single-client MVP: applying the configured client's policy to a
+    # different client's documents would be silent nonsense — refuse.
+    if client.strip() != config.CLIENT_NAME:
+        raise HTTPException(
+            400, f"This installation is configured for {config.CLIENT_NAME!r} only."
+        )
+    payload = await batch.read()
+    if len(payload) > config.MAX_ZIP_MB * 1024 * 1024:
+        raise HTTPException(400, f"Zip exceeds the {config.MAX_ZIP_MB} MB limit.")
+
     db = SessionLocal()
     try:
         run = Run(client=client)
@@ -31,9 +41,10 @@ async def create_run(client: str = Form(...), batch: UploadFile = File(...)) -> 
         workspace = config.RUNS_DIR / run.id
         workspace.mkdir(parents=True)
         zip_path = workspace / "upload.zip"
-        zip_path.write_bytes(await batch.read())
+        zip_path.write_bytes(payload)
 
         skipped: list[str] = []
+        n_files = 0
         try:
             with zipfile.ZipFile(zip_path) as z:
                 for info in z.infolist():
@@ -43,6 +54,16 @@ async def create_run(client: str = Form(...), batch: UploadFile = File(...)) -> 
                     if Path(name).suffix.lower() not in ALLOWED:
                         skipped.append(name)
                         continue
+                    # Quotas checked BEFORE decompressing each entry — a zip
+                    # bomb or runaway batch stops here, not in memory.
+                    if info.file_size > config.MAX_FILE_MB * 1024 * 1024:
+                        skipped.append(f"{name} (over {config.MAX_FILE_MB} MB)")
+                        continue
+                    n_files += 1
+                    if n_files > config.MAX_BATCH_FILES:
+                        raise HTTPException(
+                            400, f"Batch exceeds {config.MAX_BATCH_FILES} documents."
+                        )
                     (workspace / name).write_bytes(z.read(info))
                     db.add(Document(run_id=run.id, filename=name))
         except zipfile.BadZipFile:
@@ -82,6 +103,7 @@ def get_run(run_id: str) -> dict:
             raise HTTPException(404, "No such run.")
         docs = db.query(Document).filter(Document.run_id == run_id).all()
         flags = db.query(Flag).filter(Flag.run_id == run_id).all()
+        open_flags = [f for f in flags if f.status == "open"]
         return {
             **_run_summary(db, run),
             "documents": [
@@ -96,7 +118,10 @@ def get_run(run_id: str) -> dict:
                  "resolution": f.resolution}
                 for f in flags
             ],
-            "outputs": run.outputs,
+            # The human gate, enforced server-side: no copy-ready output
+            # leaves the API while any flag is undecided. The frontend lock
+            # is a convenience; this is the rule.
+            "outputs": run.outputs if (run.status == "ready" and not open_flags) else {},
         }
     finally:
         db.close()
@@ -163,7 +188,14 @@ def decide_flag(run_id: str, flag_id: str, body: dict) -> dict:
             f.document_id
             for f in db.query(Flag).filter(Flag.run_id == run_id, Flag.status == "rejected")
         }
-        run.outputs = output_builder.build_outputs(docs, excluded)
+        # Documents the pipeline couldn't place are never in the output,
+        # whatever the reviewer decided about their flag.
+        excluded |= {d.id for d in docs if d.kind == "unknown"}
+        try:
+            run.outputs = output_builder.build_outputs(docs, excluded)
+        except Exception as exc:
+            db.commit()  # the decision itself still stands
+            raise HTTPException(500, f"Decision recorded, but output rebuild failed: {exc}")
         db.commit()
         return {"ok": True}
     finally:

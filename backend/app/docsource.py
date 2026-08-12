@@ -7,6 +7,7 @@ Swapping source = changing DOC_SOURCE in .env, nothing else.
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 from pathlib import Path
@@ -14,6 +15,11 @@ from pathlib import Path
 import httpx
 
 from . import config
+
+# Full failure detail (which may contain URLs) goes to the server log ONLY.
+# Anything raised to callers — and therefore possibly shown in the UI via
+# run.error — is generic: temporary download URLs are bearer-like secrets.
+log = logging.getLogger("docsource")
 
 
 class SourceUnavailable(Exception):
@@ -67,27 +73,38 @@ class McpSource:
                 r.raise_for_status()
                 return r.json()
             except httpx.HTTPError as exc:
-                last_error = str(exc)
+                # Exception text can contain URLs — log it, don't raise it.
+                log.warning("MCP call %s attempt %d failed: %s", tool, attempt, exc)
+                last_error = type(exc).__name__
                 time.sleep(0.2 * attempt)
         raise SourceUnavailable(
             f"SharePoint source unavailable after {self.RETRIES} attempts "
-            f"calling {tool}: {last_error}"
+            f"calling {tool} ({last_error}). Details are in the server log."
         )
 
     def get_reference(self, name: str) -> bytes:
         resolved = self._call("resolve_folder_url", {"url": self.folder_url})
-        meta = self._call("get_document_metadata", {
-            "site_id": resolved["site_id"], "library": resolved["library"],
-            "item_id": name,
-        })
-        # The download URL is a temporary bearer-like link: use it once,
-        # never log it, never pass it to a model.
-        try:
-            r = httpx.get(meta["download_url"], timeout=30)
-            r.raise_for_status()
-            return r.content
-        except httpx.HTTPError as exc:
-            raise SourceUnavailable(f"Download of {name!r} failed: {exc}")
+        # Download URLs are temporary, bearer-like, and single-use: a retry
+        # must fetch FRESH metadata for a fresh link, and neither the link
+        # nor raw exception text may leave the server layer.
+        last_error = ""
+        for attempt in range(1, self.RETRIES + 1):
+            meta = self._call("get_document_metadata", {
+                "site_id": resolved["site_id"], "library": resolved["library"],
+                "item_id": name,
+            })
+            try:
+                r = httpx.get(meta["download_url"], timeout=30)
+                r.raise_for_status()
+                return r.content
+            except httpx.HTTPError as exc:
+                log.warning("download of %s attempt %d failed: %s", name, attempt, exc)
+                last_error = type(exc).__name__
+                time.sleep(0.2 * attempt)
+        raise SourceUnavailable(
+            f"Download of {name!r} failed after {self.RETRIES} attempts "
+            f"({last_error}). Details are in the server log."
+        )
 
 
 def get_source():

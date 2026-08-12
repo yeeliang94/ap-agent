@@ -16,4 +16,4 @@ if not exist frontend\node_modules (
 )
 cd frontend && call npm run build && cd ..
 start "ap-agent-backend" backend\.venv\Scripts\uvicorn app.main:app --port 8002 --app-dir backend
-echo Backend starting at http://localhost:8002 - serve frontend\dist or run npm run dev.
+echo App starting at http://localhost:8002 (backend serves the built frontend from frontend\dist).
