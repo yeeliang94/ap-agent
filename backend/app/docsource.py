@@ -69,6 +69,14 @@ class McpSource:
         from . import settings_store
 
         self.base = os.getenv("MCP_URL", "http://127.0.0.1:8003")
+        # Optional auth for the enterprise MCP gateway. The scheme differs
+        # per deployment, so it is configured rather than assumed: set
+        # MCP_AUTH_HEADER (e.g. "Authorization") and MCP_AUTH_VALUE (e.g.
+        # "Bearer <token>") in .env. Unset = no header, which is correct
+        # for the local fake MCP.
+        header = os.getenv("MCP_AUTH_HEADER", "").strip()
+        value = os.getenv("MCP_AUTH_VALUE", "").strip()
+        self.headers = {header: value} if header and value else {}
         # Callers processing a run pass that run's snapshotted folder URL;
         # otherwise fall back to the on-screen setting (which itself falls
         # back to the SHAREPOINT_FOLDER_URL .env value until first save).
@@ -76,7 +84,10 @@ class McpSource:
         # Logged so a misconfigured .env is visible at a glance. These are
         # ordinary configured addresses, not the temporary download links
         # that the rest of this class is careful never to expose.
-        log.info("MCP source: base=%s folder=%s", self.base, self.folder_url)
+        # Whether auth is configured is logged; the value never is.
+        log.info("MCP source: base=%s folder=%s auth_header=%s",
+                 self.base, self.folder_url,
+                 next(iter(self.headers), "(none set)"))
 
     def _call(self, tool: str, body: dict) -> dict:
         url = f"{self.base}/tools/{tool}"
@@ -85,7 +96,7 @@ class McpSource:
         for attempt in range(1, self.RETRIES + 1):
             attempts = attempt
             try:
-                r = httpx.post(url, json=body, timeout=15)
+                r = httpx.post(url, json=body, timeout=15, headers=self.headers)
                 if r.status_code == 500 and "ReadError" in r.text:
                     last_error = "HTTP 500 ReadError"  # known-transient: retry
                     log.warning("MCP %s attempt %d: transient ReadError from %s",

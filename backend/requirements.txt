@@ -7,6 +7,12 @@ openpyxl>=3.1
 pillow>=10.0
 python-multipart>=0.0.9
 httpx>=0.27
+# Makes Python trust the OS certificate store. Required on the enterprise
+# Windows machine, whose HTTPS traffic is inspected by a corporate root
+# certificate that Python's bundled CA list does not contain. It was
+# already present as a transitive dependency; pinned here because the app
+# now calls it directly and must not lose it to an upstream change.
+truststore>=0.9
 pytest>=8.0
 pytest-asyncio>=0.23
 pymupdf>=1.24

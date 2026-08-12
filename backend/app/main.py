@@ -14,6 +14,33 @@ from .db import init_db
 app = FastAPI(title="AP Agent")
 
 
+def _configure_tls() -> None:
+    """Trust the certificates the operating system trusts.
+
+    Corporate networks inspect HTTPS traffic by re-signing it with their
+    own root certificate. Python ships a fixed list of public certificate
+    authorities that cannot contain a private corporate one, so every
+    HTTPS call — SharePoint MCP and the AI proxy alike — fails at the
+    handshake. truststore redirects certificate checks to the OS store
+    (the Windows certificate store), where the corporate root already is.
+
+    Applies process-wide, so it must run before the first HTTPS call.
+    Missing or unsupported: log loudly and continue — direct-internet
+    development does not need it, and a hard failure here would block a
+    working setup.
+    """
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+        logging.getLogger("tls").info("using the OS certificate store")
+    except Exception as exc:
+        logging.getLogger("tls").warning(
+            "could not use the OS certificate store (%s). HTTPS to hosts "
+            "behind a corporate certificate will fail with a certificate "
+            "error; pip install truststore to fix.", exc)
+
+
 def _configure_logging() -> None:
     """Make our own log lines visible, with a timestamp and the module name.
 
@@ -46,6 +73,7 @@ app.add_middleware(
 @app.on_event("startup")
 def _startup() -> None:
     _configure_logging()
+    _configure_tls()  # after logging, so its own result is visible
     init_db()
 
 
