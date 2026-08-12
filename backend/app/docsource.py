@@ -44,6 +44,12 @@ class LocalFolderSource:
         return path.read_bytes()
 
 
+# Statuses where retrying cannot possibly help: the request itself is the
+# problem (wrong credentials, no permission, wrong path), not the connection.
+# 408 and 429 are deliberately absent — those ARE worth retrying.
+NO_RETRY_STATUSES = {400, 401, 403, 404, 405, 410, 501}
+
+
 class McpSource:
     """Fetch through the (fake or real) SharePoint MCP contract.
 
@@ -62,25 +68,47 @@ class McpSource:
         # otherwise fall back to the on-screen setting (which itself falls
         # back to the SHAREPOINT_FOLDER_URL .env value until first save).
         self.folder_url = folder_url or settings_store.get_setting("sharepoint_folder_url")
+        # Logged so a misconfigured .env is visible at a glance. These are
+        # ordinary configured addresses, not the temporary download links
+        # that the rest of this class is careful never to expose.
+        log.info("MCP source: base=%s folder=%s", self.base, self.folder_url)
 
     def _call(self, tool: str, body: dict) -> dict:
+        url = f"{self.base}/tools/{tool}"
         last_error = ""
+        attempts = 0
         for attempt in range(1, self.RETRIES + 1):
+            attempts = attempt
             try:
-                r = httpx.post(f"{self.base}/tools/{tool}", json=body, timeout=15)
+                r = httpx.post(url, json=body, timeout=15)
                 if r.status_code == 500 and "ReadError" in r.text:
-                    last_error = "ReadError"  # known-transient: retry a narrow request
+                    last_error = "HTTP 500 ReadError"  # known-transient: retry
+                    log.warning("MCP %s attempt %d: transient ReadError from %s",
+                                tool, attempt, url)
                     time.sleep(0.2 * attempt)
                     continue
                 r.raise_for_status()
                 return r.json()
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                # The status code is safe to surface; the response body is not
+                # (it can echo request URLs), so the body goes to the log only.
+                last_error = f"HTTP {status}"
+                log.warning("MCP %s attempt %d: HTTP %d from %s -- body: %.500s",
+                            tool, attempt, status, url, exc.response.text)
+                if status in NO_RETRY_STATUSES:
+                    break
+                time.sleep(0.2 * attempt)
             except httpx.HTTPError as exc:
                 # Exception text can contain URLs — log it, don't raise it.
-                log.warning("MCP call %s attempt %d failed: %s", tool, attempt, exc)
+                # exc_info gives the full chain, which is the only way to tell
+                # a TLS trust failure from a proxy refusal from a DNS miss.
                 last_error = type(exc).__name__
+                log.warning("MCP %s attempt %d failed calling %s: %s",
+                            tool, attempt, url, exc, exc_info=True)
                 time.sleep(0.2 * attempt)
         raise SourceUnavailable(
-            f"SharePoint source unavailable after {self.RETRIES} attempts "
+            f"SharePoint source unavailable after {attempts} attempt(s) "
             f"calling {tool} ({last_error}). Details are in the server log."
         )
 
@@ -99,9 +127,15 @@ class McpSource:
                 r = httpx.get(meta["download_url"], timeout=30)
                 r.raise_for_status()
                 return r.content
+            except httpx.HTTPStatusError as exc:
+                last_error = f"HTTP {exc.response.status_code}"
+                log.warning("download of %s attempt %d: HTTP %d",
+                            name, attempt, exc.response.status_code)
+                time.sleep(0.2 * attempt)
             except httpx.HTTPError as exc:
-                log.warning("download of %s attempt %d failed: %s", name, attempt, exc)
                 last_error = type(exc).__name__
+                log.warning("download of %s attempt %d failed: %s",
+                            name, attempt, exc, exc_info=True)
                 time.sleep(0.2 * attempt)
         raise SourceUnavailable(
             f"Download of {name!r} failed after {self.RETRIES} attempts "

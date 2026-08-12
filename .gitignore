@@ -13,6 +13,8 @@ frontend/dist/
 
 # Local data that must not reach GitHub
 backend/data/
+# Server logs record internal hostnames and response bodies on purpose.
+server-log.txt
 samples/generated/
 *.sqlite3
 

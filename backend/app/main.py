@@ -3,12 +3,35 @@
 Run with:  uvicorn app.main:app --reload --port 8002
 (8002 matches the enterprise app's port so habits transfer.)
 """
+import logging
+import sys
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .db import init_db
 
 app = FastAPI(title="AP Agent")
+
+
+def _configure_logging() -> None:
+    """Make our own log lines visible, with a timestamp and the module name.
+
+    Without this, Python's fallback handler prints warnings bare — no time,
+    no source — so a docsource retry warning is easy to miss in uvicorn's
+    output. Called from the startup hook, which runs AFTER uvicorn installs
+    its own logging config; doing it at import time would be undone.
+    """
+    root = logging.getLogger()
+    if any(getattr(h, "_ap_agent", False) for h in root.handlers):
+        return  # --reload can run startup twice; don't stack duplicate handlers
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    )
+    handler._ap_agent = True  # type: ignore[attr-defined]
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
 
 # During development the frontend dev server runs on a different port (5173),
 # so the browser needs explicit permission to call this API from there.
@@ -22,6 +45,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 def _startup() -> None:
+    _configure_logging()
     init_db()
 
 

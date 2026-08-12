@@ -91,8 +91,16 @@ if errorlevel 1 (
 popd
 
 REM --- Run ----------------------------------------------------------------
-start "ap-agent-backend" "%VENV%\Scripts\uvicorn.exe" app.main:app --port 8002 --app-dir backend
+REM The server runs in THIS window, not a separate one. A separate window
+REM closes the instant the process dies, taking the crash message with it.
+REM Tee-Object shows every line here and copies it to server-log.txt, and
+REM 2>&1 merges the error channel in so tracebacks are not lost.
 echo.
 echo App starting at http://localhost:8002
 echo The backend serves the built frontend from frontend\dist.
+echo Logs appear below and are saved to server-log.txt
+echo Press Ctrl+C to stop the server.
+echo.
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "& '%VENV%\Scripts\uvicorn.exe' app.main:app --port 8002 --app-dir backend 2>&1 | Tee-Object -FilePath 'server-log.txt'"
 endlocal
