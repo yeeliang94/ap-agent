@@ -17,8 +17,30 @@ export interface Doc {
   kind: string;
   fields: Record<string, unknown>;
   confidence: Record<string, string>;
+  corrections: Record<string, { from: unknown; to: unknown; reason: string }>;
   status: string;
   error: string;
+}
+
+// Fields a human may correct, mirroring the backend's rule.
+export const CORRECTABLE: Record<string, string[]> = {
+  invoice: ["vendor", "invoice_number", "date", "amount", "currency"],
+  claim: ["claimant", "description", "amount", "currency"],
+};
+
+export async function correctField(
+  runId: string,
+  docId: string,
+  field: string,
+  value: string,
+  reason: string
+): Promise<void> {
+  const r = await fetch(`/api/runs/${runId}/documents/${docId}/correct`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ field, value, reason }),
+  });
+  if (!r.ok) throw new Error((await r.json()).detail ?? "Correction failed");
 }
 
 export interface FlagItem {

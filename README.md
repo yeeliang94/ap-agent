@@ -79,9 +79,12 @@ Rules inherited from the enterprise repo, already honored in code:
 - Bank rows never contain account numbers — there is no vendor master yet,
   so every account cell says `[ACCOUNT UNKNOWN - fill from vendor master]`.
   A vendor master reference file is the intended next data source.
-- Reviewers can accept or exclude a flagged document, but cannot *correct*
-  an extracted value in the app yet (e.g. fix a misread date). An
-  untrustworthy read must be excluded and handled outside the app.
+- Reviewers can accept, exclude, or **correct** a flagged document ("Fix a
+  value" on the flag card): corrections are audited (before → after, who,
+  why), the document alone is re-checked instantly — no pipeline re-run —
+  and flags that no longer apply resolve themselves as "resolved by
+  correction". Clean documents are not pre-checked by humans; flags direct
+  attention.
 - Every document is read twice ("double-read"): disagreement between the two
   independent reads marks the document low-confidence, because models can
   misread degraded scans *confidently*. This doubles extraction cost

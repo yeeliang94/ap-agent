@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  correctField,
   decideFlag,
   documentFileUrl,
   getRun,
+  CORRECTABLE,
+  Doc,
   FlagItem,
   RunDetailData,
 } from "../api";
@@ -108,11 +111,12 @@ function FlagCard({
 }: {
   runId: string;
   flag: FlagItem;
-  doc?: { id: string; filename: string };
+  doc?: Doc;
   onDecided: () => void;
 }) {
   const [note, setNote] = useState("");
   const [showDoc, setShowDoc] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -128,6 +132,7 @@ function FlagCard({
     }
   }
 
+  const correctable = doc && CORRECTABLE[doc.kind]?.length > 0;
   return (
     <div className="card flagcard">
       <div className="row" style={{ border: "none", padding: 0 }}>
@@ -148,17 +153,110 @@ function FlagCard({
           <img src={documentFileUrl(runId, doc.id)} alt={doc.filename} />
         </div>
       )}
+      {editing && doc ? (
+        <FieldEditor runId={runId} doc={doc} onDone={onDecided} onCancel={() => setEditing(false)} />
+      ) : (
+        <div className="actions">
+          <input
+            placeholder="Note (optional) — recorded in the audit trail"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+          />
+          <button className="btn primary" disabled={busy} onClick={() => decide("accepted")}>
+            Accept — include in output
+          </button>
+          {correctable && (
+            <button
+              className="btn"
+              disabled={busy}
+              onClick={() => {
+                setEditing(true);
+                setShowDoc(true); // correcting means reading the source
+              }}
+            >
+              Fix a value
+            </button>
+          )}
+          <button className="btn warn" disabled={busy} onClick={() => decide("rejected")}>
+            Exclude &amp; query
+          </button>
+        </div>
+      )}
+      {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+
+// Inline editor for the document's extracted values. Saving a change
+// records an audited correction, re-checks just this document on the
+// server, and refreshes the flags — flags that no longer apply resolve
+// themselves.
+function FieldEditor({
+  runId,
+  doc,
+  onDone,
+  onCancel,
+}: {
+  runId: string;
+  doc: Doc;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  const fields = CORRECTABLE[doc.kind] ?? [];
+  const [values, setValues] = useState<Record<string, string>>(
+    Object.fromEntries(fields.map((f) => [f, String(doc.fields[f] ?? "")]))
+  );
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const changed = fields.filter((f) => values[f] !== String(doc.fields[f] ?? ""));
+
+  async function save() {
+    setBusy(true);
+    setError("");
+    try {
+      for (const f of changed) {
+        await correctField(runId, doc.id, f, values[f], reason);
+      }
+      onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Correction failed");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="editor">
+      <p className="sub">
+        Compare with the document above, then correct any misread value. The
+        change is recorded in the audit trail and this document is re-checked.
+      </p>
+      {fields.map((f) => (
+        <label key={f} className="editrow">
+          <span>
+            {f.replaceAll("_", " ")}
+            {doc.confidence?.[f] && <em className="lowconf"> — uncertain read</em>}
+            {doc.corrections?.[f] && <em className="corrected"> — corrected</em>}
+          </span>
+          <input value={values[f]} onChange={(e) => setValues({ ...values, [f]: e.target.value })} />
+        </label>
+      ))}
       <div className="actions">
         <input
-          placeholder="Note (optional) — recorded in the audit trail"
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
+          placeholder="Reason (required) — e.g. 'digits blurred, read from source'"
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
         />
-        <button className="btn primary" disabled={busy} onClick={() => decide("accepted")}>
-          Accept — include in output
+        <button
+          className="btn primary"
+          disabled={busy || changed.length === 0 || !reason.trim()}
+          onClick={save}
+        >
+          {busy ? "Saving…" : `Save ${changed.length} correction(s)`}
         </button>
-        <button className="btn warn" disabled={busy} onClick={() => decide("rejected")}>
-          Exclude &amp; query
+        <button className="btn" disabled={busy} onClick={onCancel}>
+          Cancel
         </button>
       </div>
       {error && <p className="error">{error}</p>}

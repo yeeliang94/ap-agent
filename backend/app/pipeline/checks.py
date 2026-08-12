@@ -46,9 +46,17 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9%]+", " ", str(text).lower()).strip()
 
 
-async def run_checks(docs: list) -> list[dict]:
-    """Return flag dicts for everything a human must decide."""
+async def run_checks(docs: list, only_doc_ids: set[str] | None = None) -> list[dict]:
+    """Return flag dicts for everything a human must decide.
+
+    only_doc_ids narrows WHICH documents get flags (used when re-checking a
+    single corrected document) — cross-document context (duplicate numbers)
+    is still built from the whole batch.
+    """
     flags: list[dict] = []
+
+    def want(d) -> bool:
+        return only_doc_ids is None or d.id in only_doc_ids
     listing = reference.load_payment_listing()
     listing_by_number = {r["invoice_number"]: r for r in listing}
     clauses = reference.load_policy_clauses()
@@ -57,13 +65,16 @@ async def run_checks(docs: list) -> list[dict]:
     # ---- invoices: pure code -------------------------------------------
     seen_numbers: dict[str, str] = {}
     for d in docs:
-        if d.kind != "invoice" or d.status != "extracted":
+        if d.kind != "invoice" or d.status not in ("extracted", "checked"):
             continue
         f = d.fields
         number = str(f.get("invoice_number", "")).strip()
+        # Documents outside the re-check scope still feed cross-document
+        # context (seen_numbers) but their flags go nowhere.
+        flags_out = flags if want(d) else []
 
         if number in seen_numbers:
-            flags.append(_mk_flag(d.id, "DUPLICATE",
+            flags_out.append(_mk_flag(d.id, "DUPLICATE",
                 f"Invoice number {number} appears twice in this batch "
                 f"(also in {seen_numbers[number]}).",
                 "Rule: one invoice number may appear only once per batch."))
@@ -71,31 +82,31 @@ async def run_checks(docs: list) -> list[dict]:
 
         listed = listing_by_number.get(number)
         if listed is None:
-            flags.append(_mk_flag(d.id, "NOT_IN_LISTING",
+            flags_out.append(_mk_flag(d.id, "NOT_IN_LISTING",
                 f"Invoice {number} ({f.get('vendor')}) is not in the payment listing.",
                 "Rule: every invoice must match a planned-payment row in the listing."))
         else:
             # A number match alone is not enough — the matched row must
             # actually be this invoice, and must not already be paid.
             if "paid" in str(listed["status"]).lower():
-                flags.append(_mk_flag(d.id, "ALREADY_PAID",
+                flags_out.append(_mk_flag(d.id, "ALREADY_PAID",
                     f"Invoice {number} matches a listing row marked "
                     f"'{listed['status']}' — paying it again would be a duplicate payment.",
                     "Rule: invoices matching a Paid listing row need review."))
             if abs(float(f.get("amount", 0)) - listed["amount"]) > 0.01:
-                flags.append(_mk_flag(d.id, "AMOUNT_MISMATCH",
+                flags_out.append(_mk_flag(d.id, "AMOUNT_MISMATCH",
                     f"Invoice {number}: document reads {f.get('currency')} "
                     f"{f.get('amount'):.2f} but the listing row says {listed['amount']:.2f}.",
                     "Rule: extracted amount must equal the listing row's amount."))
             v_doc, v_listing = _norm(f.get("vendor", "")), _norm(listed["vendor"])
             if v_doc and v_listing and v_doc not in v_listing and v_listing not in v_doc:
-                flags.append(_mk_flag(d.id, "VENDOR_MISMATCH",
+                flags_out.append(_mk_flag(d.id, "VENDOR_MISMATCH",
                     f"Invoice {number}: document vendor '{f.get('vendor')}' does not "
                     f"match the listing row's vendor '{listed['vendor']}'.",
                     "Rule: the matched listing row must belong to the same vendor."))
 
         if str(f.get("currency", "")).upper() != "MYR":
-            flags.append(_mk_flag(d.id, "NON_MYR_INVOICE",
+            flags_out.append(_mk_flag(d.id, "NON_MYR_INVOICE",
                 f"Invoice {number} is in {f.get('currency')} — the Maybank file "
                 "carries RM amounts only, so this invoice is excluded from the "
                 "bank block and needs separate handling.",
@@ -105,12 +116,12 @@ async def run_checks(docs: list) -> list[dict]:
             inv_date = datetime.strptime(str(f.get("date", "")), "%Y-%m-%d").date()
             age = (today - inv_date).days
             if age > OLD_DAYS:
-                flags.append(_mk_flag(d.id, "OLD_DATED",
+                flags_out.append(_mk_flag(d.id, "OLD_DATED",
                     f"Invoice {number} is dated {inv_date} — {age} days old. "
                     "Possible late submission or already-paid duplicate.",
                     f"Rule: invoices older than {OLD_DAYS} days need review."))
         except ValueError:
-            flags.append(_mk_flag(d.id, "BAD_DATE",
+            flags_out.append(_mk_flag(d.id, "BAD_DATE",
                 f"Could not read a valid date on invoice {number} "
                 f"(got: {f.get('date')!r})."))
 
@@ -122,7 +133,7 @@ async def run_checks(docs: list) -> list[dict]:
     clause_by_id = {c["clause"]: c for c in clauses}
 
     for d in docs:
-        if d.kind != "claim" or d.status != "extracted":
+        if d.kind != "claim" or d.status not in ("extracted", "checked") or not want(d):
             continue
         f = d.fields
         agent = create_agent("judge", CategoryJudgment, _JUDGE_INSTRUCTIONS,
@@ -195,6 +206,8 @@ async def run_checks(docs: list) -> list[dict]:
 
     # ---- nothing may silently vanish -----------------------------------
     for d in docs:
+        if not want(d):
+            continue
         if d.kind == "unknown":
             flags.append(_mk_flag(d.id, "UNCLASSIFIED",
                 f"{d.filename} does not look like an invoice, claim, or receipt. "
@@ -208,7 +221,9 @@ async def run_checks(docs: list) -> list[dict]:
 
     # ---- both kinds: reading confidence --------------------------------
     for d in docs:
-        if d.status == "extracted" and d.confidence:
+        if not want(d):
+            continue
+        if d.status in ("extracted", "checked") and d.confidence:
             notes = "; ".join(f"{k}: {v}" for k, v in d.confidence.items())
             flags.append(_mk_flag(d.id, "LOW_CONFIDENCE",
                 f"{d.filename} was hard to read — {notes}. A human eye is needed.",

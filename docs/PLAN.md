@@ -75,7 +75,7 @@ An external peer review found 12 issues; 10 confirmed, 2 partially valid, 0 inva
 - **Nothing vanishes**: unknown documents and orphan receipts are flagged; unknown docs never enter output.
 - Plus: zip quotas, enforced 40-request cap, fixed-client guard, redacted source errors with fresh-URL download retries, TSV/formula/filename sanitization, FastAPI serves `frontend/dist` so `start.bat` yields a working app.
 - **Verifier hardened**: asserts all 56 declared fields (correct-or-excused), tests the gate, recomputes totals independently, simulates a competent reviewer (excludes hard-to-read documents that also contradict the listing), reports false positives.
-- **Deferred follow-up:** audited in-app field correction at review time.
+- ~~**Deferred follow-up:** audited in-app field correction at review time.~~ **Done (2026-08-12):** "Fix a value" on the flag card — audited corrections (before → after + reason), per-document instant re-check (no pipeline re-run; claims re-judge for ~a tenth of a cent), flags auto-resolve as `resolved_by_correction` / new ones raise, outputs rebuild. Verified end-to-end (verifier now *corrects* the blurry invoice instead of excluding it — ALL CHECKS PASSED) and manually in the browser (9 open flags → 6 after correcting two fields; audit trail confirmed).
 
 ## Rollback Plan
 - Every step lands as its own git commit — `git revert` any step cleanly.

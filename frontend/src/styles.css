@@ -76,6 +76,13 @@ body { margin: 0; }
 .total.good { border-color: var(--accent); }
 .total.good b { color: var(--accent); }
 
+.editor { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.editrow { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.editrow span { width: 180px; font-size: 13px; color: var(--muted); }
+.editrow input { flex: 1; border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; }
+.lowconf { color: var(--flag); font-style: normal; font-size: 12px; }
+.corrected { color: var(--accent); font-style: normal; font-size: 12px; }
+
 .copyblock pre {
   background: #edf2f4; border-radius: 6px; padding: 10px; font-size: 12px;
   overflow-x: auto; margin: 10px 0 0;

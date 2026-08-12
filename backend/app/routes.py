@@ -109,6 +109,7 @@ def get_run(run_id: str) -> dict:
             "documents": [
                 {"id": d.id, "filename": d.filename, "kind": d.kind,
                  "fields": d.fields, "confidence": d.confidence,
+                 "corrections": d.corrections,
                  "status": d.status, "error": d.error}
                 for d in docs
             ],
@@ -159,6 +160,126 @@ def get_document_preview(run_id: str, doc_id: str):
         if not path.exists():
             raise HTTPException(404, "File missing from workspace.")
         return Response(content=document_to_pngs(path)[0], media_type="image/png")
+    finally:
+        db.close()
+
+
+# Which fields a human may correct, per document kind. Computed fields
+# (category, clause) are re-derived, not edited.
+CORRECTABLE = {
+    "invoice": {"vendor", "invoice_number", "date", "amount", "currency"},
+    "claim": {"claimant", "description", "amount", "currency"},
+}
+
+
+def _validate_correction(field: str, value):
+    """Corrections face the same strictness as AI answers — the reviewer is
+    the authority on what the document says, but not exempt from typos."""
+    import math
+    import re as _re
+
+    from .schemas_ai import CURRENCY_PATTERN, DATE_PATTERN
+
+    if field == "amount":
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Amount must be a number.")
+        if not math.isfinite(v) or v <= 0:
+            raise HTTPException(400, "Amount must be a positive number.")
+        return v
+    value = str(value).strip()
+    if field == "date" and not _re.match(DATE_PATTERN, value):
+        raise HTTPException(400, "Date must be YYYY-MM-DD.")
+    if field == "currency" and not _re.match(CURRENCY_PATTERN, value.upper()):
+        raise HTTPException(400, "Currency must be a 3-letter code, e.g. MYR.")
+    if field == "currency":
+        return value.upper()
+    if not value:
+        raise HTTPException(400, "Value cannot be empty.")
+    return value[:300]
+
+
+@router.post("/runs/{run_id}/documents/{doc_id}/correct")
+async def correct_field(run_id: str, doc_id: str, body: dict) -> dict:
+    """Record an audited human correction of one extracted value, then
+    re-check ONLY this document and rebuild the outputs.
+
+    body = {field, value, reason}. Flags that no longer apply are marked
+    resolved_by_correction (kept, never deleted); newly triggered rules
+    raise fresh open flags.
+    """
+    from .pipeline.checks import run_checks
+
+    field, reason = str(body.get("field", "")), str(body.get("reason", "")).strip()
+    if not reason:
+        raise HTTPException(400, "A short reason is required — it goes in the audit trail.")
+
+    db = SessionLocal()
+    try:
+        doc = db.get(Document, doc_id)
+        run = db.get(Run, run_id)
+        if not doc or not run or doc.run_id != run_id:
+            raise HTTPException(404, "No such document.")
+        if run.status != "ready":
+            raise HTTPException(400, "Corrections are only possible once the run is ready.")
+        if field not in CORRECTABLE.get(doc.kind, set()):
+            raise HTTPException(400, f"Field {field!r} is not correctable on a {doc.kind}.")
+
+        value = _validate_correction(field, body.get("value"))
+        old = doc.fields.get(field)
+        if old == value:
+            return {"ok": True, "unchanged": True}
+
+        # Apply: new value in, human verified so the doubt note goes, the
+        # derived claim fields are cleared so judgment re-runs fresh.
+        new_fields = {**doc.fields, field: value}
+        new_fields.pop("category", None)
+        new_fields.pop("clause", None)
+        doc.fields = new_fields
+        doc.confidence = {k: v for k, v in doc.confidence.items() if k != field}
+        doc.corrections = {**doc.corrections,
+                           field: {"from": old, "to": value, "reason": reason}}
+        db.add(AuditEvent(
+            run_id=run_id, actor="reviewer", action="field_corrected",
+            detail=f"{doc.filename}.{field}: {old!r} -> {value!r} — {reason}",
+        ))
+        db.commit()
+
+        # Re-check just this document (cross-doc context still considered).
+        docs = db.query(Document).filter(Document.run_id == run_id).all()
+        target = next(d for d in docs if d.id == doc_id)
+        try:
+            new_flag_dicts = await run_checks(docs, only_doc_ids={doc_id})
+        except Exception as exc:
+            raise HTTPException(500, f"Correction saved, but re-check failed: {exc}")
+
+        new_codes = {fd["code"] for fd in new_flag_dicts}
+        existing = db.query(Flag).filter(
+            Flag.run_id == run_id, Flag.document_id == doc_id
+        ).all()
+        for fl in existing:
+            if fl.status == "open" and fl.code not in new_codes:
+                fl.status = "resolved_by_correction"
+                fl.resolution = f"No longer applies after correcting {field} — {reason}"
+        undecided_codes = {fl.code for fl in existing if fl.status == "open"}
+        for fd in new_flag_dicts:
+            if fd["code"] not in undecided_codes:
+                db.add(Flag(run_id=run_id, **fd))
+        db.add(AuditEvent(
+            run_id=run_id, actor="system", action="document_rechecked",
+            detail=f"{doc.filename} after correcting {field}: "
+                   f"{len(new_flag_dicts)} rule(s) now apply",
+        ))
+
+        # Rebuild the copy blocks from the corrected state.
+        excluded = {
+            fl.document_id
+            for fl in db.query(Flag).filter(Flag.run_id == run_id, Flag.status == "rejected")
+        } | {d.id for d in docs if d.kind == "unknown"}
+        run.outputs = output_builder.build_outputs(docs, excluded)
+        db.commit()
+        return {"ok": True}
     finally:
         db.close()
 

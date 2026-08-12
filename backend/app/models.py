@@ -55,6 +55,10 @@ class Document(Base):
     fields: Mapped[dict] = mapped_column(JSON, default=dict)
     # Per-field confidence notes, e.g. {"amount": "low — blurry scan"}
     confidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Human corrections: field -> {"from": ..., "to": ..., "reason": ...}.
+    # The corrected value lives in fields; this keeps the before/after
+    # visible in the app (the audit trail records who and when).
+    corrections: Mapped[dict] = mapped_column(JSON, default=dict)
     # pending / sorted / extracted / checked / error
     status: Mapped[str] = mapped_column(String, default="pending")
     error: Mapped[str] = mapped_column(Text, default="")

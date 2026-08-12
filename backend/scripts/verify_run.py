@@ -118,26 +118,49 @@ def main() -> int:
 
     # ---- 5. resolve flags like a competent reviewer would -----------------
     # Policy: a document that is BOTH hard to read (LOW_CONFIDENCE) and
-    # inconsistent with the listing (any other flag) cannot be trusted —
-    # exclude it and query the client. Everything else is accepted.
+    # inconsistent with the listing (any other flag) gets its misread
+    # values CORRECTED from the source (we use ground truth as the
+    # reviewer's eyes). Everything else is accepted.
     flags_by_doc: dict[str, list] = {}
     for f in run["flags"]:
         flags_by_doc.setdefault(f["document_id"], []).append(f)
-    excluded_docs = {
+    suspect_docs = {
         doc_id for doc_id, fl in flags_by_doc.items()
         if len(fl) > 1 and any(x["code"] == "LOW_CONFIDENCE" for x in fl)
     }
-    for f in run["flags"]:
-        if f["status"] != "open":
+    corrected_files = []
+    for d in run["documents"]:
+        if d["id"] not in suspect_docs:
             continue
-        reject = f["document_id"] in excluded_docs
-        httpx.post(f"{BASE}/runs/{run_id}/flags/{f['id']}/decide",
-                   json={"decision": "rejected" if reject else "accepted",
-                         "note": "verify_run: reviewer policy"},
-                   timeout=30).raise_for_status()
-    excluded_files = {d["filename"] for d in run["documents"] if d["id"] in excluded_docs}
-    if excluded_files:
-        print(f"reviewer policy excluded: {sorted(excluded_files)}")
+        spec = truth["documents"].get(d["filename"], {})
+        for field, want in spec.get("fields", {}).items():
+            got = d["fields"].get(field)
+            wrong = (abs(float(got) - want) > 0.01 if isinstance(want, float)
+                     else norm(got) != norm(want))
+            if wrong:
+                httpx.post(f"{BASE}/runs/{run_id}/documents/{d['id']}/correct",
+                           json={"field": field, "value": want,
+                                 "reason": "verify_run: read from source document"},
+                           timeout=120).raise_for_status()
+                corrected_files.append(f"{d['filename']}.{field}")
+    if corrected_files:
+        print(f"reviewer corrected: {corrected_files}")
+
+    # Corrections may auto-resolve flags and raise new ones — re-fetch,
+    # then accept whatever legitimately remains open.
+    run = httpx.get(f"{BASE}/runs/{run_id}", timeout=30).json()
+    resolved_auto = [f for f in run["flags"] if f["status"] == "resolved_by_correction"]
+    if corrected_files and not resolved_auto:
+        ok = False
+        print("FAIL: corrections did not auto-resolve any flag")
+    else:
+        print(f"flags auto-resolved by correction: {len(resolved_auto)}")
+    for f in run["flags"]:
+        if f["status"] == "open":
+            httpx.post(f"{BASE}/runs/{run_id}/flags/{f['id']}/decide",
+                       json={"decision": "accepted", "note": "verify_run: accepted"},
+                       timeout=30).raise_for_status()
+    excluded_files: set[str] = set()  # nothing excluded — misreads were corrected
     run = httpx.get(f"{BASE}/runs/{run_id}", timeout=30).json()
     out = run["outputs"]
     if not out:
