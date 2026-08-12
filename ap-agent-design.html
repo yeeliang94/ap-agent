@@ -1,0 +1,680 @@
+<title>AP Automation — Solution Design</title>
+<style>
+  :root{
+    --paper:#F6F8F9;
+    --card:#FFFFFF;
+    --ink:#1C2A33;
+    --muted:#5C6E79;
+    --line:#D9E2E7;
+    --accent:#0E7C6B;
+    --accent-soft:#E3F1EE;
+    --human:#B26A10;
+    --human-soft:#F8EDDC;
+    --flag:#A4383A;
+    --flag-soft:#F7E6E6;
+    --code-bg:#EDF2F4;
+    --screen:#FBFCFD;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --paper:#131A1F;
+      --card:#1B242B;
+      --ink:#E4EBEF;
+      --muted:#93A4AE;
+      --line:#2C3941;
+      --accent:#3FB39E;
+      --accent-soft:#173129;
+      --human:#D99A45;
+      --human-soft:#33291A;
+      --flag:#D9777A;
+      --flag-soft:#332022;
+      --code-bg:#222E36;
+      --screen:#151D23;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#131A1F; --card:#1B242B; --ink:#E4EBEF; --muted:#93A4AE; --line:#2C3941;
+    --accent:#3FB39E; --accent-soft:#173129; --human:#D99A45; --human-soft:#33291A;
+    --flag:#D9777A; --flag-soft:#332022; --code-bg:#222E36; --screen:#151D23;
+  }
+  :root[data-theme="light"]{
+    --paper:#F6F8F9; --card:#FFFFFF; --ink:#1C2A33; --muted:#5C6E79; --line:#D9E2E7;
+    --accent:#0E7C6B; --accent-soft:#E3F1EE; --human:#B26A10; --human-soft:#F8EDDC;
+    --flag:#A4383A; --flag-soft:#F7E6E6; --code-bg:#EDF2F4; --screen:#FBFCFD;
+  }
+
+  html{background:var(--paper);}
+  body{
+    background:var(--paper); color:var(--ink);
+    font-family:"Avenir Next","Segoe UI",system-ui,-apple-system,sans-serif;
+    line-height:1.55; margin:0;
+  }
+  .wrap{max-width:920px; margin:0 auto; padding:48px 24px 80px;}
+
+  .eyebrow{
+    font-size:12px; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--accent); font-weight:600; margin:0 0 10px;
+  }
+  h1{
+    font-size:clamp(28px,4.5vw,40px); line-height:1.12; margin:0 0 14px;
+    font-weight:700; text-wrap:balance; letter-spacing:-.01em;
+  }
+  .lede{font-size:17px; color:var(--muted); max-width:60ch; margin:0 0 8px;}
+
+  h2{font-size:22px; margin:64px 0 6px; font-weight:700; text-wrap:balance;}
+  h2 .num{color:var(--accent); font-variant-numeric:tabular-nums; margin-right:10px;}
+  .h2sub{color:var(--muted); margin:0 0 22px; max-width:64ch;}
+  h4{margin:26px 0 8px; font-size:15.5px;}
+
+  p{max-width:68ch;}
+
+  /* ---- comparison ---- */
+  .compare{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+  @media (max-width:640px){.compare{grid-template-columns:1fr;}}
+  .comp-card{
+    background:var(--card); border:1px solid var(--line); border-radius:10px;
+    padding:20px 22px;
+  }
+  .comp-card h3{margin:0 0 12px; font-size:15px; letter-spacing:.06em; text-transform:uppercase;}
+  .comp-card.today h3{color:var(--muted);}
+  .comp-card.future h3{color:var(--accent);}
+  .comp-card ul{margin:0; padding-left:18px; color:var(--muted); font-size:14.5px;}
+  .comp-card li{margin:7px 0;}
+  .comp-card.future ul{color:var(--ink);}
+  .comp-card.future{border-color:var(--accent);}
+
+  /* ---- pipeline ---- */
+  .pipe{list-style:none; margin:0; padding:0;}
+  .stage{display:grid; grid-template-columns:56px 1fr; gap:0 20px; position:relative; padding:0 0 8px;}
+  .stage-marker{display:flex; flex-direction:column; align-items:center;}
+  .stage-dot{
+    width:40px; height:40px; border-radius:50%;
+    background:var(--accent-soft); color:var(--accent);
+    border:1.5px solid var(--accent);
+    display:flex; align-items:center; justify-content:center;
+    font-weight:700; font-size:16px; font-variant-numeric:tabular-nums; flex-shrink:0;
+  }
+  .stage-line{width:1.5px; flex:1; background:var(--line); margin:6px 0;}
+  .stage:last-child .stage-line{display:none;}
+  .stage-body{padding:6px 0 26px;}
+  .stage h3{margin:0 0 6px; font-size:17px;}
+  .stage p{margin:0 0 10px; color:var(--muted); font-size:15px;}
+  .who{
+    display:inline-block; font-size:12px; font-weight:600; letter-spacing:.08em;
+    text-transform:uppercase; padding:3px 10px; border-radius:99px; margin-bottom:8px;
+  }
+  .who.ai{background:var(--accent-soft); color:var(--accent);}
+  .who.code{background:var(--code-bg); color:var(--muted);}
+  .who.human{background:var(--human-soft); color:var(--human);}
+  .stage.gate .stage-dot{background:var(--human-soft); color:var(--human); border-color:var(--human);}
+  .example{
+    background:var(--card); border:1px solid var(--line); border-left:3px solid var(--accent);
+    border-radius:6px; padding:10px 14px; font-size:13.5px; color:var(--muted); max-width:56ch;
+  }
+  .stage.gate .example{border-left-color:var(--human);}
+
+  /* ---- agent loop ---- */
+  .loop-grid{display:grid; grid-template-columns:1fr 1fr; gap:16px; align-items:start;}
+  @media (max-width:720px){.loop-grid{grid-template-columns:1fr;}}
+  .loop-steps{background:var(--card); border:1px solid var(--line); border-radius:10px; padding:20px 22px;}
+  .loop-steps ol{margin:0; padding-left:20px; font-size:14.5px;}
+  .loop-steps li{margin:10px 0; color:var(--muted);}
+  .loop-steps li b{color:var(--ink);}
+  .loop-steps .loopback{
+    margin-top:14px; padding:8px 12px; border-radius:6px;
+    background:var(--accent-soft); color:var(--accent); font-size:13px; font-weight:600;
+  }
+  .trace{
+    background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px 20px;
+    font-family:"SF Mono",Consolas,ui-monospace,monospace; font-size:12.5px; line-height:1.7;
+    overflow-x:auto;
+  }
+  .trace .t-label{display:block; font-family:"Avenir Next","Segoe UI",system-ui,sans-serif;
+    font-size:12px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted);
+    margin-bottom:12px; font-weight:600;}
+  .trace .ln{white-space:nowrap; display:block;}
+  .trace .ai{color:var(--accent); font-weight:600;}
+  .trace .tool{color:var(--muted);}
+  .trace .chk{color:var(--human); font-weight:600;}
+  .trace .res{color:var(--ink);}
+  .callout{
+    border-left:3px solid var(--accent); background:var(--accent-soft);
+    border-radius:0 8px 8px 0; padding:14px 20px; margin:22px 0; max-width:66ch;
+  }
+  .callout p{margin:0; font-size:14.5px;}
+  .callout b{color:var(--accent);}
+
+  /* ---- cost ---- */
+  .levers{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+  @media (max-width:640px){.levers{grid-template-columns:1fr;}}
+  .lever{background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px 20px;}
+  .lever b{display:block; font-size:15px; margin-bottom:6px;}
+  .lever p{margin:0; font-size:14px; color:var(--muted);}
+  .lever .save{display:inline-block; margin-top:10px; font-size:12px; font-weight:600;
+    letter-spacing:.06em; text-transform:uppercase; color:var(--accent);}
+
+  /* ---- mockups ---- */
+  .screen{
+    background:var(--card); border:1px solid var(--line); border-radius:12px;
+    overflow:hidden; margin:26px 0 8px;
+  }
+  .screen-bar{
+    display:flex; align-items:center; gap:8px; padding:10px 16px;
+    background:var(--code-bg); border-bottom:1px solid var(--line);
+  }
+  .screen-bar .dots{display:flex; gap:5px;}
+  .screen-bar .dot{width:9px; height:9px; border-radius:50%; background:var(--line);}
+  .screen-bar .addr{
+    font-size:12px; color:var(--muted); background:var(--card);
+    border:1px solid var(--line); border-radius:6px; padding:3px 12px; margin-left:6px;
+  }
+  .screen-body{padding:20px 22px; background:var(--screen);}
+  .screen-caption{font-size:13.5px; color:var(--muted); margin:8px 4px 0; max-width:66ch;}
+  .screen-caption b{color:var(--ink);}
+
+  .app-h{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:14px; gap:12px; flex-wrap:wrap;}
+  .app-h b{font-size:16px;}
+  .app-h span{font-size:12.5px; color:var(--muted);}
+
+  .rowlist{display:flex; flex-direction:column; gap:8px;}
+  .rowitem{
+    display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+    background:var(--card); border:1px solid var(--line); border-radius:8px; padding:11px 14px;
+    font-size:13.5px;
+  }
+  .rowitem .grow{flex:1; min-width:140px;}
+  .rowitem .sub{display:block; font-size:12px; color:var(--muted);}
+  .chip{
+    font-size:11.5px; font-weight:600; letter-spacing:.05em; text-transform:uppercase;
+    padding:3px 10px; border-radius:99px; white-space:nowrap;
+  }
+  .chip.ok{background:var(--accent-soft); color:var(--accent);}
+  .chip.wait{background:var(--code-bg); color:var(--muted);}
+  .chip.review{background:var(--human-soft); color:var(--human);}
+  .chip.flag{background:var(--flag-soft); color:var(--flag);}
+  .btn{
+    font-size:12.5px; font-weight:600; padding:6px 14px; border-radius:7px;
+    border:1px solid var(--line); background:var(--card); color:var(--ink); white-space:nowrap;
+  }
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:#fff;}
+  .btn.warn{background:var(--human); border-color:var(--human); color:#fff;}
+  .progressbar{height:6px; border-radius:99px; background:var(--code-bg); overflow:hidden; flex:1; min-width:80px;}
+  .progressbar i{display:block; height:100%; background:var(--accent); border-radius:99px;}
+
+  .flagdetail{
+    background:var(--flag-soft); border:1px solid var(--flag); border-radius:8px;
+    padding:12px 14px; font-size:13px; margin-top:8px;
+  }
+  .flagdetail b{color:var(--flag);}
+  .flagdetail .actions{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;}
+
+  .totals{
+    display:flex; gap:12px; flex-wrap:wrap; margin-top:14px;
+  }
+  .total-card{
+    flex:1; min-width:130px; background:var(--card); border:1px solid var(--line);
+    border-radius:8px; padding:12px 14px;
+  }
+  .total-card span{display:block; font-size:11.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--muted); margin-bottom:4px;}
+  .total-card b{font-size:17px; font-variant-numeric:tabular-nums;}
+  .total-card.match{border-color:var(--accent);}
+  .total-card.match b{color:var(--accent);}
+
+  /* ---- architecture ---- */
+  .arch{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:28px 24px; overflow-x:auto;}
+  .arch-flow{display:flex; flex-direction:column; gap:0; min-width:520px;}
+  .arch-row{display:flex; gap:14px; align-items:stretch; justify-content:center;}
+  .arch-box{border:1.5px solid var(--line); border-radius:8px; padding:12px 16px; background:var(--paper); flex:1; max-width:260px;}
+  .arch-box b{display:block; font-size:14.5px; margin-bottom:3px;}
+  .arch-box span{font-size:12.5px; color:var(--muted); display:block; line-height:1.4;}
+  .arch-box.hero{border-color:var(--accent); background:var(--accent-soft);}
+  .arch-box.hero b{color:var(--accent);}
+  .arch-box.humanbox{border-color:var(--human); background:var(--human-soft);}
+  .arch-box.humanbox b{color:var(--human);}
+  .arch-arrow{text-align:center; color:var(--muted); font-size:18px; line-height:1; padding:8px 0;}
+  .arch-note{font-size:12.5px; color:var(--muted); text-align:center; margin-top:2px;}
+
+  /* ---- principles ---- */
+  .principles{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+  @media (max-width:640px){.principles{grid-template-columns:1fr;}}
+  .prin{background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px 20px;}
+  .prin b{display:block; font-size:15.5px; margin-bottom:6px;}
+  .prin p{margin:0; font-size:14px; color:var(--muted);}
+
+  /* ---- tables ---- */
+  table{border-collapse:collapse; width:100%; font-size:14.5px;}
+  .tblwrap{overflow-x:auto; background:var(--card); border:1px solid var(--line); border-radius:10px;}
+  th,td{text-align:left; padding:12px 16px; border-top:1px solid var(--line); vertical-align:top;}
+  thead th{border-top:none; font-size:12px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted);}
+  td:first-child,th:first-child{white-space:nowrap; font-weight:600;}
+  td .risk{font-size:12.5px; color:var(--accent); font-weight:600;}
+  td.money{font-variant-numeric:tabular-nums; white-space:nowrap;}
+  .fineprint{font-size:12.5px; color:var(--muted); margin-top:10px;}
+
+  /* ---- asks ---- */
+  .asks{border-left:3px solid var(--human); background:var(--human-soft); border-radius:0 8px 8px 0; padding:16px 22px;}
+  .asks p{margin:0 0 8px; font-size:15px;}
+  .asks p:last-child{margin-bottom:0;}
+  .asks b{color:var(--human);}
+
+  footer{margin-top:72px; padding-top:18px; border-top:1px solid var(--line); font-size:13px; color:var(--muted);}
+</style>
+
+<div class="wrap">
+  <p class="eyebrow">Solution design · Managed Services · Draft for discussion</p>
+  <h1>Automating the Accounts Payable workflow with an AI agent</h1>
+  <p class="lede">Today, each client's monthly AP run is done by hand: checking invoices against payment listings, verifying staff claims against policy, rolling forward spreadsheets, and filling in the Maybank file. This design has an AI agent do the reading and cross-checking — while people keep every decision that moves money. The agent runs only when a person starts it, and it never edits the working files: it prepares copy-ready output for a person to paste in.</p>
+
+  <h2><span class="num">1</span>Today vs. proposed</h2>
+  <p class="h2sub">The work doesn't change — who does the repetitive part of it does.</p>
+  <div class="compare">
+    <div class="comp-card today">
+      <h3>Today — manual</h3>
+      <ul>
+        <li>Download email attachments, unzip, save to SharePoint by hand</li>
+        <li>Ctrl+F each invoice number in the year's payment listing</li>
+        <li>Check every staff claim one by one against the policy sheet</li>
+        <li>Roll the payment listing forward, rename files with running numbers</li>
+        <li>Copy-paste amounts into the Maybank bank file, reconcile totals</li>
+      </ul>
+    </div>
+    <div class="comp-card future">
+      <h3>Proposed — agent-assisted</h3>
+      <ul>
+        <li>You hand the batch to the agent; it reads every document in one run</li>
+        <li>Agent fetches the listing &amp; policy sheet itself (read-only) and looks up every invoice; exceptions flagged, not hidden</li>
+        <li>Claims checked against policy limits; over-limit items surfaced</li>
+        <li>Listing rows and bank-file entries prepared in the exact format — ready to copy &amp; paste</li>
+        <li><b>A person reviews the flags and approves — before anything is paid</b></li>
+      </ul>
+    </div>
+  </div>
+
+  <h2><span class="num">2</span>The monthly pipeline</h2>
+  <p class="h2sub">Example: a client sends one zip file containing a month of invoices and staff claims, including scanned images. A colleague starts a run and hands that zip to the agent — nothing runs in the background waiting for files. Each stage is labelled by who does the work — the AI, plain software rules, or a person.</p>
+
+  <ol class="pipe">
+    <li class="stage">
+      <div class="stage-marker"><div class="stage-dot">1</div><div class="stage-line"></div></div>
+      <div class="stage-body">
+        <span class="who code">Software</span>
+        <h3>Intake &amp; gather context</h3>
+        <p>You start a run and give the agent the month's files — the client's zip, dropped straight into the app. The agent unpacks it in a private working area, then fetches the reference documents it needs — this year's payment listing, the client's policy sheet, last month's files — by <i>reading</i> the client's SharePoint folders. It never writes anything back to SharePoint.</p>
+        <div class="example">In: 1 zip file + client name &nbsp;→&nbsp; Out: 47 documents to sort, plus the listing &amp; policy sheet fetched for reference.</div>
+      </div>
+    </li>
+    <li class="stage">
+      <div class="stage-marker"><div class="stage-dot">2</div><div class="stage-line"></div></div>
+      <div class="stage-body">
+        <span class="who ai">AI</span>
+        <h3>Sort the pile</h3>
+        <p>The AI looks at each document — including scans and photos — and answers one narrow question: is this an invoice, a staff claim, or a receipt that belongs with a claim?</p>
+        <div class="example">Out: a manifest — 31 invoices, 12 claims, 4 receipts attached to claims.</div>
+      </div>
+    </li>
+    <li class="stage">
+      <div class="stage-marker"><div class="stage-dot">3</div><div class="stage-line"></div></div>
+      <div class="stage-body">
+        <span class="who ai">AI</span>
+        <h3>Read each document</h3>
+        <p>For every invoice: vendor, invoice number, date, amount, currency. For every claim: claimant, expense type, amount, and its receipts. One document, one focused question — the pattern where AI reading is most reliable.</p>
+        <div class="example">Out: a structured table of every document's details, with a confidence note per field.</div>
+      </div>
+    </li>
+    <li class="stage">
+      <div class="stage-marker"><div class="stage-dot">4</div><div class="stage-line"></div></div>
+      <div class="stage-body">
+        <span class="who ai">AI</span> <span class="who code">Software</span>
+        <h3>Run the checks — judgment by AI, arithmetic by code</h3>
+        <p>Policies are rarely just numbers, so this stage is a partnership. The AI does the judgment calls: which expense category does this claim belong to, which policy clause applies, does "Maxis Broadband" mean "Maxis Bhd"? Every AI judgment must cite the policy line it relied on, and "not sure" becomes a flag, never a pass. Then plain code does what code does best: invoice-number lookups in the listing, date comparisons, limit arithmetic, totals reconciliation — repeatable and free to re-run.</p>
+        <div class="example">AI: "team lunch" receipt → staff welfare, not client entertainment, per policy §4.2 → cap applies. Code: $95 &gt; $80 cap → flagged. Code: invoice not found in listing → flagged.</div>
+      </div>
+    </li>
+    <li class="stage gate">
+      <div class="stage-marker"><div class="stage-dot">5</div><div class="stage-line"></div></div>
+      <div class="stage-body">
+        <span class="who human">Person</span>
+        <h3>Review &amp; approve</h3>
+        <p>The agent presents everything inside the app: one flag report, proposed file names, draft payment-listing rows, and draft bank-file entries. A colleague resolves the flags and approves — then copies each approved block into the real working documents. Nothing is written to SharePoint or any working file by the agent, and nothing proceeds to payment without this step.</p>
+        <div class="example">"31 invoices: 28 clean, 2 not in listing, 1 dated January. 12 claims: 10 within policy, 2 over limit."</div>
+      </div>
+    </li>
+  </ol>
+
+  <h2><span class="num">3</span>Inside the agentic loop</h2>
+  <p class="h2sub">An AI model can only read text and reply — it can't touch files by itself. The "agent" is a conversation loop our application runs around the model. Here is one turn of that loop, and a real trace of it processing a staff claim.</p>
+
+  <div class="loop-grid">
+    <div class="loop-steps">
+      <ol>
+        <li><b>The app sets the table.</b> It sends the model the task ("check this claim against Client ABC's policy") plus a menu of tools it may ask for: read a document, look up the payment listing, search a folder.</li>
+        <li><b>The model asks, it never acts.</b> It replies with a request: "run <i>read_document</i> on claim_07.jpg". It cannot run anything itself.</li>
+        <li><b>The app does the work.</b> Our own code executes the tool — opens the file, runs the Excel lookup — and sends the result back into the conversation.</li>
+        <li><b>The model decides the next step</b> based on what came back: ask for another tool, or finish.</li>
+        <li><b>The loop ends with structured output,</b> not prose: a table of extracted fields and flags that our checking code and the review screen consume.</li>
+      </ol>
+      <div class="loopback">Steps 2–4 repeat until the task is done — typically 2–4 turns per document, not dozens.</div>
+    </div>
+    <div class="trace">
+      <span class="t-label">Trace — one staff claim, start to finish</span>
+      <span class="ln"><span class="ai">agent →</span> read_document("claim_07.jpg")</span>
+      <span class="ln"><span class="tool">tool ←</span> <span class="res">{claimant:"Tan W.L.", type:"wi-fi",</span></span>
+      <span class="ln"><span class="res">        amount:95.00, currency:"USD"}</span></span>
+      <span class="ln"><span class="ai">agent →</span> category: "home wi-fi" → Telecoms,</span>
+      <span class="ln">  basis: policy §4.2 "internet subsidy"</span>
+      <span class="ln"><span class="ai">agent →</span> policy_lookup("ABC", "telecoms")</span>
+      <span class="ln"><span class="tool">tool ←</span> <span class="res">{cap:80.00, currency:"USD"}</span></span>
+      <span class="ln"><span class="chk">code check:</span> 95.00 &gt; 80.00 → OVER_LIMIT</span>
+      <span class="ln"><span class="ai">agent →</span> final: {status:"flagged",</span>
+      <span class="ln">  reason:"wi-fi $95 exceeds $80 cap (§4.2)",</span>
+      <span class="ln">  evidence:"claim_07.jpg"}</span>
+      <span class="ln">&nbsp;</span>
+      <span class="ln"><span class="tool">→ appears on review screen as flag #2</span></span>
+    </div>
+  </div>
+
+  <div class="callout">
+    <p><b>The key design choice: the routine path is scripted, not agentic.</b> The pipeline order — intake, sort, read, check, review — is fixed in ordinary code. The AI loop only runs <i>inside</i> the stages that need judgment (reading documents, resolving fuzzy vendor names). A free-roaming agent that "figures out" the workflow each month would be slower, less predictable, and roughly 10× more expensive. This one choice is also our biggest cost control.</p>
+  </div>
+
+  <h2><span class="num">4</span>Keeping the cost down</h2>
+  <p class="h2sub">AI usage is priced per token — roughly, per word or image-patch the model reads and writes. Four levers keep the bill small; LiteLLM (the AI switchboard — in the enterprise, the shared company proxy with its approved model catalogue) makes the first two a configuration choice, not a rebuild.</p>
+
+  <div class="levers">
+    <div class="lever">
+      <b>Right-size the model per stage</b>
+      <p>Sorting a document into "invoice / claim / receipt" is easy — a small, cheap model does it well. Full extraction gets a mid-tier model. The largest models are reserved for the few documents flagged as low-confidence. Same pipeline, three price tiers.</p>
+      <span class="save">Typical saving: 60–80% vs. one big model for everything</span>
+    </div>
+    <div class="lever">
+      <b>AI only where judgment lives</b>
+      <p>Invoice lookups, date checks, limit maths, and totals reconciliation run as plain code — cost: zero, and re-running them is free. The AI's judgment work (expense categories, which policy clause applies) runs over the small extracted <i>text</i> table, not the images — a fraction of the reading cost. Each document is read by AI exactly once; results are saved, so nothing is ever paid for twice.</p>
+      <span class="save">Code checks &amp; re-runs: $0 · judgment pass: cents</span>
+    </div>
+    <div class="lever">
+      <b>Send less to the model</b>
+      <p>Scans are downsized before sending — a receipt doesn't need to be a 12&nbsp;MB photo. The payment listing never goes to the model at all: our Excel tool sends back only the one row a lookup finds, not thousands of rows.</p>
+      <span class="save">Cuts the per-document token bill by half or more</span>
+    </div>
+    <div class="lever">
+      <b>Cache the repeated parts</b>
+      <p>The instructions and client policy sheet are identical for all 47 documents — prompt caching means we pay full price once, then a fraction for each reuse. Whether caching (and any bulk-pricing) discounts pass through the enterprise proxy is one of the things to confirm in enterprise testing.</p>
+      <span class="save">Caching: up to 90% off repeated context — to verify via the proxy</span>
+    </div>
+  </div>
+
+  <h4>What a typical batch costs (indicative)</h4>
+  <div class="tblwrap">
+    <table>
+      <thead><tr><th>Step</th><th>Model tier</th><th class="money">Est. cost / 47-doc batch</th></tr></thead>
+      <tbody>
+        <tr><td>Sort 47 documents</td><td>Small (e.g. Haiku-class)</td><td class="money">~US$0.10</td></tr>
+        <tr><td>Extract details from 47 documents</td><td>Mid-tier, cached prompts</td><td class="money">~US$1–2</td></tr>
+        <tr><td>Category &amp; policy judgment, all 43 items</td><td>Mid-tier, text only, cached policy sheet</td><td class="money">~US$0.30</td></tr>
+        <tr><td>Fuzzy vendor matching (~5 cases)</td><td>Mid-tier</td><td class="money">~US$0.05</td></tr>
+        <tr><td>Arithmetic, lookups, reconciliation</td><td>Plain code</td><td class="money">$0</td></tr>
+        <tr><td><b>Total per client per month</b></td><td></td><td class="money"><b>≈ US$1–3</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="fineprint">Indicative figures at current published API prices, to be verified in the pilot — enterprise-proxy pricing and its model catalogue may shift the exact numbers. For scale: the same batch takes a person several hours today. Even at 10× this estimate, cost is not the constraint — review quality is.</p>
+
+  <h2><span class="num">5</span>What the team sees</h2>
+  <p class="h2sub">Colleagues never see the loop or the tokens. They see three simple screens: upload a batch, review the flags, copy the output. Stages 1–4 run on their own between the upload and the review.</p>
+
+  <h4>Screen A — Batches dashboard <span class="who code" style="margin-left:8px">pipeline stages 1–4</span></h4>
+  <div class="screen">
+    <div class="screen-bar">
+      <div class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+      <span class="addr">AP Assistant — Batches</span>
+    </div>
+    <div class="screen-body">
+      <div class="app-h"><b>Your runs</b><span>A run starts only when you upload a batch</span></div>
+      <div class="rowlist">
+        <div class="rowitem">
+          <div class="grow"><b>Start a new run</b><span class="sub">Drop a client's zip or files here and pick the client</span></div>
+          <button class="btn primary">Upload batch</button>
+        </div>
+        <div class="rowitem">
+          <div class="grow"><b>Client ABC</b><span class="sub">July batch · 47 documents · uploaded 09 Aug by you</span></div>
+          <span class="chip review">Ready for review</span>
+          <button class="btn primary">Open review</button>
+        </div>
+        <div class="rowitem">
+          <div class="grow"><b>Client DEF</b><span class="sub">July batch · 22 documents · uploaded 10 Aug</span></div>
+          <div class="progressbar"><i style="width:60%"></i></div>
+          <span class="chip wait">Reading 14 / 22</span>
+        </div>
+        <div class="rowitem">
+          <div class="grow"><b>Client GHI</b><span class="sub">July batch · approved 08 Aug by A. Rahman</span></div>
+          <span class="chip ok">Approved</span>
+          <button class="btn">View output</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="screen-caption"><b>What's happening:</b> a run begins only when a person uploads a batch — there is no always-on agent watching folders. After the upload, the run continues on its own; you can close the tab, and a Teams or email notification says "Client ABC is ready for review" when it's done.</p>
+
+  <h4>Screen B — Review screen <span class="who human" style="margin-left:8px">pipeline stage 5</span></h4>
+  <div class="screen">
+    <div class="screen-bar">
+      <div class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+      <span class="addr">AP Assistant — Client ABC · July review</span>
+    </div>
+    <div class="screen-body">
+      <div class="app-h"><b>43 of 47 documents clean — 4 need your decision</b><span>Clean items are collapsed; open any to see its extracted details and source image side by side.</span></div>
+      <div class="rowlist">
+        <div class="rowitem">
+          <div class="grow"><b>28 invoices · 10 claims · 4 receipts</b><span class="sub">Matched to listing / within policy — spot-check any</span></div>
+          <span class="chip ok">Clean</span>
+          <button class="btn">Expand</button>
+        </div>
+        <div class="rowitem" style="flex-direction:column; align-items:stretch;">
+          <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+            <div class="grow"><b>Invoice MX-2214 — Maxis Bhd</b><span class="sub">RM 1,240.00 · dated 12 Jan 2026</span></div>
+            <span class="chip flag">Old-dated</span>
+          </div>
+          <div class="flagdetail">
+            <b>Why flagged:</b> invoice is 7 months old and not found in the 2026 payment listing. Possible duplicate of a paid item or a late submission.
+            <div class="actions">
+              <button class="btn">View invoice</button>
+              <button class="btn primary">Accept — late submission</button>
+              <button class="btn warn">Exclude &amp; query client</button>
+            </div>
+          </div>
+        </div>
+        <div class="rowitem" style="flex-direction:column; align-items:stretch;">
+          <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+            <div class="grow"><b>Claim — Tan W.L. — wi-fi</b><span class="sub">USD 95.00 · claim_07.jpg</span></div>
+            <span class="chip flag">Over limit</span>
+          </div>
+          <div class="flagdetail">
+            <b>Why flagged:</b> categorised as Telecoms per policy §4.2 ("internet subsidy"); wi-fi claims for Client ABC are capped at USD 80.00. Claimed amount exceeds the cap by USD 15.00.
+            <div class="actions">
+              <button class="btn">View receipt</button>
+              <button class="btn primary">Approve at $80 cap</button>
+              <button class="btn warn">Reject claim</button>
+            </div>
+          </div>
+        </div>
+        <div class="rowitem">
+          <div class="grow"><b>2 more flags</b><span class="sub">Invoice not in listing (1) · unreadable scan needs a human eye (1)</span></div>
+          <span class="chip flag">Pending</span>
+          <button class="btn">Next flag</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="screen-caption"><b>What's happening:</b> every flag shows its reason and one-click access to the source document — the reviewer decides, the system records who decided what and when (that record becomes the audit trail). Approving here releases stage 6 drafting; nothing was changed in SharePoint yet.</p>
+
+  <h4>Screen C — Copy-ready output <span class="who human" style="margin-left:8px">you paste, the agent never writes</span></h4>
+  <div class="screen">
+    <div class="screen-bar">
+      <div class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+      <span class="addr">AP Assistant — Client ABC · Payment pack</span>
+    </div>
+    <div class="screen-body">
+      <div class="app-h"><b>Copy-ready output — July</b><span>Generated from your approved review · 09:14 today</span></div>
+      <div class="rowlist">
+        <div class="rowitem">
+          <div class="grow"><b>Payment listing rows (rolled forward)</b><span class="sub">29 lines · vendors grouped · running numbers 0713–0741 · columns match your listing workbook</span></div>
+          <button class="btn">Preview</button>
+          <button class="btn primary">Copy 29 rows</button>
+        </div>
+        <div class="rowitem">
+          <div class="grow"><b>Maybank entry rows</b><span class="sub">29 rows · IG codes set · beneficiary codes from vendor master · format learned from your uploaded Maybank template</span></div>
+          <span class="chip review">1 new vendor — not yet registered in Maybank</span>
+          <button class="btn primary">Copy 29 rows</button>
+        </div>
+        <div class="rowitem">
+          <div class="grow"><b>Proposed file names</b><span class="sub">31 invoices renamed with running numbers — a list to apply when you file them</span></div>
+          <button class="btn primary">Copy list</button>
+        </div>
+      </div>
+      <div class="totals">
+        <div class="total-card"><span>Payment listing total</span><b>RM 184,220.50</b></div>
+        <div class="total-card"><span>Bank entries total</span><b>RM 184,220.50</b></div>
+        <div class="total-card match"><span>Reconciliation</span><b>Totals match ✓</b></div>
+      </div>
+      <div class="rowlist" style="margin-top:14px;">
+        <div class="rowitem">
+          <div class="grow"><b>Your files stay yours</b><span class="sub">You paste each block into the real working document yourself. The agent never edits the listing, the bank file, or anything in SharePoint — and uploading to Maybank remains a human action, always.</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="screen-caption"><b>What's happening:</b> like preparing a bank draft entry, the agent has laid out every row in the exact format the working document expects — it learned the Maybank layout from a template you uploaded once, so onboarding a new format means uploading a new template, not changing software. It has already reconciled the two totals and spotted a vendor that must be registered in Maybank first. You copy, you paste, you upload — the agent touches nothing.</p>
+
+  <h2><span class="num">6</span>How the pieces connect</h2>
+  <p class="h2sub">The agent runs inside our own application. It reads SharePoint through a ready-made, read-only connector, and reaches AI models through one switchboard — so we are never locked to a single AI provider.</p>
+
+  <div class="arch">
+    <div class="arch-flow">
+      <div class="arch-row">
+        <div class="arch-box">
+          <b>SharePoint</b>
+          <span>Client folders, payment listings, policy sheets, historical files</span>
+        </div>
+      </div>
+      <div class="arch-arrow">↓</div>
+      <div class="arch-note">MCP connector — a pre-built, maintained bridge that searches sites, lists folders, and fetches documents. <b>Read-only by design</b> — it cannot change anything in SharePoint. Each user signs in with their own account; sign-in and credentials live in the server layer and are never shown to the AI.</div>
+      <div class="arch-arrow">↓</div>
+      <div class="arch-row">
+        <div class="arch-box hero">
+          <b>Agent application</b>
+          <span>Runs the pipeline when a user uploads a batch · owns the tools: unzip, Excel lookup, document reading, template-to-output formatting · one config file per client (paths, policy limits, funding style)</span>
+        </div>
+      </div>
+      <div class="arch-arrow">↕</div>
+      <div class="arch-note">LiteLLM — one switchboard to AI models. In the enterprise this is the shared company proxy with its approved model catalogue; on a development machine it can point at providers directly. Same application either way.</div>
+      <div class="arch-arrow">↕</div>
+      <div class="arch-row">
+        <div class="arch-box">
+          <b>AI models</b>
+          <span>Read documents &amp; images, answer narrow questions — no direct access to files or payments</span>
+        </div>
+      </div>
+      <div class="arch-arrow">↓</div>
+      <div class="arch-row">
+        <div class="arch-box humanbox">
+          <b>Copy-ready output → person pastes &amp; approves</b>
+          <span>Flag report, listing rows, bank-file entries — shown in the app for a person to copy into the real documents. The human gate before any payment step.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2><span class="num">7</span>Design principles</h2>
+  <div class="principles">
+    <div class="prin">
+      <b>AI reads and judges, code does the math, people decide</b>
+      <p>The AI extracts information and makes the judgment calls — expense category, which policy clause applies — always citing the policy line it relied on, so a reviewer can verify the reasoning. Code does the arithmetic and lookups, repeatably. People resolve flags and give approvals.</p>
+    </div>
+    <div class="prin">
+      <b>The human gate is permanent</b>
+      <p>The agent never edits a working document, never uploads a bank file, and never triggers a payment. Its output is always something a person copies into place. That is a design rule, not a temporary limitation.</p>
+    </div>
+    <div class="prin">
+      <b>One pipeline, many clients</b>
+      <p>Client differences — folder locations, policy limits, funding model, file-naming rules, output templates — live in a one-page config file per client plus an uploaded template. Onboarding a client means writing a config and uploading their formats, not building software.</p>
+    </div>
+    <div class="prin">
+      <b>Portable by construction</b>
+      <p>All file access goes through one swappable layer. Development happens on a Mac against sample files; the pilot runs on a Windows machine with the enterprise proxy and read-only SharePoint connector; moving to Azure later swaps that one layer, not the application.</p>
+    </div>
+  </div>
+
+  <h2><span class="num">8</span>Delivery roadmap</h2>
+  <p class="h2sub">Built in thin slices, each useful on its own. Slice 1 changes nothing — it only reports — which is how we build trust before automating more.</p>
+  <div class="tblwrap">
+    <table>
+      <thead><tr><th>Slice</th><th>What it does</th><th>Risk profile</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>1 · Invoice checking</td>
+          <td>Reads a batch, extracts details, looks up every invoice in the payment listing, produces the flag report.</td>
+          <td><span class="risk">Read-only</span> — changes no files, touches no money.</td>
+        </tr>
+        <tr>
+          <td>2 · Claims vs. policy</td>
+          <td>Checks staff claims against each client's policy sheet; currency and limit flags.</td>
+          <td><span class="risk">Read-only</span> — same reporting pattern.</td>
+        </tr>
+        <tr>
+          <td>3 · Listing roll-forward</td>
+          <td>Prepares copy-ready listing rows, vendor groupings, and proposed file names with running numbers.</td>
+          <td><span class="risk">Copy-paste only</span> — a person pastes rows into the workbook.</td>
+        </tr>
+        <tr>
+          <td>4 · Maybank entries</td>
+          <td>Learns the bank format from an uploaded template, builds copy-ready entry rows, reconciles totals.</td>
+          <td><span class="risk">Copy-paste only</span> — a person always pastes, reviews, and uploads.</td>
+        </tr>
+        <tr>
+          <td>5 · Azure hosting</td>
+          <td>Moves the proven pipeline from the pilot machine to Azure; adds schedules and monitoring.</td>
+          <td>Infrastructure change only — pipeline behaviour already proven.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2><span class="num">9</span>Assumptions to validate in the enterprise environment</h2>
+  <p class="h2sub">This design is being built on a development machine against sample files; testing happens in the Windows enterprise environment. These are the assumptions the design depends on, and how each gets validated there.</p>
+  <div class="tblwrap">
+    <table>
+      <thead><tr><th>Assumption</th><th>Basis today</th><th>How we validate</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>SharePoint read access is enough</td>
+          <td>The read-only MCP connector was probed successfully: site search, folder listing, document metadata, and workbook download all worked with a user's own sign-in. Copy-paste output means no write access is ever needed.</td>
+          <td>Re-run the probe against the real AP client folders; confirm the listing and policy sheets are reachable. Note: occasional connector errors were seen — retries succeed, so the app needs simple retry logic.</td>
+        </tr>
+        <tr>
+          <td>Sign-in lasts a full run</td>
+          <td>The saved sign-in session was shown to be reused without re-prompting. A run starts only when a user is present, so a mid-run expiry simply pauses with a "reconnect" message — never a surprise browser popup.</td>
+          <td>Time a full 47-document run against a live session; confirm the reconnect path behaves.</td>
+        </tr>
+        <tr>
+          <td>Model tiering works on the proxy</td>
+          <td>All AI calls go through the shared enterprise proxy and its approved model catalogue. The catalogue has multiple tiers, so cheap-sort / mid-extract still applies.</td>
+          <td>Map each pipeline stage to a catalogue model; confirm caching or bulk discounts pass through, and re-cost the batch table.</td>
+        </tr>
+        <tr>
+          <td>Template-to-output formatting is reliable</td>
+          <td>Built and tested here with sample Maybank and listing templates.</td>
+          <td>Paste the generated rows into the real workbook and bank portal on the pilot; confirm columns, codes, and totals land correctly.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2><span class="num">10</span>What we need to start</h2>
+  <div class="asks">
+    <p><b>From IT:</b> approval for an AI service on client data through the shared enterprise proxy, and read-only SharePoint access via the existing connector — each user signs in with their own account, and the app can never modify SharePoint. No write access is requested.</p>
+    <p><b>From the AP team:</b> one client to pilot with, their policy sheet, a copy of the Maybank template and payment listing layout, and an hour to agree what a useful flag report looks like.</p>
+    <p><b>Decision needed:</b> confirm the human-approval line stays exactly where this design puts it — the agent prepares, a person pastes, and nothing is paid without a person's approval.</p>
+  </div>
+
+  <footer>Draft solution design · Accounts Payable automation · Prepared for stakeholder discussion, August 2026</footer>
+</div>
