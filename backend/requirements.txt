@@ -1,0 +1,12 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0
+pydantic-ai-slim[openai]>=0.4
+python-dotenv>=1.0
+openpyxl>=3.1
+pillow>=10.0
+python-multipart>=0.0.9
+httpx>=0.27
+pytest>=8.0
+pytest-asyncio>=0.23
+pymupdf>=1.24

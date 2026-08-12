@@ -1,0 +1,82 @@
+/* Palette echoes the design doc. Kept deliberately small. */
+:root {
+  font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  color: #1c2a33;
+  background: #f6f8f9;
+  --accent: #0e7c6b;
+  --accent-soft: #e3f1ee;
+  --human: #b26a10;
+  --human-soft: #f8eddc;
+  --flag: #a4383a;
+  --flag-soft: #f7e6e6;
+  --line: #d9e2e7;
+  --muted: #5c6e79;
+}
+body { margin: 0; }
+.shell { max-width: 960px; margin: 0 auto; padding: 24px; }
+.topbar { display: flex; justify-content: space-between; align-items: center; }
+.topbar h1 { font-size: 22px; cursor: pointer; }
+
+.card {
+  background: #fff; border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 16px; margin: 10px 0;
+}
+.row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.grow { flex: 1; min-width: 160px; }
+.grow b { display: block; }
+.sub { display: block; font-size: 12.5px; color: var(--muted); }
+.error { color: var(--flag); font-weight: 600; }
+
+.uploader { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.uploader input[type="text"], .uploader input:not([type]) {
+  border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px;
+}
+
+.btn {
+  font-size: 13px; font-weight: 600; padding: 7px 14px; border-radius: 7px;
+  border: 1px solid var(--line); background: #fff; color: #1c2a33; cursor: pointer;
+}
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.warn { background: var(--human); border-color: var(--human); color: #fff; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.chip {
+  font-size: 11.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+  padding: 4px 10px; border-radius: 99px; white-space: nowrap;
+}
+.chip.ok { background: var(--accent-soft); color: var(--accent); }
+.chip.wait { background: #edf2f4; color: var(--muted); }
+.chip.review { background: var(--human-soft); color: var(--human); }
+.chip.flag { background: var(--flag-soft); color: var(--flag); }
+
+.tabs { display: flex; gap: 8px; margin: 14px 0; }
+.tab {
+  border: 1px solid var(--line); background: #fff; border-radius: 8px;
+  padding: 8px 18px; font-weight: 600; cursor: pointer;
+}
+.tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.tab:disabled { opacity: 0.5; cursor: not-allowed; }
+.tab em { font-style: normal; background: var(--flag); color: #fff; border-radius: 99px;
+  padding: 1px 7px; margin-left: 6px; font-size: 12px; }
+
+.summary-line { font-size: 16px; }
+.flagcard { border-left: 3px solid var(--flag); }
+.reason { margin: 8px 0 2px; }
+.basis { font-size: 13px; color: var(--human); background: var(--human-soft);
+  border-radius: 6px; padding: 6px 10px; }
+.docview { margin: 10px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.docview img, .docview embed { width: 100%; max-height: 480px; object-fit: contain; display: block; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.actions input { flex: 1; min-width: 200px; border: 1px solid var(--line);
+  border-radius: 7px; padding: 7px 10px; }
+
+.totals { display: flex; gap: 10px; flex-wrap: wrap; }
+.total { flex: 1; min-width: 150px; }
+.total b { font-size: 17px; }
+.total.good { border-color: var(--accent); }
+.total.good b { color: var(--accent); }
+
+.copyblock pre {
+  background: #edf2f4; border-radius: 6px; padding: 10px; font-size: 12px;
+  overflow-x: auto; margin: 10px 0 0;
+}
