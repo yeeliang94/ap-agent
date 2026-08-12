@@ -73,8 +73,8 @@ async def process_run(run_id: str, workspace: Path) -> None:
         db.commit()
 
         # ---- draft outputs (regenerated after review decisions) --------
-        run.outputs = output.build_outputs(docs, excluded_doc_ids=set(),
-                                           folder_url=folder_url)
+        run.outputs = await output.build_outputs(docs, excluded_doc_ids=set(),
+                                                 folder_url=folder_url)
         _set(db, run, status="ready")
         db.commit()
     except Exception as exc:

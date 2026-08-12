@@ -7,11 +7,13 @@ at demo scale, parsing per call is fine and always fresh.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 
 from openpyxl import load_workbook
 
 from ..docsource import get_source
+from . import listing_agent
 
 # --- finding the files ------------------------------------------------------
 # Client folders use human names, so each role is matched by the words that
@@ -108,19 +110,69 @@ def _open(role: str, folder_url: str | None = None):
     return load_workbook(io.BytesIO(source.get_reference(name)), read_only=True)
 
 
-def load_payment_listing(folder_url: str | None = None) -> list[dict]:
-    """Every row of the payment listing as {no, date, vendor, invoice_number, amount, status}."""
-    wb = _open("payment_listing", folder_url)  # required: raises if absent
-    ws = wb.active
-    rows = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if not row or row[3] is None:
-            continue
-        rows.append({
-            "no": str(row[0]), "date": str(row[1]), "vendor": str(row[2]),
-            "invoice_number": str(row[3]), "amount": float(row[4]), "status": str(row[5]),
-        })
-    wb.close()
+# The exact header row the canonical sample listing uses. A workbook whose
+# first row matches is parsed instantly in code; anything else is a real
+# client file and goes through the AI reading loop.
+_CANONICAL_LISTING_HEADERS = ("No.", "Date", "Vendor", "Invoice No.",
+                              "Amount (RM)", "Status")
+
+# Parsed listings keyed by (folder_url, content hash). A run touches the
+# listing several times (checks, outputs, per-correction re-checks); the AI
+# reading must be paid for once per distinct file, not once per touch.
+_LISTING_CACHE: dict[tuple[str, str], list[dict]] = {}
+
+
+def _parse_canonical_listing(data: bytes) -> list[dict] | None:
+    """The fixed-shape parse. None when the workbook isn't that shape."""
+    wb = load_workbook(io.BytesIO(data), read_only=True)
+    try:
+        ws = wb.active
+        first = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
+        if tuple(str(c) if c is not None else "" for c in first[:6]) != _CANONICAL_LISTING_HEADERS:
+            return None
+        rows = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not row or row[3] is None:
+                continue
+            rows.append({
+                "no": str(row[0]), "date": str(row[1]), "vendor": str(row[2]),
+                "invoice_number": str(row[3]), "amount": float(row[4]), "status": str(row[5]),
+            })
+        return rows
+    finally:
+        wb.close()
+
+
+async def load_payment_listing(folder_url: str | None = None) -> list[dict]:
+    """Every payment row as {no, date, vendor, invoice_number, amount, status}.
+
+    Canonical-shaped files (the samples) parse deterministically in code.
+    Human-shaped client files go through listing_agent's reason/act loop:
+    the AI maps the structure, code extracts and audits the numbers.
+    amount can be None where the file genuinely doesn't pair an amount to
+    an invoice — callers must treat that as "cannot compare", never zero.
+    """
+    source = get_source(folder_url)
+    name = resolve_name("payment_listing", source.list_names())
+    if name is None:
+        raise MissingReference(
+            "No payment listing found in the reference folder. Expected a "
+            "spreadsheet whose name contains: payment, listing.")
+    data = source.get_reference(name)
+    key = (folder_url or "", hashlib.sha256(data).hexdigest())
+    if key in _LISTING_CACHE:
+        return _LISTING_CACHE[key]
+
+    rows = _parse_canonical_listing(data)
+    if rows is None:
+        # data_only=True: balance columns are usually formulas, and the
+        # audit needs their cached values, not "=J5-K5" strings.
+        wb = load_workbook(io.BytesIO(data), data_only=True)
+        try:
+            rows = await listing_agent.ingest_workbook(wb)
+        finally:
+            wb.close()
+    _LISTING_CACHE[key] = rows
     return rows
 
 

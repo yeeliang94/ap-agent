@@ -89,7 +89,7 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
 
     def want(d) -> bool:
         return only_doc_ids is None or d.id in only_doc_ids
-    listing = reference.load_payment_listing(folder_url)
+    listing = await reference.load_payment_listing(folder_url)
     listing_by_number = {r["invoice_number"]: r for r in listing}
     clauses = reference.load_policy_clauses(folder_url)
     today = date.today()
@@ -125,7 +125,11 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
                     f"Invoice {number} matches a listing row marked "
                     f"'{listed['status']}' — paying it again would be a duplicate payment.",
                     "Rule: invoices matching a Paid listing row need review."))
-            if abs(float(f.get("amount", 0)) - listed["amount"]) > 0.01:
+            # amount None = the file grouped several invoices under one
+            # payment without per-line amounts, so there is no number to
+            # compare against. Skipping is honest; comparing to 0 is not.
+            if listed["amount"] is not None and \
+                    abs(float(f.get("amount", 0)) - listed["amount"]) > 0.01:
                 flags_out.append(_mk_flag(d.id, "AMOUNT_MISMATCH",
                     f"Invoice {number}: document reads {f.get('currency')} "
                     f"{f.get('amount'):.2f} but the listing row says {listed['amount']:.2f}.",

@@ -67,9 +67,9 @@ def _tsv_total(rows: list[str], amount_index: int) -> Decimal:
     return total
 
 
-def build_outputs(docs: list, excluded_doc_ids: set[str],
-                  folder_url: str | None = None) -> dict:
-    listing = reference.load_payment_listing(folder_url)
+async def build_outputs(docs: list, excluded_doc_ids: set[str],
+                        folder_url: str | None = None) -> dict:
+    listing = await reference.load_payment_listing(folder_url)
     headers = reference.load_maybank_headers(folder_url)
     listed_numbers = {r["invoice_number"] for r in listing}
 

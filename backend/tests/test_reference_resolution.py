@@ -58,11 +58,12 @@ def test_canonical_name_wins_over_keyword_match():
     assert reference.resolve_name("payment_listing", names) == "payment_listing.xlsx"
 
 
-def test_missing_payment_listing_stops_the_run(monkeypatch):
+@pytest.mark.asyncio
+async def test_missing_payment_listing_stops_the_run(monkeypatch):
     monkeypatch.setattr(reference, "get_source",
                         lambda *a, **k: _Source(["Client Brief.pdf"]))
     with pytest.raises(reference.MissingReference):
-        reference.load_payment_listing()
+        await reference.load_payment_listing()
 
 
 def test_missing_optional_files_return_empty(monkeypatch):
@@ -72,13 +73,17 @@ def test_missing_optional_files_return_empty(monkeypatch):
     assert reference.load_maybank_headers() == []
 
 
-def test_outputs_omit_bank_block_when_template_missing(monkeypatch):
+@pytest.mark.asyncio
+async def test_outputs_omit_bank_block_when_template_missing(monkeypatch):
     listing = [{"no": "0701", "date": "2026-01-01", "vendor": "Acme",
                 "invoice_number": "INV-1", "amount": 100.0, "status": "Planned"}]
-    monkeypatch.setattr(reference, "load_payment_listing", lambda *a, **k: listing)
+
+    async def fake_listing(*a, **k):
+        return listing
+    monkeypatch.setattr(reference, "load_payment_listing", fake_listing)
     monkeypatch.setattr(reference, "load_maybank_headers", lambda *a, **k: [])
 
-    res = output.build_outputs([_Doc("b", "INV-2", 250.0)], excluded_doc_ids=set())
+    res = await output.build_outputs([_Doc("b", "INV-2", 250.0)], excluded_doc_ids=set())
 
     assert res["bank_skipped"] is True
     assert res["bank_rows"] == [] and res["bank_header"] == ""

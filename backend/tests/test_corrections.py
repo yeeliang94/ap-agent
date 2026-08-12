@@ -59,7 +59,9 @@ def db(tmp_path, monkeypatch):
     Base.metadata.create_all(engine)
     TestSession = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     monkeypatch.setattr(routes, "SessionLocal", TestSession)
-    monkeypatch.setattr(reference, "load_payment_listing", lambda *a, **k: LISTING)
+    async def fake_listing(*a, **k):
+        return LISTING  # load_payment_listing is async (AI-capable) now
+    monkeypatch.setattr(reference, "load_payment_listing", fake_listing)
     monkeypatch.setattr(reference, "load_policy_clauses", lambda *a, **k: [])
     monkeypatch.setattr(reference, "load_maybank_headers", lambda *a, **k: HEADERS)
 
@@ -216,7 +218,7 @@ def test_recheck_and_rebuild_use_the_runs_snapshot_folder(db, monkeypatch):
         seen["checks"] = folder_url
         return []
 
-    def spy_outputs(docs, excluded, folder_url=None):
+    async def spy_outputs(docs, excluded, folder_url=None):
         seen["outputs"] = folder_url
         return {"built": True}
 

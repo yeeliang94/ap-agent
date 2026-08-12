@@ -385,7 +385,7 @@ async def correct_fields(run_id: str, doc_id: str, body: dict) -> dict:
             fl.document_id
             for fl in db.query(Flag).filter(Flag.run_id == run_id, Flag.status == "rejected")
         } | {d.id for d in docs if d.kind == "unknown"}
-        run.outputs = output_builder.build_outputs(
+        run.outputs = await output_builder.build_outputs(
             docs, excluded, folder_url=run.snapshot.get("sharepoint_folder_url"))
         db.commit()
         return {"ok": True}
@@ -394,7 +394,7 @@ async def correct_fields(run_id: str, doc_id: str, body: dict) -> dict:
 
 
 @router.post("/runs/{run_id}/flags/{flag_id}/decide")
-def decide_flag(run_id: str, flag_id: str, body: dict) -> dict:
+async def decide_flag(run_id: str, flag_id: str, body: dict) -> dict:
     """Record a human decision on one flag. body = {decision, note, exclude_document}."""
     decision = body.get("decision")
     if decision not in ("accepted", "rejected"):
@@ -426,7 +426,7 @@ def decide_flag(run_id: str, flag_id: str, body: dict) -> dict:
         # whatever the reviewer decided about their flag.
         excluded |= {d.id for d in docs if d.kind == "unknown"}
         try:
-            run.outputs = output_builder.build_outputs(
+            run.outputs = await output_builder.build_outputs(
                 docs, excluded, folder_url=run.snapshot.get("sharepoint_folder_url"))
         except Exception as exc:
             db.commit()  # the decision itself still stands
