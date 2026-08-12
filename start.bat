@@ -95,6 +95,13 @@ REM The server runs in THIS window, not a separate one. A separate window
 REM closes the instant the process dies, taking the crash message with it.
 REM Tee-Object shows every line here and copies it to server-log.txt, and
 REM 2>&1 merges the error channel in so tracebacks are not lost.
+REM
+REM ForEach-Object { $_.ToString() } matters: uvicorn writes ALL its logs
+REM to stderr, including routine ones. PowerShell wraps anything a native
+REM program sends to stderr in a red NativeCommandError record, so a
+REM healthy startup looks like a crash and a real crash looks the same as
+REM everything else. Converting each record to plain text first keeps the
+REM output readable — and keeps server-log.txt free of PowerShell noise.
 echo.
 echo App starting at http://localhost:8002
 echo The backend serves the built frontend from frontend\dist.
@@ -102,5 +109,5 @@ echo Logs appear below and are saved to server-log.txt
 echo Press Ctrl+C to stop the server.
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "& '%VENV%\Scripts\uvicorn.exe' app.main:app --port 8002 --app-dir backend 2>&1 | Tee-Object -FilePath 'server-log.txt'"
+  "$ErrorActionPreference = 'Continue'; & '%VENV%\Scripts\uvicorn.exe' app.main:app --port 8002 --app-dir backend 2>&1 | ForEach-Object { $_.ToString() } | Tee-Object -FilePath 'server-log.txt'"
 endlocal
