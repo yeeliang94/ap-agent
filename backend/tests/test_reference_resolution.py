@@ -80,7 +80,11 @@ async def test_outputs_omit_bank_block_when_template_missing(monkeypatch):
 
     async def fake_listing(*a, **k):
         return listing
+
+    async def fake_canonical(*a, **k):
+        return True
     monkeypatch.setattr(reference, "load_payment_listing", fake_listing)
+    monkeypatch.setattr(reference, "listing_is_canonical", fake_canonical)
     monkeypatch.setattr(reference, "load_maybank_headers", lambda *a, **k: [])
 
     res = await output.build_outputs([_Doc("b", "INV-2", 250.0)], excluded_doc_ids=set())
@@ -90,6 +94,65 @@ async def test_outputs_omit_bank_block_when_template_missing(monkeypatch):
     # The listing half must still reconcile for real, not be waved through.
     assert res["listing_rows"] and res["totals"]["match"] is True
     assert res["totals"]["listing"] == 250.0
+
+
+def test_match_listing_row_is_vendor_scoped():
+    from app.pipeline.checks import match_listing_row
+    by_number = {"13561": [
+        {"invoice_number": "13561", "vendor": "Good News Resources Sdn Bhd"},
+        {"invoice_number": "13561", "vendor": "Maxis Bhd"},
+    ]}
+    # the vendor breaks the tie
+    row, cands = match_listing_row(by_number, "13561", "Maxis")
+    assert row is not None and row["vendor"] == "Maxis Bhd" and len(cands) == 2
+    # no vendor singles one out -> ambiguous, never a guess
+    row, cands = match_listing_row(by_number, "13561", "Unrelated Trading")
+    assert row is None and len(cands) == 2
+    # unknown number -> no candidates at all
+    assert match_listing_row(by_number, "99999", "Maxis") == (None, [])
+
+
+@pytest.mark.asyncio
+async def test_number_collision_does_not_suppress_new_listing_row(monkeypatch):
+    """An invoice whose number coincides with a DIFFERENT vendor's listing
+    row is genuinely new — suppressing it would silently unschedule a
+    payment."""
+    listing = [{"no": "0701", "date": "2026-01-01", "vendor": "Maxis Bhd",
+                "invoice_number": "1000", "amount": 50.0, "status": "Planned"}]
+
+    async def fake_listing(*a, **k):
+        return listing
+
+    async def fake_canonical(*a, **k):
+        return True
+    monkeypatch.setattr(reference, "load_payment_listing", fake_listing)
+    monkeypatch.setattr(reference, "listing_is_canonical", fake_canonical)
+    monkeypatch.setattr(reference, "load_maybank_headers", lambda *a, **k: [])
+
+    res = await output.build_outputs([_Doc("a", "1000", 250.0)], excluded_doc_ids=set())
+    # _Doc's vendor is Acme — no relation to Maxis: the row must be emitted
+    assert len(res["listing_rows"]) == 1 and "Acme" in res["listing_rows"][0]
+
+
+@pytest.mark.asyncio
+async def test_noncanonical_listing_suppresses_paste_rows(monkeypatch):
+    """For a real client workbook there is no canonical layout to paste
+    into — claiming rows are paste-ready would be confidently wrong."""
+    listing = [{"no": "PV0726/01", "date": "2026-07-23", "vendor": "Acme",
+                "invoice_number": "INV-1", "amount": 100.0, "status": "Paid"}]
+
+    async def fake_listing(*a, **k):
+        return listing
+
+    async def fake_canonical(*a, **k):
+        return False
+    monkeypatch.setattr(reference, "load_payment_listing", fake_listing)
+    monkeypatch.setattr(reference, "listing_is_canonical", fake_canonical)
+    monkeypatch.setattr(reference, "load_maybank_headers", lambda *a, **k: [])
+
+    res = await output.build_outputs([_Doc("b", "INV-2", 250.0)], excluded_doc_ids=set())
+    assert res["listing_skipped"] is True
+    assert res["listing_rows"] == []
 
 
 class _Source:

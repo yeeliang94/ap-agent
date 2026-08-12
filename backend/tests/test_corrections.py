@@ -61,7 +61,11 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setattr(routes, "SessionLocal", TestSession)
     async def fake_listing(*a, **k):
         return LISTING  # load_payment_listing is async (AI-capable) now
+
+    async def fake_canonical(*a, **k):
+        return True
     monkeypatch.setattr(reference, "load_payment_listing", fake_listing)
+    monkeypatch.setattr(reference, "listing_is_canonical", fake_canonical)
     monkeypatch.setattr(reference, "load_policy_clauses", lambda *a, **k: [])
     monkeypatch.setattr(reference, "load_maybank_headers", lambda *a, **k: HEADERS)
 

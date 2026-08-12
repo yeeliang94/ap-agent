@@ -49,6 +49,7 @@ def _mk_flag(doc_id: str, code: str, reason: str, basis: str = "") -> dict:
 RULE_FIELDS: dict[str, set[str]] = {
     "DUPLICATE": {"invoice_number"},
     "NOT_IN_LISTING": {"invoice_number"},
+    "LISTING_AMBIGUOUS": {"invoice_number", "vendor"},
     "ALREADY_PAID": {"invoice_number"},
     "AMOUNT_MISMATCH": {"invoice_number", "amount"},
     "VENDOR_MISMATCH": {"invoice_number", "vendor"},
@@ -75,6 +76,30 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9%]+", " ", str(text).lower()).strip()
 
 
+def _vendor_matches(a: str, b: str) -> bool:
+    na, nb = _norm(a), _norm(b)
+    return bool(na) and bool(nb) and (na in nb or nb in na)
+
+
+def match_listing_row(by_number: dict[str, list[dict]], number: str,
+                      vendor: str) -> tuple[dict | None, list[dict]]:
+    """(matched row, all candidates) for an invoice number + vendor.
+
+    Invoice numbers are vendor-scoped in the real world: a year of monthly
+    tabs can hold the same number twice for different vendors. So a number
+    hit alone is only a match when it is unambiguous; several candidates
+    need the vendor to break the tie, and (None, many) = genuinely
+    ambiguous, which callers must surface, never guess through.
+    """
+    candidates = by_number.get(number, [])
+    if len(candidates) == 1:
+        return candidates[0], candidates
+    matched = [r for r in candidates if _vendor_matches(vendor, r["vendor"])]
+    if len(matched) == 1:
+        return matched[0], candidates
+    return None, candidates
+
+
 async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
                      folder_url: str | None = None) -> list[dict]:
     """Return flag dicts for everything a human must decide.
@@ -90,7 +115,12 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
     def want(d) -> bool:
         return only_doc_ids is None or d.id in only_doc_ids
     listing = await reference.load_payment_listing(folder_url)
-    listing_by_number = {r["invoice_number"]: r for r in listing}
+    # Number -> ALL rows with that number. A plain dict would keep only the
+    # last row, silently discarding same-numbered rows from other vendors
+    # or other monthly tabs.
+    listing_by_number: dict[str, list[dict]] = {}
+    for r in listing:
+        listing_by_number.setdefault(r["invoice_number"], []).append(r)
     clauses = reference.load_policy_clauses(folder_url)
     today = date.today()
 
@@ -112,11 +142,19 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
                 "Rule: one invoice number may appear only once per batch."))
         seen_numbers.setdefault(number, d.filename)
 
-        listed = listing_by_number.get(number)
-        if listed is None:
+        listed, candidates = match_listing_row(
+            listing_by_number, number, str(f.get("vendor", "")))
+        if not candidates:
             flags_out.append(_mk_flag(d.id, "NOT_IN_LISTING",
                 f"Invoice {number} ({f.get('vendor')}) is not in the payment listing.",
                 "Rule: every invoice must match a planned-payment row in the listing."))
+        elif listed is None:
+            vendors = sorted({str(r["vendor"]) for r in candidates})
+            flags_out.append(_mk_flag(d.id, "LISTING_AMBIGUOUS",
+                f"Invoice {number} matches {len(candidates)} listing rows "
+                f"(vendors: {', '.join(vendors)}) and the document vendor "
+                f"'{f.get('vendor')}' does not single one out.",
+                "Rule: a listing match must be unambiguous — a human picks."))
         else:
             # A number match alone is not enough — the matched row must
             # actually be this invoice, and must not already be paid.

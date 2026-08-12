@@ -116,10 +116,13 @@ def _open(role: str, folder_url: str | None = None):
 _CANONICAL_LISTING_HEADERS = ("No.", "Date", "Vendor", "Invoice No.",
                               "Amount (RM)", "Status")
 
-# Parsed listings keyed by (folder_url, content hash). A run touches the
-# listing several times (checks, outputs, per-correction re-checks); the AI
-# reading must be paid for once per distinct file, not once per touch.
-_LISTING_CACHE: dict[tuple[str, str], list[dict]] = {}
+# Parsed listings keyed by (folder_url, content hash), as
+# {"rows": [...], "canonical": bool}. A run touches the listing several
+# times (checks, outputs, per-correction re-checks); the AI reading must be
+# paid for once per distinct file, not once per touch. canonical records
+# WHICH parser succeeded: output building must know, because "rows to paste
+# into the listing" only make sense for the canonical column layout.
+_LISTING_CACHE: dict[tuple[str, str], dict] = {}
 
 
 def _parse_canonical_listing(data: bytes) -> list[dict] | None:
@@ -143,15 +146,7 @@ def _parse_canonical_listing(data: bytes) -> list[dict] | None:
         wb.close()
 
 
-async def load_payment_listing(folder_url: str | None = None) -> list[dict]:
-    """Every payment row as {no, date, vendor, invoice_number, amount, status}.
-
-    Canonical-shaped files (the samples) parse deterministically in code.
-    Human-shaped client files go through listing_agent's reason/act loop:
-    the AI maps the structure, code extracts and audits the numbers.
-    amount can be None where the file genuinely doesn't pair an amount to
-    an invoice — callers must treat that as "cannot compare", never zero.
-    """
+async def _listing_entry(folder_url: str | None) -> dict:
     source = get_source(folder_url)
     name = resolve_name("payment_listing", source.list_names())
     if name is None:
@@ -164,6 +159,7 @@ async def load_payment_listing(folder_url: str | None = None) -> list[dict]:
         return _LISTING_CACHE[key]
 
     rows = _parse_canonical_listing(data)
+    canonical = rows is not None
     if rows is None:
         # data_only=True: balance columns are usually formulas, and the
         # audit needs their cached values, not "=J5-K5" strings.
@@ -172,8 +168,26 @@ async def load_payment_listing(folder_url: str | None = None) -> list[dict]:
             rows = await listing_agent.ingest_workbook(wb)
         finally:
             wb.close()
-    _LISTING_CACHE[key] = rows
-    return rows
+    entry = {"rows": rows, "canonical": canonical}
+    _LISTING_CACHE[key] = entry
+    return entry
+
+
+async def load_payment_listing(folder_url: str | None = None) -> list[dict]:
+    """Every payment row as {no, date, vendor, invoice_number, amount, status}.
+
+    Canonical-shaped files (the samples) parse deterministically in code.
+    Human-shaped client files go through listing_agent's reason/act loop:
+    the AI maps the structure, code extracts and audits the numbers.
+    amount can be None where the file genuinely doesn't pair an amount to
+    an invoice — callers must treat that as "cannot compare", never zero.
+    """
+    return (await _listing_entry(folder_url))["rows"]
+
+
+async def listing_is_canonical(folder_url: str | None = None) -> bool:
+    """Did the canonical parser read this folder's listing? Cached with it."""
+    return (await _listing_entry(folder_url))["canonical"]
 
 
 def load_policy_clauses(folder_url: str | None = None) -> list[dict]:

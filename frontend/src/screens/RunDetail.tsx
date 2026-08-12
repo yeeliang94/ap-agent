@@ -307,14 +307,23 @@ function Output({ run }: { run: RunDetailData }) {
           ⚠ Register in Maybank before uploading: {out.new_vendors.join(", ")}
         </p>
       )}
-      <CopyBlock
-        title={`New payment listing rows (${out.listing_rows.length})`}
-        hint={`Only invoices not already in the listing${
-          out.already_listed ? ` — ${out.already_listed} already listed, nothing to paste for those` : ""
-        }`}
-        text={[out.listing_header, ...out.listing_rows].join("\n")}
-        preview={out.listing_rows}
-      />
+      {out.listing_skipped ? (
+        <p className="muted">
+          The client's payment listing uses its own layout (grouped rows,
+          monthly tabs), so paste-ready listing rows are not generated —
+          checks still ran against its data. Add new entries in the
+          listing workbook directly.
+        </p>
+      ) : (
+        <CopyBlock
+          title={`New payment listing rows (${out.listing_rows.length})`}
+          hint={`Only invoices not already in the listing${
+            out.already_listed ? ` — ${out.already_listed} already listed, nothing to paste for those` : ""
+          }`}
+          text={[out.listing_header, ...out.listing_rows].join("\n")}
+          preview={out.listing_rows}
+        />
+      )}
       {/* No template in the reference folder means no column layout to
           follow, so the block is omitted rather than shown empty. */}
       {!out.bank_skipped && (

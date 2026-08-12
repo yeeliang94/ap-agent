@@ -22,6 +22,7 @@ import re
 from decimal import Decimal
 
 from . import reference
+from .checks import _norm, _vendor_matches
 
 ACCOUNT_UNKNOWN = "[ACCOUNT UNKNOWN - fill from vendor master]"
 
@@ -71,7 +72,12 @@ async def build_outputs(docs: list, excluded_doc_ids: set[str],
                         folder_url: str | None = None) -> dict:
     listing = await reference.load_payment_listing(folder_url)
     headers = reference.load_maybank_headers(folder_url)
-    listed_numbers = {r["invoice_number"] for r in listing}
+    # Paste-ready listing rows exist only for the canonical column layout.
+    # For a real client workbook (grouped rows, monthly tabs) we do not
+    # know where or how new rows are written — emitting six-column rows
+    # labelled "paste this" would be confidently wrong, so the block is
+    # omitted and the UI says why.
+    listing_skipped = not await reference.listing_is_canonical(folder_url)
 
     # No template in the folder means no bank upload block. Omitting it is
     # safe and visible; inventing a column layout for money values is not.
@@ -97,9 +103,32 @@ async def build_outputs(docs: list, excluded_doc_ids: set[str],
         d for d in approved
         if str(d.fields.get("currency", "")).upper() == "MYR"
     ]
-    # Only invoices NOT already in the listing get new rows.
-    new_docs = [d for d in approved
-                if str(d.fields.get("invoice_number", "")) not in listed_numbers]
+    # Only invoices NOT already in the listing get new rows. "Already in"
+    # is the composite test (number + vendor): a number shared with a
+    # DIFFERENT vendor's row must not suppress this vendor's genuinely new
+    # invoice. Ambiguous matches count as listed — conservative, and the
+    # checks stage has already flagged them for a human.
+    by_number: dict[str, list[dict]] = {}
+    for r in listing:
+        by_number.setdefault(r["invoice_number"], []).append(r)
+
+    def _is_listed(d) -> bool:
+        candidates = by_number.get(str(d.fields.get("invoice_number", "")), [])
+        if not candidates:
+            return False
+        if len(candidates) > 1:
+            return True  # matched or ambiguous — either way, no new row
+        # One candidate: listed unless its vendor is CLEARLY someone else.
+        # A missing vendor on either side cannot prove a collision, so it
+        # stays listed — a duplicate paste row is recoverable, a silently
+        # unscheduled payment is not.
+        v_doc = str(d.fields.get("vendor", ""))
+        v_row = str(candidates[0]["vendor"])
+        if not _norm(v_doc) or not _norm(v_row):
+            return True
+        return _vendor_matches(v_doc, v_row)
+
+    new_docs = [] if listing_skipped else [d for d in approved if not _is_listed(d)]
 
     last_no = max((int(r["no"]) for r in listing if r["no"].isdigit()), default=700)
 
@@ -149,6 +178,9 @@ async def build_outputs(docs: list, excluded_doc_ids: set[str],
     return {
         "listing_header": "\t".join(["No.", "Date", "Vendor", "Invoice No.", "Amount (RM)", "Status"]),
         "listing_rows": listing_rows,
+        # True = the client's listing is not the canonical layout, so no
+        # paste-ready rows exist for it. Checks still ran against its data.
+        "listing_skipped": listing_skipped,
         "already_listed": len(approved) - len(new_docs),
         "bank_header": "\t".join(headers),
         "bank_rows": bank_rows,

@@ -8,6 +8,7 @@ silent stall.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 from ..db import SessionLocal
@@ -17,6 +18,8 @@ from .checks import run_checks
 from .extract import extract_all
 from .images import document_to_pngs
 from .sort import attach_receipts, sort_document
+
+log = logging.getLogger("runner")
 
 
 async def process_run(run_id: str, workspace: Path) -> None:
@@ -78,6 +81,10 @@ async def process_run(run_id: str, workspace: Path) -> None:
         _set(db, run, status="ready")
         db.commit()
     except Exception as exc:
+        # The run's error field carries a one-line reason for the UI; the
+        # full traceback belongs in the server log, or diagnosing a failed
+        # run means guessing.
+        log.exception("run %s failed: %s", run_id, exc)
         db.rollback()
         run = db.get(Run, run_id)
         if run:

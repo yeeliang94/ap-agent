@@ -77,6 +77,8 @@ export interface Outputs {
   listing_header: string;
   listing_rows: string[];
   already_listed: number;
+  /** True when the client listing has its own layout — no paste-ready rows. */
+  listing_skipped: boolean;
   bank_header: string;
   bank_rows: string[];
   /** True when the reference folder had no bank template, so no block exists. */
