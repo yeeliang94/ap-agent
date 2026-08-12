@@ -7,13 +7,43 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
-from . import config
+from . import config, settings_store
 from .db import SessionLocal
 from .models import AuditEvent, Document, Flag, Run
 from .pipeline import output as output_builder
 from .pipeline.runner import start_background
 
 router = APIRouter()
+
+
+@router.get("/settings")
+def get_settings() -> dict:
+    """The app-level settings shown on the main screen. Secrets stay in .env."""
+    return {
+        "client_name": settings_store.get_setting("client_name"),
+        "sharepoint_folder_url": settings_store.get_setting("sharepoint_folder_url"),
+    }
+
+
+@router.put("/settings")
+def update_settings(body: dict) -> dict:
+    """Save the on-screen settings. body = {client_name, sharepoint_folder_url}."""
+    client_name = body.get("client_name")
+    folder_url = body.get("sharepoint_folder_url")
+    if not isinstance(client_name, str) or not client_name.strip():
+        raise HTTPException(400, "Client name cannot be empty.")
+    if len(client_name.strip()) > 120:
+        raise HTTPException(400, "Client name is too long (max 120 characters).")
+    if not isinstance(folder_url, str) or not folder_url.strip().startswith("https://"):
+        raise HTTPException(400, "SharePoint folder URL must start with https:// — "
+                                 "copy it from the browser's address bar.")
+    if len(folder_url.strip()) > 500:
+        raise HTTPException(400, "SharePoint folder URL is too long (max 500 characters).")
+    settings_store.set_settings({
+        "client_name": client_name.strip(),
+        "sharepoint_folder_url": folder_url.strip(),
+    })
+    return get_settings()
 
 # Only these file types may come out of an uploaded zip. Anything else is
 # skipped and reported — never silently processed.
@@ -24,9 +54,11 @@ ALLOWED = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
 async def create_run(client: str = Form(...), batch: UploadFile = File(...)) -> dict:
     # Single-client MVP: applying the configured client's policy to a
     # different client's documents would be silent nonsense — refuse.
-    if client.strip() != config.CLIENT_NAME:
+    configured = settings_store.get_setting("client_name")
+    if client.strip() != configured:
         raise HTTPException(
-            400, f"This installation is configured for {config.CLIENT_NAME!r} only."
+            400, f"This installation is configured for {configured!r} only "
+                 "(changeable in Settings on the main screen)."
         )
     payload = await batch.read()
     if len(payload) > config.MAX_ZIP_MB * 1024 * 1024:
@@ -34,7 +66,12 @@ async def create_run(client: str = Form(...), batch: UploadFile = File(...)) -> 
 
     db = SessionLocal()
     try:
-        run = Run(client=client)
+        # Snapshot the settings this run is judged under: switching clients
+        # in Settings later must never change how THIS run is checked.
+        run = Run(client=client, snapshot={
+            "client_name": configured,
+            "sharepoint_folder_url": settings_store.get_setting("sharepoint_folder_url"),
+        })
         db.add(run)
         db.commit()
 
@@ -201,19 +238,25 @@ def _validate_correction(field: str, value):
 
 
 @router.post("/runs/{run_id}/documents/{doc_id}/correct")
-async def correct_field(run_id: str, doc_id: str, body: dict) -> dict:
-    """Record an audited human correction of one extracted value, then
-    re-check ONLY this document and rebuild the outputs.
+async def correct_fields(run_id: str, doc_id: str, body: dict) -> dict:
+    """Record audited human corrections of extracted values (one request per
+    document, however many fields changed), then re-check the affected
+    documents and rebuild the outputs.
 
-    body = {field, value, reason}. Flags that no longer apply are marked
+    body = {fields: {name: value, ...}, reason}. Every value is validated
+    before any is applied. Flags that no longer apply are marked
     resolved_by_correction (kept, never deleted); newly triggered rules
-    raise fresh open flags.
+    raise fresh open flags; codes a human already decided stay decided.
     """
-    from .pipeline.checks import run_checks
+    from .pipeline.checks import RULE_FIELDS, run_checks
 
-    field, reason = str(body.get("field", "")), str(body.get("reason", "")).strip()
-    if not reason:
+    reason = body.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
         raise HTTPException(400, "A short reason is required — it goes in the audit trail.")
+    reason = reason.strip()[:300]
+    submitted = body.get("fields")
+    if not isinstance(submitted, dict) or not submitted:
+        raise HTTPException(400, "fields must map field names to corrected values.")
 
     db = SessionLocal()
     try:
@@ -223,61 +266,127 @@ async def correct_field(run_id: str, doc_id: str, body: dict) -> dict:
             raise HTTPException(404, "No such document.")
         if run.status != "ready":
             raise HTTPException(400, "Corrections are only possible once the run is ready.")
-        if field not in CORRECTABLE.get(doc.kind, set()):
-            raise HTTPException(400, f"Field {field!r} is not correctable on a {doc.kind}.")
 
-        value = _validate_correction(field, body.get("value"))
-        old = doc.fields.get(field)
-        if old == value:
-            return {"ok": True, "unchanged": True}
+        # Validate every field before applying any — a typo in one field
+        # must not leave the document half-corrected.
+        validated = {}
+        for field, raw in submitted.items():
+            field = str(field)
+            if field not in CORRECTABLE.get(doc.kind, set()):
+                raise HTTPException(400, f"Field {field!r} is not correctable on a {doc.kind}.")
+            validated[field] = _validate_correction(field, raw)
 
-        # Apply: new value in, human verified so the doubt note goes, the
-        # derived claim fields are cleared so judgment re-runs fresh.
-        new_fields = {**doc.fields, field: value}
-        new_fields.pop("category", None)
-        new_fields.pop("clause", None)
-        doc.fields = new_fields
-        doc.confidence = {k: v for k, v in doc.confidence.items() if k != field}
-        doc.corrections = {**doc.corrections,
-                           field: {"from": old, "to": value, "reason": reason}}
-        db.add(AuditEvent(
-            run_id=run_id, actor="reviewer", action="field_corrected",
-            detail=f"{doc.filename}.{field}: {old!r} -> {value!r} — {reason}",
-        ))
-        db.commit()
+        # An invoice-number change can create or clear a DUPLICATE flag on
+        # the OTHER document carrying that number, so remember both numbers.
+        affected_numbers = set()
+        if doc.kind == "invoice":
+            affected_numbers.add(str(doc.fields.get("invoice_number", "")).strip())
 
-        # Re-check just this document (cross-doc context still considered).
+        changed = {f: v for f, v in validated.items() if doc.fields.get(f) != v}
+        if changed:
+            # Apply: new values in, human verified so the doubt notes go,
+            # the derived claim fields are cleared so judgment re-runs fresh.
+            new_fields = {**doc.fields, **changed}
+            new_fields.pop("category", None)
+            new_fields.pop("clause", None)
+            corrections = dict(doc.corrections)
+            for field, value in changed.items():
+                old = doc.fields.get(field)
+                corrections[field] = {"from": old, "to": value, "reason": reason}
+                db.add(AuditEvent(
+                    run_id=run_id, actor="reviewer", action="field_corrected",
+                    detail=f"{doc.filename}.{field}: {old!r} -> {value!r} — {reason}",
+                ))
+            doc.fields = new_fields
+            doc.confidence = {k: v for k, v in doc.confidence.items() if k not in changed}
+            doc.corrections = corrections
+            # Outputs were built from the old value — withdraw them in the
+            # same commit, so a failed re-check can never leave stale copy
+            # blocks published. They are rebuilt below on success.
+            run.outputs = {}
+            db.commit()
+        # No early return when nothing changed: a retry after "correction
+        # saved, but re-check failed" must repair the stale flags rather
+        # than short-circuit on the already-applied value.
+
         docs = db.query(Document).filter(Document.run_id == run_id).all()
-        target = next(d for d in docs if d.id == doc_id)
+        if doc.kind == "invoice":
+            affected_numbers.add(str(doc.fields.get("invoice_number", "")).strip())
+        scope = {doc_id} | {
+            d.id for d in docs
+            if d.id != doc_id and d.kind == "invoice"
+            and str(d.fields.get("invoice_number", "")).strip() in affected_numbers
+        }
         try:
-            new_flag_dicts = await run_checks(docs, only_doc_ids={doc_id})
+            new_flag_dicts = await run_checks(
+                docs, only_doc_ids=scope,
+                folder_url=run.snapshot.get("sharepoint_folder_url"))
         except Exception as exc:
-            raise HTTPException(500, f"Correction saved, but re-check failed: {exc}")
+            raise HTTPException(
+                500, f"Correction saved, but re-check failed: {exc} — "
+                     "save again to retry the re-check.")
 
-        new_codes = {fd["code"] for fd in new_flag_dicts}
-        existing = db.query(Flag).filter(
-            Flag.run_id == run_id, Flag.document_id == doc_id
-        ).all()
-        for fl in existing:
-            if fl.status == "open" and fl.code not in new_codes:
-                fl.status = "resolved_by_correction"
-                fl.resolution = f"No longer applies after correcting {field} — {reason}"
-        undecided_codes = {fl.code for fl in existing if fl.status == "open"}
+        new_by_doc: dict[str, set[str]] = {}
         for fd in new_flag_dicts:
-            if fd["code"] not in undecided_codes:
+            new_by_doc.setdefault(fd["document_id"], set()).add(fd["code"])
+        existing = db.query(Flag).filter(
+            Flag.run_id == run_id, Flag.document_id.in_(scope)
+        ).all()
+        changed_fields = set(changed)
+        open_now = {}
+        for fl in existing:
+            if fl.status == "open" and fl.code not in new_by_doc.get(fl.document_id, set()):
+                fl.status = "resolved_by_correction"
+                fl.resolution = (f"No longer applies after correcting "
+                                 f"{', '.join(sorted(changed)) or 'values'} — {reason}")
+            if fl.status == "open":
+                open_now[(fl.document_id, fl.code)] = fl
+            # A rejection judged the OLD value. Once that value is
+            # corrected, the rejection no longer stands — supersede it so
+            # it stops excluding the document. If the rule still fires on
+            # the new value, the fresh open flag below demands a new
+            # decision before anything reaches the output.
+            if (fl.status == "rejected"
+                    and RULE_FIELDS.get(fl.code, changed_fields) & changed_fields):
+                fl.status = "superseded_by_correction"
+                fl.resolution = (f"Rejection superseded by correcting "
+                                 f"{', '.join(sorted(changed))} — {reason}")
+        # A decided flag stays decided ONLY while the values its rule rests
+        # on are unchanged. Correcting one of those values makes any
+        # re-triggered rule a NEW incident the human has not seen — e.g. a
+        # decided duplicate of number OLD must not hide a fresh duplicate
+        # of number NEW.
+        decided_covers = {
+            (fl.document_id, fl.code) for fl in existing
+            if fl.status in ("accepted", "rejected")
+            and not (RULE_FIELDS.get(fl.code, changed_fields) & changed_fields)
+        }
+        for fd in new_flag_dicts:
+            key = (fd["document_id"], fd["code"])
+            if key in open_now:
+                # Rule still applies — refresh the message so it describes
+                # the corrected values, not the old ones.
+                open_now[key].reason = fd["reason"]
+                open_now[key].basis = fd["basis"]
+            elif key not in decided_covers:
                 db.add(Flag(run_id=run_id, **fd))
         db.add(AuditEvent(
             run_id=run_id, actor="system", action="document_rechecked",
-            detail=f"{doc.filename} after correcting {field}: "
+            detail=f"{doc.filename} after correcting "
+                   f"{', '.join(sorted(changed)) or 'nothing (retry)'}: "
                    f"{len(new_flag_dicts)} rule(s) now apply",
         ))
 
-        # Rebuild the copy blocks from the corrected state.
+        # Rebuild the copy blocks from the corrected state. Flush first:
+        # the session doesn't autoflush, so without it the exclusion query
+        # would still see the pre-correction flag statuses.
+        db.flush()
         excluded = {
             fl.document_id
             for fl in db.query(Flag).filter(Flag.run_id == run_id, Flag.status == "rejected")
         } | {d.id for d in docs if d.kind == "unknown"}
-        run.outputs = output_builder.build_outputs(docs, excluded)
+        run.outputs = output_builder.build_outputs(
+            docs, excluded, folder_url=run.snapshot.get("sharepoint_folder_url"))
         db.commit()
         return {"ok": True}
     finally:
@@ -303,6 +412,10 @@ def decide_flag(run_id: str, flag_id: str, body: dict) -> dict:
             detail=f"[{flag.code}] {flag.reason} — note: {flag.resolution or 'none'}",
         ))
         # Rebuild the copy blocks: rejected flags exclude their document.
+        # Flush first — the session doesn't autoflush, so without it the
+        # exclusion query would not see THIS decision yet and the rebuilt
+        # outputs would lag one decision behind.
+        db.flush()
         run = db.get(Run, run_id)
         docs = db.query(Document).filter(Document.run_id == run_id).all()
         excluded = {
@@ -313,7 +426,8 @@ def decide_flag(run_id: str, flag_id: str, body: dict) -> dict:
         # whatever the reviewer decided about their flag.
         excluded |= {d.id for d in docs if d.kind == "unknown"}
         try:
-            run.outputs = output_builder.build_outputs(docs, excluded)
+            run.outputs = output_builder.build_outputs(
+                docs, excluded, folder_url=run.snapshot.get("sharepoint_folder_url"))
         except Exception as exc:
             db.commit()  # the decision itself still stands
             raise HTTPException(500, f"Decision recorded, but output rebuild failed: {exc}")

@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { listRuns, uploadBatch, RunSummary } from "../api";
+import {
+  getSettings,
+  listRuns,
+  saveSettings,
+  uploadBatch,
+  AppSettings,
+  RunSummary,
+} from "../api";
 
 const STAGE_LABEL: Record<string, string> = {
   queued: "Queued",
@@ -13,10 +20,28 @@ const STAGE_LABEL: Record<string, string> = {
 // Screen A: your runs. A run starts only when you upload a batch here.
 export default function RunsList({ onOpen }: { onOpen: (id: string) => void }) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
-  const client = "Client ABC"; // single-client MVP; becomes per-client config later
+  // One client at a time, set on screen (Settings below) — the backend
+  // rejects uploads for any other name.
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const client = settings?.client_name ?? "";
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+
+  // Keep retrying until settings load: a hiccup at startup must not leave
+  // the upload button dead forever. (The runs poll below reports errors.)
+  useEffect(() => {
+    if (settings) return;
+    let alive = true;
+    const tick = () =>
+      getSettings().then((s) => alive && setSettings(s)).catch(() => {});
+    tick();
+    const t = setInterval(tick, 3000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [settings]);
 
   // Poll every 3s so progress chips move while a run is working.
   useEffect(() => {
@@ -53,9 +78,9 @@ export default function RunsList({ onOpen }: { onOpen: (id: string) => void }) {
           <b>Start a new run</b>
           <span className="sub">Upload a client's batch zip — nothing runs until you do</span>
         </div>
-        {/* Single-client MVP: the backend rejects any other name, so the
-            field is fixed rather than pretending to be a choice. */}
-        <input value={client} readOnly title="Single-client MVP — per-client config comes later" />
+        {/* The batch is checked against THIS client's policy and listing.
+            Change it in Settings below — the backend rejects other names. */}
+        <input value={client} readOnly title="Set in Settings below" />
         <input
           ref={fileInput}
           type="file"
@@ -101,6 +126,73 @@ export default function RunsList({ onOpen }: { onOpen: (id: string) => void }) {
         </div>
       ))}
       {runs.length === 0 && !error && <p className="sub">No runs yet.</p>}
+
+      {settings && <SettingsCard current={settings} onSaved={setSettings} />}
     </section>
+  );
+}
+
+// The two values a reviewer owns: whose policy applies, and where the
+// reference files (payment listing, policy sheet, bank template) live.
+// Secrets — API keys, the proxy, the MCP endpoint — stay in .env, set by IT.
+function SettingsCard({
+  current,
+  onSaved,
+}: {
+  current: AppSettings;
+  onSaved: (s: AppSettings) => void;
+}) {
+  const [clientName, setClientName] = useState(current.client_name);
+  const [folderUrl, setFolderUrl] = useState(current.sharepoint_folder_url);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  const dirty =
+    clientName !== current.client_name || folderUrl !== current.sharepoint_folder_url;
+
+  async function save() {
+    setBusy(true);
+    setError("");
+    setSaved(false);
+    try {
+      onSaved(
+        await saveSettings({ client_name: clientName, sharepoint_folder_url: folderUrl })
+      );
+      setSaved(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save settings");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card settings">
+      <b>Settings</b>
+      <span className="sub">
+        Which client's policy applies, and the SharePoint folder holding the three
+        reference files. Keys and connection secrets stay in .env.
+      </span>
+      <label className="editrow">
+        <span>client name</span>
+        <input value={clientName} onChange={(e) => setClientName(e.target.value)} />
+      </label>
+      <label className="editrow">
+        <span>SharePoint folder URL</span>
+        <input
+          value={folderUrl}
+          placeholder="https://…sharepoint.com/sites/…  (copy from the browser)"
+          onChange={(e) => setFolderUrl(e.target.value)}
+        />
+      </label>
+      <div className="actions">
+        <button className="btn primary" disabled={busy || !dirty} onClick={save}>
+          {busy ? "Saving…" : "Save settings"}
+        </button>
+        {saved && !dirty && <span className="sub">Saved — applies to the next run.</span>}
+      </div>
+      {error && <p className="error">{error}</p>}
+    </div>
   );
 }

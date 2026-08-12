@@ -54,12 +54,14 @@ class McpSource:
 
     RETRIES = 3
 
-    def __init__(self) -> None:
+    def __init__(self, folder_url: str | None = None) -> None:
+        from . import settings_store
+
         self.base = os.getenv("MCP_URL", "http://127.0.0.1:8003")
-        self.folder_url = os.getenv(
-            "SHAREPOINT_FOLDER_URL",
-            "https://example.sharepoint.com/sites/clientabc/Shared%20Documents/AP%20Reference",
-        )
+        # Callers processing a run pass that run's snapshotted folder URL;
+        # otherwise fall back to the on-screen setting (which itself falls
+        # back to the SHAREPOINT_FOLDER_URL .env value until first save).
+        self.folder_url = folder_url or settings_store.get_setting("sharepoint_folder_url")
 
     def _call(self, tool: str, body: dict) -> dict:
         last_error = ""
@@ -107,7 +109,11 @@ class McpSource:
         )
 
 
-def get_source():
-    """Pick the source from .env: DOC_SOURCE=local (default) or mcp."""
+def get_source(folder_url: str | None = None):
+    """Pick the source from .env: DOC_SOURCE=local (default) or mcp.
+
+    folder_url is a run's snapshotted SharePoint folder; None means the
+    current on-screen setting. The local development source ignores it.
+    """
     kind = os.getenv("DOC_SOURCE", "local").lower()
-    return McpSource() if kind == "mcp" else LocalFolderSource()
+    return McpSource(folder_url) if kind == "mcp" else LocalFolderSource()

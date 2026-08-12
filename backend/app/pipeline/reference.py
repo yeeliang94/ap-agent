@@ -14,13 +14,15 @@ from openpyxl import load_workbook
 from ..docsource import get_source
 
 
-def _open(name: str):
-    return load_workbook(io.BytesIO(get_source().get_reference(name)), read_only=True)
+def _open(name: str, folder_url: str | None = None):
+    return load_workbook(
+        io.BytesIO(get_source(folder_url).get_reference(name)), read_only=True
+    )
 
 
-def load_payment_listing() -> list[dict]:
+def load_payment_listing(folder_url: str | None = None) -> list[dict]:
     """Every row of the payment listing as {no, date, vendor, invoice_number, amount, status}."""
-    wb = _open("payment_listing.xlsx")
+    wb = _open("payment_listing.xlsx", folder_url)
     ws = wb.active
     rows = []
     for row in ws.iter_rows(min_row=2, values_only=True):
@@ -34,9 +36,9 @@ def load_payment_listing() -> list[dict]:
     return rows
 
 
-def load_policy_clauses() -> list[dict]:
+def load_policy_clauses(folder_url: str | None = None) -> list[dict]:
     """Every policy clause as {clause, category, cap, currency, text}."""
-    wb = _open("policy_sheet.xlsx")
+    wb = _open("policy_sheet.xlsx", folder_url)
     ws = wb.active
     clauses = []
     for row in ws.iter_rows(min_row=2, values_only=True):
@@ -50,9 +52,9 @@ def load_policy_clauses() -> list[dict]:
     return clauses
 
 
-def load_maybank_headers() -> list[str]:
+def load_maybank_headers(folder_url: str | None = None) -> list[str]:
     """The column layout of the bank upload template — learned, not hardcoded."""
-    wb = _open("maybank_template.xlsx")
+    wb = _open("maybank_template.xlsx", folder_url)
     ws = wb.active
     headers = [str(c) for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
     wb.close()

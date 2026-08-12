@@ -53,7 +53,8 @@ async def process_run(run_id: str, workspace: Path) -> None:
 
         # ---- check ------------------------------------------------------
         _set(db, run, status="checking", progress={})
-        flag_dicts = await run_checks(docs)
+        folder_url = run.snapshot.get("sharepoint_folder_url")
+        flag_dicts = await run_checks(docs, folder_url=folder_url)
         for fd in flag_dicts:
             db.add(Flag(run_id=run_id, **fd))
         for d in docs:
@@ -62,7 +63,8 @@ async def process_run(run_id: str, workspace: Path) -> None:
         db.commit()
 
         # ---- draft outputs (regenerated after review decisions) --------
-        run.outputs = output.build_outputs(docs, excluded_doc_ids=set())
+        run.outputs = output.build_outputs(docs, excluded_doc_ids=set(),
+                                           folder_url=folder_url)
         _set(db, run, status="ready")
         db.commit()
     except Exception as exc:

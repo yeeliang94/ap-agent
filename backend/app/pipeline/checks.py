@@ -41,25 +41,57 @@ def _mk_flag(doc_id: str, code: str, reason: str, basis: str = "") -> dict:
     return {"document_id": doc_id, "code": code, "reason": reason, "basis": basis}
 
 
+# Which correctable fields each rule's outcome depends on. A human decision
+# on a flag covers those values only: when a correction changes one of them,
+# the old decision no longer covers the new situation, so the rule may raise
+# a fresh flag. Codes missing from this map are treated as depending on
+# every corrected field (conservative — re-raise rather than hide).
+RULE_FIELDS: dict[str, set[str]] = {
+    "DUPLICATE": {"invoice_number"},
+    "NOT_IN_LISTING": {"invoice_number"},
+    "ALREADY_PAID": {"invoice_number"},
+    "AMOUNT_MISMATCH": {"invoice_number", "amount"},
+    "VENDOR_MISMATCH": {"invoice_number", "vendor"},
+    "NON_MYR_INVOICE": {"currency"},
+    "OLD_DATED": {"date"},
+    "BAD_DATE": {"date"},
+    # Claims are re-judged as a whole, so every claim field feeds every rule.
+    "JUDGMENT_FAILED": {"claimant", "description", "amount", "currency"},
+    "AMBIGUOUS_CATEGORY": {"claimant", "description", "amount", "currency"},
+    "QUOTE_MISMATCH": {"claimant", "description", "amount", "currency"},
+    "CURRENCY_MISMATCH": {"claimant", "description", "amount", "currency"},
+    "OVER_CAP": {"claimant", "description", "amount", "currency"},
+    "RECEIPT_MISMATCH": {"claimant", "description", "amount", "currency"},
+    # These do not rest on any correctable value.
+    "UNCLASSIFIED": set(),
+    "UNATTACHED_RECEIPT": set(),
+    "LOW_CONFIDENCE": set(),
+    "PROCESSING_ERROR": set(),
+}
+
+
 def _norm(text: str) -> str:
     """Lowercase and collapse whitespace/punctuation, for tolerant comparison."""
     return re.sub(r"[^a-z0-9%]+", " ", str(text).lower()).strip()
 
 
-async def run_checks(docs: list, only_doc_ids: set[str] | None = None) -> list[dict]:
+async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
+                     folder_url: str | None = None) -> list[dict]:
     """Return flag dicts for everything a human must decide.
 
     only_doc_ids narrows WHICH documents get flags (used when re-checking a
     single corrected document) — cross-document context (duplicate numbers)
-    is still built from the whole batch.
+    is still built from the whole batch. folder_url is the run's snapshotted
+    SharePoint folder, so an old run is always judged against ITS client's
+    reference files, not whichever client Settings points at today.
     """
     flags: list[dict] = []
 
     def want(d) -> bool:
         return only_doc_ids is None or d.id in only_doc_ids
-    listing = reference.load_payment_listing()
+    listing = reference.load_payment_listing(folder_url)
     listing_by_number = {r["invoice_number"]: r for r in listing}
-    clauses = reference.load_policy_clauses()
+    clauses = reference.load_policy_clauses(folder_url)
     today = date.today()
 
     # ---- invoices: pure code -------------------------------------------

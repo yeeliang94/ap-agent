@@ -11,6 +11,27 @@ export interface RunSummary {
   created_at: string;
 }
 
+export interface AppSettings {
+  client_name: string;
+  sharepoint_folder_url: string;
+}
+
+export async function getSettings(): Promise<AppSettings> {
+  const r = await fetch("/api/settings");
+  if (!r.ok) throw new Error("Could not load settings");
+  return r.json();
+}
+
+export async function saveSettings(s: AppSettings): Promise<AppSettings> {
+  const r = await fetch("/api/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(s),
+  });
+  if (!r.ok) throw new Error((await r.json()).detail ?? "Could not save settings");
+  return r.json();
+}
+
 export interface Doc {
   id: string;
   filename: string;
@@ -28,17 +49,16 @@ export const CORRECTABLE: Record<string, string[]> = {
   claim: ["claimant", "description", "amount", "currency"],
 };
 
-export async function correctField(
+export async function correctFields(
   runId: string,
   docId: string,
-  field: string,
-  value: string,
+  fields: Record<string, string>,
   reason: string
 ): Promise<void> {
   const r = await fetch(`/api/runs/${runId}/documents/${docId}/correct`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ field, value, reason }),
+    body: JSON.stringify({ fields, reason }),
   });
   if (!r.ok) throw new Error((await r.json()).detail ?? "Correction failed");
 }

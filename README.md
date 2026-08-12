@@ -59,9 +59,11 @@ Rules inherited from the enterprise repo, already honored in code:
 ## Windows test checklist (maps to design doc §9)
 
 1. **SharePoint read access suffices** — point `DOC_SOURCE=mcp` + `MCP_URL`
-   at the real MCP, set `SHAREPOINT_FOLDER_URL` to the real AP folder, and
-   confirm the three reference files load. Watch for intermittent ReadError:
-   the adapter retries 3× (`backend/app/docsource.py`) — confirm that's enough.
+   at the real MCP, set the folder URL in **Settings on the main screen**
+   (paste the real AP folder's browser address; `SHAREPOINT_FOLDER_URL` in
+   .env is only the first-start default), and confirm the three reference
+   files load. Watch for intermittent ReadError: the adapter retries 3×
+   (`backend/app/docsource.py`) — confirm that's enough.
 2. **Sign-in lasts a full run** — run a real batch end-to-end against a live
    delegated session; confirm mid-run expiry produces the structured
    "source unavailable" failure, not a hang or a popup.
@@ -74,8 +76,10 @@ Rules inherited from the enterprise repo, already honored in code:
 ## Honest limitations (MVP)
 
 - Single user, no login; "reviewer" is hardcoded in the audit trail.
-- One client config, enforced: the API rejects any client other than the
-  configured one. Per-client config files are designed but not built.
+- One client at a time, enforced: the API rejects any client other than the
+  one set in Settings on the main screen (client name + SharePoint folder;
+  .env values are the first-start defaults). Per-client config files —
+  several clients side by side — are designed but not built.
 - Bank rows never contain account numbers — there is no vendor master yet,
   so every account cell says `[ACCOUNT UNKNOWN - fill from vendor master]`.
   A vendor master reference file is the intended next data source.

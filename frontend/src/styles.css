@@ -76,6 +76,9 @@ body { margin: 0; }
 .total.good { border-color: var(--accent); }
 .total.good b { color: var(--accent); }
 
+.settings { margin-top: 24px; }
+.settings > .sub { display: block; margin: 4px 0 10px; }
+
 .editor { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 10px; }
 .editrow { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
 .editrow span { width: 180px; font-size: 13px; color: var(--muted); }

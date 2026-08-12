@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  correctField,
+  correctFields,
   decideFlag,
   documentFileUrl,
   getRun,
@@ -154,7 +154,18 @@ function FlagCard({
         </div>
       )}
       {editing && doc ? (
-        <FieldEditor runId={runId} doc={doc} onDone={onDecided} onCancel={() => setEditing(false)} />
+        <FieldEditor
+          runId={runId}
+          doc={doc}
+          // Close the editor before refreshing: if this flag stays open
+          // (value corrected but still wrong), a still-mounted editor
+          // would keep its busy=true state and lock its buttons forever.
+          onDone={() => {
+            setEditing(false);
+            onDecided();
+          }}
+          onCancel={() => setEditing(false)}
+        />
       ) : (
         <div className="actions">
           <input
@@ -216,9 +227,17 @@ function FieldEditor({
     setBusy(true);
     setError("");
     try {
-      for (const f of changed) {
-        await correctField(runId, doc.id, f, values[f], reason);
-      }
+      // One request for all changed fields — the server validates them all
+      // before applying any, and re-checks the document once. With no
+      // changes, the current values are sent as-is: the server treats
+      // that as a pure re-check (the recovery after a failed one).
+      const send = changed.length > 0 ? changed : fields;
+      await correctFields(
+        runId,
+        doc.id,
+        Object.fromEntries(send.map((f) => [f, values[f]])),
+        reason
+      );
       onDone();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Correction failed");
@@ -250,10 +269,14 @@ function FieldEditor({
         />
         <button
           className="btn primary"
-          disabled={busy || changed.length === 0 || !reason.trim()}
+          disabled={busy || !reason.trim()}
           onClick={save}
         >
-          {busy ? "Saving…" : `Save ${changed.length} correction(s)`}
+          {busy
+            ? "Saving…"
+            : changed.length > 0
+              ? `Save ${changed.length} correction(s)`
+              : "Re-check document"}
         </button>
         <button className="btn" disabled={busy} onClick={onCancel}>
           Cancel

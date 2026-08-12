@@ -133,16 +133,23 @@ def main() -> int:
         if d["id"] not in suspect_docs:
             continue
         spec = truth["documents"].get(d["filename"], {})
+        fixes = {}
         for field, want in spec.get("fields", {}).items():
             got = d["fields"].get(field)
-            wrong = (abs(float(got) - want) > 0.01 if isinstance(want, float)
-                     else norm(got) != norm(want))
+            try:
+                wrong = (abs(float(got) - want) > 0.01 if isinstance(want, float)
+                         else norm(got) != norm(want))
+            except (TypeError, ValueError):
+                wrong = True  # missing or unreadable value is wrong by definition
             if wrong:
-                httpx.post(f"{BASE}/runs/{run_id}/documents/{d['id']}/correct",
-                           json={"field": field, "value": want,
-                                 "reason": "verify_run: read from source document"},
-                           timeout=120).raise_for_status()
-                corrected_files.append(f"{d['filename']}.{field}")
+                fixes[field] = want
+        if fixes:
+            # One request per document — all fields corrected and re-checked at once.
+            httpx.post(f"{BASE}/runs/{run_id}/documents/{d['id']}/correct",
+                       json={"fields": fixes,
+                             "reason": "verify_run: read from source document"},
+                       timeout=120).raise_for_status()
+            corrected_files.extend(f"{d['filename']}.{f}" for f in sorted(fixes))
     if corrected_files:
         print(f"reviewer corrected: {corrected_files}")
 

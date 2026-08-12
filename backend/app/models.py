@@ -35,6 +35,11 @@ class Run(Base):
     progress: Mapped[dict] = mapped_column(JSON, default=dict)
     # The copy-ready blocks, built once review is approved.
     outputs: Mapped[dict] = mapped_column(JSON, default=dict)
+    # The settings this run was created under (client_name,
+    # sharepoint_folder_url). Checks, corrections, and output rebuilds use
+    # THIS snapshot, never the current global settings — switching clients
+    # in Settings must not change how an existing run is judged.
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     documents: Mapped[list["Document"]] = relationship(back_populates="run")
@@ -95,3 +100,12 @@ class AuditEvent(Base):
     action: Mapped[str] = mapped_column(String)  # what they did
     detail: Mapped[str] = mapped_column(Text, default="")
     at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class AppSetting(Base):
+    """One row per app-level setting the reviewer may change on screen
+    (client name, SharePoint folder). Secrets stay in .env on purpose."""
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
