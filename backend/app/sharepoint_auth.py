@@ -272,8 +272,22 @@ def build_provider(server_url: str, *, interactive: bool):
     if os.getenv("MCP_OAUTH", "").strip().lower() not in ("1", "true", "on", "yes"):
         return None
 
+    import httpx2
     from mcp.client.auth import OAuthClientProvider
     from mcp.shared.auth import OAuthClientMetadata
+
+    # The provider is attached to the HTTP client the MCP session builds,
+    # which requires it to BE an httpx2.Auth. It is, in mcp 2.x. In mcp
+    # 1.x it is an httpx.Auth instead and this would fail deep inside the
+    # transport with a type error that names neither cause nor cure — so
+    # the mismatch is caught here, where it can say what to do.
+    if not issubclass(OAuthClientProvider, httpx2.Auth):
+        raise SignInRequired(
+            "The installed MCP library is too old for SharePoint sign-in "
+            "(its OAuth provider does not fit this HTTP client). The Python "
+            "packages were probably not re-installed after the last update. "
+            "Close the app and run start.bat again, then try Connect "
+            "SharePoint once more. backend\\scripts\\doctor.py checks this.")
 
     saved = storage()
     if not interactive and not saved.is_signed_in():

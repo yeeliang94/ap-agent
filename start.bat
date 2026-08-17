@@ -55,30 +55,61 @@ if not exist "%VENV%\Scripts\python.exe" (
   )
 )
 
-REM Installed-packages marker: uvicorn is the last thing we launch, so if its
-REM launcher is present the install got far enough to be usable.
-if not exist "%VENV%\Scripts\uvicorn.exe" (
-  echo [setup] Installing Python packages...
-  "%VENV%\Scripts\python.exe" -m pip install -r backend\requirements.txt
+REM Install packages when requirements.txt CHANGES, not merely when the venv
+REM is new. The old check was "does uvicorn.exe exist", which is true forever
+REM after the first run — so a git pull that added or changed a dependency
+REM installed nothing, and the new code ran against the OLD libraries. That
+REM failure is silent and looks like a bug in the app, not a stale setup.
+REM
+REM The stamp is the hash of requirements.txt, so any edit triggers a
+REM re-install and an unchanged file does not.
+set "REQ=backend\requirements.txt"
+set "STAMP=%VENV%\.requirements-sha256"
+
+set "REQHASH="
+for /f "skip=1 delims=" %%H in ('certutil -hashfile "%REQ%" SHA256') do (
+  if not defined REQHASH set "REQHASH=%%H"
+)
+set "REQHASH=%REQHASH: =%"
+
+set "OLDHASH="
+if exist "%STAMP%" set /p OLDHASH=<"%STAMP%"
+REM No uvicorn means nothing was ever installed, whatever the stamp says.
+if not exist "%VENV%\Scripts\uvicorn.exe" set "OLDHASH=missing"
+REM If hashing itself failed, install rather than skip: being slow is a
+REM nuisance, running against the wrong libraries is a lost afternoon.
+if "%REQHASH%"=="" set "OLDHASH=unknown"
+
+if not "%REQHASH%"=="%OLDHASH%" (
+  if "%OLDHASH%"=="" (
+    echo [setup] Installing Python packages...
+  ) else (
+    echo [setup] The package list changed since last time. Updating...
+  )
+  "%VENV%\Scripts\python.exe" -m pip install -r "%REQ%"
   if errorlevel 1 (
     echo [setup] Installing Python packages failed. If this is a proxy or
     echo         certificate error, you need the enterprise pip index configured.
     exit /b 1
   )
+  REM Only stamp a hash we actually computed, so an unknown one retries.
+  if not "%REQHASH%"=="" > "%STAMP%" echo %REQHASH%
 )
 
 REM --- Frontend -----------------------------------------------------------
-if not exist frontend\node_modules (
-  echo [setup] Installing frontend packages...
-  pushd frontend
-  call npm install
-  if errorlevel 1 (
-    popd
-    echo [setup] npm install failed. See the message above.
-    exit /b 1
-  )
+REM Run every time, for the same reason as the Python packages above: only
+REM checking whether node_modules exists means a pull that changed
+REM package.json is never installed. npm install does nothing when nothing
+REM changed, so the cost of always running it is a second or two.
+echo [setup] Checking frontend packages...
+pushd frontend
+call npm install
+if errorlevel 1 (
   popd
+  echo [setup] npm install failed. See the message above.
+  exit /b 1
 )
+popd
 
 echo [build] Building the frontend...
 pushd frontend

@@ -21,9 +21,24 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import httpx2
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
+try:
+    import httpx2
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+except ImportError as exc:  # pragma: no cover - a setup fault, not a code path
+    # A `git pull` that changes requirements.txt does nothing to an
+    # already-built environment unless something installs it. When that is
+    # missed, the new code meets the old libraries and fails with a name
+    # nobody can act on. Say what to do instead.
+    raise ImportError(
+        "The MCP libraries are missing or too old (this app needs mcp 2.0 "
+        "or newer). This usually means the Python packages were not "
+        "re-installed after the last update. Close the app and run "
+        "start.bat again, or run:\n"
+        "    backend\\.venv\\Scripts\\python.exe -m pip install -r "
+        "backend\\requirements.txt\n"
+        "Run backend\\scripts\\doctor.py to check the whole setup."
+    ) from exc
 
 log = logging.getLogger("mcp_client")
 
