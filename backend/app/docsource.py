@@ -318,9 +318,10 @@ class RealMcpSource:
         except McpError:
             log.info("no list-libraries tool; using the library name from the URL")
         else:
-            libraries = await session.call(library_tool, {
-                "site_id": site_id, "siteId": site_id, "url": address.site_url})
-            _raise_if_error(libraries, "list the site's document libraries")
+            libraries = await _all_pages(
+                session, library_tool,
+                {"site_id": site_id, "siteId": site_id, "url": address.site_url},
+                "list the site's document libraries")
             matched = _match_library(libraries, address["library"],
                                      address["browser_library"])
             if matched is None:
@@ -346,19 +347,27 @@ class RealMcpSource:
         return resolved
 
     async def _alisting(self, session, resolved: dict):
-        """The raw folder listing, exactly as the server returned it.
+        """Every item in the folder, across every page.
 
-        Kept raw (not reduced to names) because the download step needs the
-        identifiers that live alongside each name.
+        Kept as raw entries (not reduced to names) because the download
+        step needs the identifiers that live alongside each name.
         """
         tool = self._tool(session, "MCP_TOOL_LIST_ITEMS", self.LIST_KEYWORDS)
-        payload = await session.call(tool, _folder_args(resolved, self.folder_url))
-        # "No such folder" arrives as an ordinary result carrying an error
-        # key. Left unread it becomes an empty list, and the run then
-        # reports "no payment listing in the folder" — blaming the folder's
-        # contents for an address that never pointed anywhere.
-        _raise_if_error(payload, "list the SharePoint folder")
-        return payload
+        missing = session.required_arguments(tool) - set(
+            _folder_args(resolved, self.folder_url))
+        if missing:
+            # The gateway requires drive_id here. Saying so beats letting
+            # the server answer "'drive_id' is a required property",
+            # which names the symptom and not the missing step.
+            raise SourceUnavailable(
+                f"The folder could not be listed because {', '.join(sorted(missing))} "
+                f"is needed and was not found earlier — the document library "
+                f"lookup did not return an id for "
+                f"{resolved.get('library', 'the library')!r}. Check the "
+                f"SharePoint folder setting names a real library.")
+        return await _all_pages(session, tool,
+                                _folder_args(resolved, self.folder_url),
+                                "list the SharePoint folder")
 
     def _auth(self):
         """The delegated sign-in, if this gateway needs one.
@@ -579,6 +588,58 @@ def _first_string(payload, keys: tuple[str, ...]) -> str:
     return ""
 
 
+# Where a server puts "there is more, ask again with this".
+_PAGE_TOKEN_KEYS = ("skip_token", "skipToken", "next_skip_token",
+                    "nextSkipToken", "next_token", "nextToken",
+                    "continuation_token", "continuationToken")
+
+# A reference folder needs a handful of pages at most. Hitting this means
+# something is looping, and a partial listing is the one outcome that must
+# never pass quietly: a missing payment listing would be blamed on the
+# folder, and a half-read folder could match last year's file.
+MAX_PAGES = 25
+
+
+def _next_page_token(payload) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in _PAGE_TOKEN_KEYS:
+        value = payload.get(key)
+        if isinstance(value, (str, int)) and str(value).strip():
+            return str(value)
+    return ""
+
+
+async def _all_pages(session, tool: str, args: dict, what: str) -> list:
+    """Every page of a paginated list tool, as one list of entries.
+
+    Both list tools on the enterprise gateway take a skip_token, which
+    means a long folder arrives in pieces. Reading only the first piece
+    looks exactly like a short folder, so it would never be noticed —
+    the run would simply not see some of the files.
+    """
+    args = dict(args)
+    entries: list = []
+    seen: set[str] = set()
+    for page in range(1, MAX_PAGES + 1):
+        payload = await session.call(tool, args)
+        _raise_if_error(payload, what)
+        entries.extend(_unwrap_items(payload))
+        token = _next_page_token(payload)
+        if not token or token in seen:
+            if page > 1:
+                log.info("%s: read %d entries across %d page(s)",
+                         tool, len(entries), page)
+            return entries
+        seen.add(token)
+        args["skip_token"] = token
+        args["skipToken"] = token
+    raise SourceUnavailable(
+        f"SharePoint kept offering more pages when asked to {what} "
+        f"({MAX_PAGES} requested). Refusing to continue rather than work "
+        f"from part of the folder.")
+
+
 def _folder_args(resolved: dict, folder_url: str) -> dict:
     """Whatever identifiers the resolve step produced, plus the raw URL.
 
@@ -592,13 +653,30 @@ def _folder_args(resolved: dict, folder_url: str) -> dict:
     return args
 
 
+# Envelope names seen in the wild. "libraries" is here because the
+# enterprise gateway uses it and its absence read as "this site has no
+# document libraries" — a wrong answer that looked like a real one.
+_ENVELOPE_KEYS = ("items", "files", "value", "children", "documents",
+                  "results", "libraries", "drives", "lists", "entries",
+                  "document_libraries", "documentLibraries")
+
+
 def _unwrap_items(payload) -> list:
     """The list of items inside whatever envelope the server wrapped it in."""
-    if isinstance(payload, dict):
-        for key in ("items", "files", "value", "children", "documents", "results"):
-            if isinstance(payload.get(key), list):
-                return payload[key]
-    return payload if isinstance(payload, list) else []
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    for key in _ENVELOPE_KEYS:
+        if isinstance(payload.get(key), list):
+            return payload[key]
+    # Last resort: exactly one key holds a list, so there is nothing to
+    # confuse it with. This is what stops the NEXT unrecognised envelope
+    # name from silently becoming "the folder is empty".
+    lists = [v for v in payload.values() if isinstance(v, list)]
+    if len(lists) == 1:
+        return lists[0]
+    return []
 
 
 def _item_name(item: dict) -> str:

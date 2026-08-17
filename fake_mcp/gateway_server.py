@@ -71,14 +71,21 @@ def whoami() -> dict:
     return {"displayName": "Test Reviewer", "mail": "reviewer@example.com"}
 
 
+# Takes a hostname and a site PATH — not a URL. A client that only knows
+# how to send a whole address gets nothing here, because the schema
+# filter drops the argument and the tool sees an empty request.
 @mcp.tool(name="sharepointmcp-get_sharepoint_site",
-          description="Look up a SharePoint site by its web address.")
-def get_sharepoint_site(url: str = "", site_url: str = "") -> dict:
-    address = (site_url or url or "").rstrip("/")
-    if "/sites/" not in address and "/teams/" not in address:
-        return {"error": f"invalidRequest: {address!r} does not name a site"}
-    return {"site_id": SITE_ID, "webUrl": address,
-            "displayName": address.rsplit("/", 1)[-1]}
+          description="Look up a SharePoint site by hostname and site path.")
+def get_sharepoint_site(hostname: str = "", site_path: str = "",
+                        site_id: str = "") -> dict:
+    if site_id:
+        return {"id": site_id, "displayName": site_id}
+    if not hostname or "/sites/" not in site_path and "/teams/" not in site_path:
+        return {"error": f"invalidRequest: {hostname!r}{site_path!r} "
+                         "does not name a site"}
+    # The id comes back under "id", NOT "site_id".
+    return {"id": SITE_ID, "webUrl": f"https://{hostname}{site_path}",
+            "displayName": site_path.rsplit("/", 1)[-1]}
 
 
 # The other two tools the real gateway offers whose names contain both
@@ -99,41 +106,55 @@ def get_site_analytics(site_id: str = "") -> dict:
     return {"views": 0}
 
 
+# The envelope is "libraries", not the "value" that Graph-shaped servers
+# use. A client that only knows the common names reads zero libraries and
+# concludes the site has none — a wrong answer that looks like a real one.
 @mcp.tool(name="sharepointmcp-list_document_libraries",
           description="The document libraries (drives) belonging to a site.")
-def list_document_libraries(site_id: str = "") -> dict:
+def list_document_libraries(site_id: str = "", skip_token: str = "",
+                            top: int = 0) -> dict:
     if site_id != SITE_ID:
         return {"error": f"itemNotFound: no site {site_id!r}"}
-    return {"value": [
+    return {"libraries": [
         {"id": LIBRARY_ID, "name": LIBRARY_NAME, "driveType": "documentLibrary"},
         {"id": "b!driveIdForSiteAssets", "name": "Site Assets",
          "driveType": "documentLibrary"},
     ]}
 
 
+# drive_id is REQUIRED, so everything above has to have worked. It is also
+# paginated: one page per file, which is absurd for real use and exactly
+# right for proving the client follows skip_token instead of stopping at
+# the first page and calling that the whole folder.
 @mcp.tool(name="sharepointmcp-list_library_items",
           description="The files and folders inside a library folder.")
-def list_library_items(site_id: str = "", library_id: str = "",
-                       folder_path: str = "") -> dict:
-    if site_id != SITE_ID:
+def list_library_items(drive_id: str, site_id: str = "", folder_path: str = "",
+                       skip_token: str = "", top: int = 0) -> dict:
+    if site_id and site_id != SITE_ID:
         return {"error": f"itemNotFound: no site {site_id!r}"}
-    if library_id and library_id != LIBRARY_ID:
-        return {"error": f"itemNotFound: no library {library_id!r}"}
+    if drive_id != LIBRARY_ID:
+        return {"error": f"itemNotFound: no drive {drive_id!r}"}
     if folder_path and folder_path.strip("/") != FOLDER_PATH:
         return {"error": f"itemNotFound: no folder {folder_path!r}"}
     if not REFERENCE_DIR.is_dir():
-        return {"value": []}
-    return {"value": [
+        return {"items": []}
+
+    files = [f for f in sorted(REFERENCE_DIR.iterdir()) if f.is_file()]
+    start = int(skip_token) if skip_token.isdigit() else 0
+    page = files[start:start + 1]
+    answer: dict = {"items": [
         {"id": _opaque_id(f.name), "name": f.name, "size": f.stat().st_size,
-         "kind": "file"}
-        for f in sorted(REFERENCE_DIR.iterdir()) if f.is_file()
+         "kind": "file"} for f in page
     ]}
+    if start + 1 < len(files):
+        answer["skip_token"] = str(start + 1)
+    return answer
 
 
 @mcp.tool(name="sharepointmcp-download_document",
           description="A temporary, single-use download URL for one document.")
 def download_document(ctx: Context, item_id: str = "", site_id: str = "",
-                      library_id: str = "") -> dict:
+                      drive_id: str = "") -> dict:
     resolved = _name_for(item_id)
     if resolved is None:
         # Like the real gateway: a bad item ID is an ordinary result with

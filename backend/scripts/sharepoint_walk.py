@@ -74,9 +74,10 @@ async def main() -> int:
     value = os.getenv("MCP_AUTH_VALUE", "").strip()
     headers = {header: value} if header and value else {}
 
-    from app.docsource import (RealMcpSource, _first_string, _item_id_for,
-                               _match_library, _names_from, _reported_error,
-                               _unwrap_items, parse_sharepoint_folder_url)
+    from app.docsource import (RealMcpSource, _all_pages, _first_string,
+                               _item_id_for, _match_library, _names_from,
+                               _reported_error, _unwrap_items,
+                               parse_sharepoint_folder_url)
     from app.mcp_client import McpSession
     from app.sharepoint_auth import build_provider
 
@@ -100,7 +101,7 @@ async def main() -> int:
         for name in session.tool_names:
             print(f"    {name}")
 
-        async def step(number, what, keywords, args, env_var):
+        async def step(number, what, keywords, args, env_var, paged=False):
             head(f"STEP {number}", what)
             override = os.getenv(env_var, "").strip()
             try:
@@ -117,7 +118,12 @@ async def main() -> int:
                        if accepted is None or k in accepted}
             print(f"  sending  : {', '.join(sorted(sending)) or '(nothing)'}")
             try:
-                payload = await session.call(tool, args)
+                # The list steps page. Follow them here too, or this
+                # report says "1 file" while the app reads the whole
+                # folder — a diagnostic that disagrees with the app is
+                # worse than none.
+                payload = (await _all_pages(session, tool, args, what) if paged
+                           else await session.call(tool, args))
             except Exception as exc:
                 print(f"  FAILED   : {type(exc).__name__}: {str(exc)[:200]}")
                 return tool, None
@@ -146,7 +152,7 @@ async def main() -> int:
         _, libs = await step(
             2, "list document libraries", source.LIBRARY_KEYWORDS,
             {"site_id": site_id, "siteId": site_id, "url": address.site_url},
-            "MCP_TOOL_LIST_LIBRARIES")
+            "MCP_TOOL_LIST_LIBRARIES", paged=True)
         library_id = ""
         if libs is not None:
             entries = _unwrap_items(libs)
@@ -168,7 +174,7 @@ async def main() -> int:
             args.update(folder_path=address["folder_path"],
                         path=address["folder_path"])
         _, items = await step(3, "list the folder's files", source.LIST_KEYWORDS,
-                              args, "MCP_TOOL_LIST_ITEMS")
+                              args, "MCP_TOOL_LIST_ITEMS", paged=True)
         if items is None:
             return 1
         entries = _unwrap_items(items)

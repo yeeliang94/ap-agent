@@ -126,6 +126,63 @@ def test_several_tools_mentioning_site_do_not_confuse_the_lookup(gateway_source)
     assert names
 
 
+def test_every_page_of_a_long_folder_is_read(gateway_source):
+    """The gateway paginates both list tools with skip_token. Reading only
+    the first page looks exactly like a short folder — nothing complains,
+    the run just never sees some of the files. That could mean missing the
+    payment listing, or matching an older one that happened to fit on
+    page one. The fake serves ONE file per page to force the issue."""
+    from fake_mcp import gateway_server
+
+    on_disk = sorted(f.name for f in gateway_server.REFERENCE_DIR.iterdir()
+                     if f.is_file())
+    assert len(on_disk) > 1, "this test needs more than one sample file"
+    assert gateway_source().list_names() == on_disk
+
+
+def test_the_library_list_is_read_from_this_gateways_own_envelope(gateway_source):
+    """It answers under "libraries", not the "value" Graph-shaped servers
+    use. Not recognising that read as "this site has no document
+    libraries" — a wrong answer that looks like a real one, and it left
+    the next step with no drive id."""
+    from app.docsource import _match_library, _unwrap_items
+
+    payload = gateway_server_libraries()
+    assert len(_unwrap_items(payload)) == 2
+    assert _match_library(payload, "Documents", "Shared Documents")["id"]
+
+
+def gateway_server_libraries():
+    from fake_mcp import gateway_server
+
+    return gateway_server.list_document_libraries(
+        site_id=gateway_server.SITE_ID)
+
+
+def test_an_unknown_envelope_name_still_yields_its_one_list():
+    """The next gateway will invent another name. One list and no
+    ambiguity is enough to go on."""
+    from app.docsource import _unwrap_items
+
+    assert _unwrap_items({"somethingNew": [{"name": "a"}]}) == [{"name": "a"}]
+    # ...but two lists ARE ambiguous, so nothing is guessed.
+    assert _unwrap_items({"a": [{"x": 1}], "b": [{"y": 2}]}) == []
+
+
+def test_a_missing_drive_id_is_explained_before_the_server_rejects_it(
+        gateway_source, monkeypatch):
+    """list_library_items REQUIRES drive_id. Letting the call go anyway
+    returns "'drive_id' is a required property", which names the symptom
+    and not the step that failed to produce it."""
+    from app import docsource
+
+    monkeypatch.setattr(docsource, "_match_library", lambda *a, **k: None)
+    with pytest.raises(SourceUnavailable) as exc:
+        gateway_source().list_names()
+    # It fails at the library match, naming the library it could not find.
+    assert "document library" in str(exc.value)
+
+
 def test_a_folder_that_is_not_there_says_so_plainly(gateway_source):
     source = gateway_source(
         "https://contoso.sharepoint.com/sites/ClientABC/Shared Documents/Nope")

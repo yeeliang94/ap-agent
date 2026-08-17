@@ -256,6 +256,15 @@ class McpSession:
                 return set(props) if props else None
         return None
 
+    def required_arguments(self, tool: str) -> set[str]:
+        """The arguments a tool refuses to run without."""
+        for t in self._tools:
+            if t.name == tool:
+                schema = getattr(t, "input_schema", None) or {}
+                required = schema.get("required") if isinstance(schema, dict) else None
+                return set(required or ())
+        return set()
+
     async def call(self, tool: str, arguments: dict) -> Any:
         if self._session is None:
             raise McpError("call() outside the session context")
