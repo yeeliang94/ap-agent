@@ -1,0 +1,144 @@
+"""Finding a SharePoint folder on a server with no resolve-folder tool.
+
+The enterprise gateway does not accept a folder URL. It offers the steps
+a person takes by hand — get the site, list its libraries, list the items
+— so the app has to read the address the reviewer pasted and walk them.
+
+That path used to run for the first time on the enterprise gateway itself,
+over a VPN, where the only feedback was a failed run. These tests run it
+against a fake with the same shape and the same awkwardnesses.
+"""
+from __future__ import annotations
+
+import pytest
+
+from app.docsource import (
+    RealMcpSource,
+    SourceUnavailable,
+    _match_library,
+    parse_sharepoint_folder_url,
+)
+
+# What a reviewer actually copies out of the address bar.
+PLAIN = ("https://contoso.sharepoint.com/sites/ClientABC/"
+         "Shared%20Documents/AP%20Reference")
+VIEW_PAGE = ("https://contoso.sharepoint.com/sites/ClientABC/Shared%20Documents/"
+             "Forms/AllItems.aspx?id=%2Fsites%2FClientABC%2FShared%20Documents"
+             "%2FAP%20Reference&viewid=7f3a1b2c")
+
+
+@pytest.fixture()
+def gateway_source(gateway_url, monkeypatch):
+    monkeypatch.setenv("MCP_URL", gateway_url)
+    for var in ("MCP_AUTH_HEADER", "MCP_AUTH_VALUE", "MCP_TOOL_RESOLVE_FOLDER",
+                "MCP_TOOL_LIST_ITEMS", "MCP_TOOL_GET_DOCUMENT"):
+        monkeypatch.delenv(var, raising=False)
+    return lambda url=PLAIN: RealMcpSource(url)
+
+
+# --- reading the pasted address --------------------------------------------
+
+def test_a_plain_folder_address_is_split_into_its_parts():
+    address = parse_sharepoint_folder_url(PLAIN)
+    assert address["site_path"] == "/sites/ClientABC"
+    assert address.site_url == "https://contoso.sharepoint.com/sites/ClientABC"
+    # The browser says "Shared Documents"; the API calls it "Documents".
+    assert address["browser_library"] == "Shared Documents"
+    assert address["library"] == "Documents"
+    assert address["folder_path"] == "AP Reference"
+
+
+def test_the_address_of_a_folder_you_clicked_into_is_understood():
+    """Once you click a folder, SharePoint shows a Forms/AllItems.aspx
+    address whose visible path stops at the library — the real folder is
+    hidden in the "id" query parameter. Reading the visible path would
+    silently list the library root instead of the folder."""
+    assert parse_sharepoint_folder_url(VIEW_PAGE) == \
+        parse_sharepoint_folder_url(PLAIN)
+
+
+def test_teams_sites_work_the_same_way():
+    address = parse_sharepoint_folder_url(
+        "https://contoso.sharepoint.com/teams/Finance/Documents/AP")
+    assert address["site_path"] == "/teams/Finance"
+    assert address["library"] == "Documents"
+    assert address["folder_path"] == "AP"
+
+
+def test_a_library_root_with_no_subfolder_is_allowed():
+    address = parse_sharepoint_folder_url(
+        "https://contoso.sharepoint.com/sites/ClientABC/Shared Documents")
+    assert address["library"] == "Documents"
+    assert address["folder_path"] == ""
+
+
+@pytest.mark.parametrize("bad,expected", [
+    ("", "not a full web address"),
+    ("sites/ClientABC/Documents", "not a full web address"),
+    ("https://contoso.sharepoint.com/", "does not include a site"),
+    ("https://contoso.sharepoint.com/sites/ClientABC", "does not name a document library"),
+    ("https://contoso.sharepoint.com/sites/X/Shared Documents/Forms/AllItems.aspx",
+     "points at a list view"),
+])
+def test_an_unusable_address_says_what_to_copy_instead(bad, expected):
+    """A misread address means listing the WRONG folder, and checking this
+    month's invoices against the wrong listing is worse than stopping."""
+    with pytest.raises(SourceUnavailable) as exc:
+        parse_sharepoint_folder_url(bad)
+    assert expected in str(exc.value)
+
+
+def test_the_library_is_matched_by_either_of_its_two_names():
+    libraries = {"value": [{"id": "b!assets", "name": "Site Assets"},
+                           {"id": "b!docs", "name": "Documents"}]}
+    assert _match_library(libraries, "Documents", "Shared Documents")["id"] == "b!docs"
+    assert _match_library(libraries, "Nope", "Nope") is None
+
+
+# --- walking the gateway ----------------------------------------------------
+
+def test_the_folder_is_found_without_any_resolve_tool(gateway_source):
+    """The whole point: this server has no resolve-folder tool at all."""
+    names = gateway_source().list_names()
+    assert names, "expected the reference folder to list"
+    assert all(isinstance(n, str) for n in names)
+
+
+def test_a_document_downloads_end_to_end_through_the_gateway(gateway_source):
+    from fake_mcp import gateway_server
+
+    source = gateway_source()
+    names = source.list_names()
+    data = source.get_reference(names[0])
+    assert data == (gateway_server.REFERENCE_DIR / names[0]).read_bytes()
+
+
+def test_the_view_page_address_reaches_the_same_folder(gateway_source):
+    assert gateway_source(VIEW_PAGE).list_names() == gateway_source(PLAIN).list_names()
+
+
+def test_several_tools_mentioning_site_do_not_confuse_the_lookup(gateway_source):
+    """This gateway offers sp_get_sharepoint_site, sp_search_site_content
+    and sp_get_site_permissions. Matching on the bare word "site" cannot
+    tell them apart — the real gateway produced exactly this ambiguity,
+    and the fix was asking for the specific spelling first."""
+    names = gateway_source().list_names()  # must not raise "3 tools match"
+    assert names
+
+
+def test_a_folder_that_is_not_there_says_so_plainly(gateway_source):
+    source = gateway_source(
+        "https://contoso.sharepoint.com/sites/ClientABC/Shared Documents/Nope")
+    with pytest.raises(SourceUnavailable) as exc:
+        source.list_names()
+    assert "itemNotFound" in str(exc.value)
+
+
+def test_a_wrong_library_name_lists_what_the_site_actually_has(gateway_source):
+    source = gateway_source(
+        "https://contoso.sharepoint.com/sites/ClientABC/Invoices/AP Reference")
+    with pytest.raises(SourceUnavailable) as exc:
+        source.list_names()
+    message = str(exc.value)
+    assert "no document library called 'Invoices'" in message
+    assert "Documents" in message  # ...and what it does have

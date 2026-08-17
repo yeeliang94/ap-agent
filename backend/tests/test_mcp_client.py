@@ -14,51 +14,15 @@ import sys
 from pathlib import Path
 
 import pytest
-import pytest_asyncio
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.mcp_client import McpError, McpSession  # noqa: E402
 
+# The server_url fixture (the fake MCP server on a free port) lives in
+# conftest.py, shared with test_real_mcp_source.py.
+
 pytestmark = pytest.mark.asyncio
-
-
-@pytest.fixture()
-def server_url(monkeypatch, tmp_path):
-    """The fake MCP server, running for the duration of one test.
-
-    Each test opens its OWN session inside a single `async with`: an MCP
-    session holds an anyio cancel scope, which must be entered and exited
-    in the same task, so it cannot be handed across a yield fixture.
-    """
-    import threading
-    import time
-
-    import uvicorn
-
-    from fake_mcp import mcp_server
-
-    # Serve the real sample reference folder if it exists; otherwise a
-    # temporary one, so the tests never depend on generated samples.
-    if not mcp_server.REFERENCE_DIR.is_dir():
-        (tmp_path / "payment_listing.xlsx").write_bytes(b"PK\x03\x04stub")
-        monkeypatch.setattr(mcp_server, "REFERENCE_DIR", tmp_path)
-
-    config = uvicorn.Config(mcp_server.mcp.streamable_http_app(),
-                            host="127.0.0.1", port=8005, log_level="error")
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    for _ in range(100):  # wait for bind
-        if server.started:
-            break
-        time.sleep(0.05)
-    assert server.started, "fake MCP server did not start"
-
-    yield "http://127.0.0.1:8005/mcp"
-
-    server.should_exit = True
-    thread.join(timeout=5)
 
 
 FOLDER = "https://example.sharepoint.com/sites/x/Shared%20Documents/AP"
@@ -108,6 +72,42 @@ async def test_the_shared_documents_alias_is_handled(server_url):
         resolved = await session.call("sp_resolve_folder_url", {"url": FOLDER})
     # Browser says "Shared Documents"; MCP reports "Documents".
     assert resolved["library"] == "Documents"
+
+
+async def test_a_delegated_oauth_provider_reaches_the_http_client(server_url):
+    """The enterprise gateway needs a live OAuth token as well as its API
+    key. The MCP SDK's transport takes no `auth` argument, which reads as
+    "this version cannot do OAuth" — it can, because the auth belongs on
+    the HTTP client this module builds. Proving the wiring here is what
+    stops that misreading from becoming an SDK downgrade.
+    """
+    import httpx2
+
+    from app import mcp_client
+
+    class StampingAuth(httpx2.Auth):
+        def auth_flow(self, request):
+            request.headers["x-delegated"] = "token"
+            yield request
+
+    provider = StampingAuth()
+    seen = {}
+    real_client = httpx2.AsyncClient
+
+    def capture(**kwargs):
+        seen.update(kwargs)
+        return real_client(**kwargs)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mcp_client.httpx2, "AsyncClient", capture)
+    try:
+        async with McpSession(server_url, {"x-api-key": "k"}, auth=provider) as s:
+            assert s.tool_names  # the handshake still works with auth attached
+    finally:
+        monkeypatch.undo()
+
+    assert seen["auth"] is provider
+    assert seen["headers"] == {"x-api-key": "k"}
 
 
 async def test_server_side_failure_becomes_McpError(server_url):

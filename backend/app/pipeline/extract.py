@@ -11,7 +11,7 @@ from pathlib import Path
 
 from pydantic_ai import BinaryContent
 
-from .. import config
+from .. import config, telemetry
 from ..model_layer import USAGE_LIMITS, create_agent
 from ..schemas_ai import ClaimFields, InvoiceFields
 from .images import document_to_pngs
@@ -86,8 +86,12 @@ async def extract_all(docs: list, workspace: Path, on_progress) -> None:
                 doc.confidence = confidence
                 doc.status = "extracted"
             except Exception as exc:  # one bad document must not sink the batch
+                # Named rather than dumped: "extraction failed: <raw
+                # exception>" is what made a proxy rejecting every request
+                # look like 22 unrelated bad files. The raw text still
+                # reaches the log, via the run diary in runner.py.
                 doc.status = "error"
-                doc.error = f"extraction failed: {exc}"
+                doc.error = telemetry.describe_failure(exc)
             on_progress()
 
     await asyncio.gather(

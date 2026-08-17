@@ -1,19 +1,23 @@
 """API routes: upload a batch, poll a run, review flags, fetch outputs."""
 from __future__ import annotations
 
+import logging
+import os
 import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from sqlalchemy import func
 
 from . import config, settings_store
 from .db import SessionLocal
-from .models import AuditEvent, Document, Flag, Run
+from .models import AuditEvent, Document, Flag, Run, RunEvent
 from .pipeline import output as output_builder
 from .pipeline.runner import start_background
 
 router = APIRouter()
+log = logging.getLogger("routes")
 
 
 @router.get("/settings")
@@ -126,7 +130,8 @@ def list_runs() -> list[dict]:
     db = SessionLocal()
     try:
         runs = db.query(Run).order_by(Run.created_at.desc()).all()
-        return [_run_summary(db, r) for r in runs]
+        tallies = _tallies(db, [r.id for r in runs])
+        return [_run_summary(db, r, tallies.get(r.id, {})) for r in runs]
     finally:
         db.close()
 
@@ -161,6 +166,84 @@ def get_run(run_id: str) -> dict:
             # is a convenience; this is the rule.
             "outputs": run.outputs if (run.status == "ready" and not open_flags) else {},
         }
+    finally:
+        db.close()
+
+
+@router.get("/sharepoint/status")
+def sharepoint_status() -> dict:
+    """Whether a delegated SharePoint sign-in is needed, and whether we have one."""
+    from . import sharepoint_auth
+
+    required = os.getenv("MCP_OAUTH", "").strip().lower() in ("1", "true", "on", "yes")
+    return {"required": required,
+            "connected": required and sharepoint_auth.storage().is_signed_in()}
+
+
+@router.post("/sharepoint/connect")
+async def sharepoint_connect() -> dict:
+    """Sign in to SharePoint, at the reviewer's explicit request.
+
+    The ONLY place a browser window may open. Background pipeline runs
+    reuse whatever this saved; they never ask, because a sign-in prompt
+    appearing during an unattended run is how a run waits forever.
+    """
+    from . import sharepoint_auth
+
+    url = os.getenv("MCP_URL", "").strip()
+    if not url:
+        raise HTTPException(400, "No SharePoint MCP address is configured "
+                                 "(MCP_URL in .env).")
+    header = os.getenv("MCP_AUTH_HEADER", "").strip()
+    value = os.getenv("MCP_AUTH_VALUE", "").strip()
+    headers = {header: value} if header and value else {}
+    try:
+        who = await sharepoint_auth.connect(url, headers)
+    except sharepoint_auth.SignInRequired as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        # The reason matters more than the class name, and the full
+        # detail is already in the server log.
+        from .telemetry import describe_failure
+
+        log.warning("SharePoint sign-in failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            502, f"Could not connect to SharePoint: {describe_failure(exc)}") from exc
+    return {"connected": True, "signed_in_as": who}
+
+
+@router.post("/sharepoint/disconnect")
+def sharepoint_disconnect() -> dict:
+    """Forget the saved sign-in. Used when switching Windows accounts."""
+    from . import sharepoint_auth
+
+    sharepoint_auth.storage().forget()
+    return {"connected": False}
+
+
+@router.get("/runs/{run_id}/events")
+def get_run_events(run_id: str, level: str = "") -> list[dict]:
+    """The run's diary: what each stage did, and where it struggled.
+
+    Served separately from the run itself because the review screen polls
+    the run every second and does not need the whole history each time.
+
+    level=problems returns only warnings and errors — what the reviewer
+    opens the panel to see.
+    """
+    db = SessionLocal()
+    try:
+        if not db.get(Run, run_id):
+            raise HTTPException(404, "No such run.")
+        query = db.query(RunEvent).filter(RunEvent.run_id == run_id)
+        if level == "problems":
+            query = query.filter(RunEvent.level.in_(("warning", "error")))
+        return [
+            {"id": e.id, "at": e.at.isoformat(), "stage": e.stage,
+             "level": e.level, "code": e.code, "message": e.message,
+             "detail": e.detail, "document_id": e.document_id}
+            for e in query.order_by(RunEvent.id).all()
+        ]
     finally:
         db.close()
 
@@ -437,14 +520,53 @@ async def decide_flag(run_id: str, flag_id: str, body: dict) -> dict:
         db.close()
 
 
-def _run_summary(db, run: Run) -> dict:
-    open_flags = (
-        db.query(Flag).filter(Flag.run_id == run.id, Flag.status == "open").count()
-    )
-    n_docs = db.query(Document).filter(Document.run_id == run.id).count()
+def _tallies(db, run_ids: list[str]) -> dict[str, dict]:
+    """Per-run counts for the summary, in three queries however many runs.
+
+    The runs screen polls every three seconds. Counting in SQL (and for
+    every run at once) keeps that poll cheap; counting in Python meant
+    loading every flag, document and diary entry in the database each
+    time, which grows with the pilot rather than staying flat.
+    """
+    if not run_ids:
+        return {}
+    tally: dict[str, dict] = {
+        run_id: {"documents_total": 0, "open_flags": 0, "errors": 0, "warnings": 0}
+        for run_id in run_ids
+    }
+    docs = (db.query(Document.run_id, func.count(Document.id))
+            .filter(Document.run_id.in_(run_ids)).group_by(Document.run_id))
+    for run_id, n in docs:
+        tally[run_id]["documents_total"] = n
+
+    flags = (db.query(Flag.run_id, func.count(Flag.id))
+             .filter(Flag.run_id.in_(run_ids), Flag.status == "open")
+             .group_by(Flag.run_id))
+    for run_id, n in flags:
+        tally[run_id]["open_flags"] = n
+
+    # Diary counts, so every screen can show that something went wrong
+    # without fetching the diary itself. A run can reach "ready" with
+    # errors recorded — that combination is precisely what used to pass
+    # unnoticed, so it is carried on every summary.
+    events = (db.query(RunEvent.run_id, RunEvent.level, func.count(RunEvent.id))
+              .filter(RunEvent.run_id.in_(run_ids),
+                      RunEvent.level.in_(("warning", "error")))
+              .group_by(RunEvent.run_id, RunEvent.level))
+    for run_id, level, n in events:
+        tally[run_id]["errors" if level == "error" else "warnings"] = n
+    return tally
+
+
+def _run_summary(db, run: Run, tally: dict | None = None) -> dict:
+    counts = (tally if tally is not None
+              else _tallies(db, [run.id]).get(run.id, {}))
     return {
         "id": run.id, "client": run.client, "status": run.status,
         "error": run.error, "progress": run.progress,
-        "documents_total": n_docs, "open_flags": open_flags,
+        "documents_total": counts.get("documents_total", 0),
+        "open_flags": counts.get("open_flags", 0),
+        "errors": counts.get("errors", 0),
+        "warnings": counts.get("warnings", 0),
         "created_at": run.created_at.isoformat(),
     }

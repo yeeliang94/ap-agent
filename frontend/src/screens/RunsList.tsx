@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  connectSharePoint,
+  disconnectSharePoint,
   getSettings,
+  getSharePointStatus,
   listRuns,
   saveSettings,
   uploadBatch,
   AppSettings,
   RunSummary,
+  SharePointStatus,
 } from "../api";
 
 const STAGE_LABEL: Record<string, string> = {
@@ -73,6 +77,7 @@ export default function RunsList({ onOpen }: { onOpen: (id: string) => void }) {
 
   return (
     <section>
+      <SharePointCard />
       <div className="card uploader">
         <div>
           <b>Start a new run</b>
@@ -99,29 +104,53 @@ export default function RunsList({ onOpen }: { onOpen: (id: string) => void }) {
       {error && <p className="error">{error}</p>}
 
       {runs.map((r) => (
-        <div key={r.id} className="card row">
+        <div key={r.id} className={`card row ${r.status === "failed" ? "banner bad" : ""}`}>
           <div className="grow">
             <b>{r.client}</b>
             <span className="sub">
               {r.documents_total} documents · {new Date(r.created_at).toLocaleString()}
             </span>
+            {/* A failed run's reason belongs on the row, not hidden in a
+                tooltip — it is the whole story of that run. */}
+            {r.status === "failed" && r.error && <span className="sub">{r.error}</span>}
           </div>
-          {r.status === "ready" ? (
-            <>
-              <span className={`chip ${r.open_flags ? "review" : "ok"}`}>
-                {r.open_flags ? `${r.open_flags} flags to review` : "All flags resolved"}
-              </span>
-              <button className="btn primary" onClick={() => onOpen(r.id)}>
-                Open
-              </button>
-            </>
-          ) : r.status === "failed" ? (
-            <span className="chip flag" title={r.error}>Failed — {r.error.slice(0, 60)}</span>
-          ) : (
+
+          {/* Shown for EVERY status. A run can finish "ready" with errors
+              recorded against it, and that is exactly the combination
+              that used to read as a clean run. */}
+          {r.errors > 0 && (
+            <span className="chip flag">
+              {r.errors} error{r.errors === 1 ? "" : "s"}
+            </span>
+          )}
+          {r.errors === 0 && r.warnings > 0 && (
+            <span className="chip review">
+              {r.warnings} warning{r.warnings === 1 ? "" : "s"}
+            </span>
+          )}
+
+          {r.status === "ready" && (
+            <span className={`chip ${r.open_flags ? "review" : "ok"}`}>
+              {r.open_flags ? `${r.open_flags} flags to review` : "All flags resolved"}
+            </span>
+          )}
+          {r.status !== "ready" && r.status !== "failed" && (
             <span className="chip wait">
               {STAGE_LABEL[r.status] ?? r.status}
               {r.progress?.total ? ` ${r.progress.done}/${r.progress.total}` : ""}
             </span>
+          )}
+
+          {/* Failed runs open too. They are the ones whose activity log
+              matters most, and it used to be unreachable: no button, so
+              no way to see why the run died. */}
+          {(r.status === "ready" || r.status === "failed") && (
+            <button
+              className={r.status === "failed" ? "btn warn" : "btn primary"}
+              onClick={() => onOpen(r.id)}
+            >
+              {r.status === "failed" ? "See what failed" : "Open"}
+            </button>
           )}
         </div>
       ))}
@@ -129,6 +158,82 @@ export default function RunsList({ onOpen }: { onOpen: (id: string) => void }) {
 
       {settings && <SettingsCard current={settings} onSaved={setSettings} />}
     </section>
+  );
+}
+
+// Signing in to SharePoint. Deliberately a button and not something that
+// happens on its own: the sign-in opens a real browser window, and a
+// background run must never do that — nobody would be watching. Connect
+// once here, and every later run reuses it silently.
+function SharePointCard() {
+  const [status, setStatus] = useState<SharePointStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [who, setWho] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    getSharePointStatus()
+      .then((s) => alive && setStatus(s))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Nothing to show when this deployment does not use delegated sign-in
+  // (local development, and any gateway that only wants its API key).
+  if (!status?.required) return null;
+
+  async function connect() {
+    setBusy(true);
+    setError("");
+    try {
+      const { signed_in_as } = await connectSharePoint();
+      setWho(signed_in_as);
+      setStatus(await getSharePointStatus());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not connect");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnect() {
+    setBusy(true);
+    setError("");
+    try {
+      await disconnectSharePoint();
+      setWho("");
+      setStatus(await getSharePointStatus());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not disconnect");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={`card row ${status.connected ? "" : "banner bad"}`}>
+      <div className="grow">
+        <b>SharePoint {status.connected ? "connected" : "not connected"}</b>
+        <span className="sub">
+          {status.connected
+            ? `Signed in${who ? ` as ${who}` : ""}. Runs will read the reference folder on your behalf.`
+            : "Runs cannot read the reference folder until you sign in. A browser window will open."}
+        </span>
+      </div>
+      {status.connected ? (
+        <button className="btn" disabled={busy} onClick={disconnect}>
+          {busy ? "Working…" : "Disconnect"}
+        </button>
+      ) : (
+        <button className="btn primary" disabled={busy} onClick={connect}>
+          {busy ? "Waiting for sign-in…" : "Connect SharePoint"}
+        </button>
+      )}
+      {error && <p className="error">{error}</p>}
+    </div>
   );
 }
 

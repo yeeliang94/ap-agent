@@ -91,3 +91,27 @@ body { margin: 0; }
   background: #edf2f4; border-radius: 6px; padding: 10px; font-size: 12px;
   overflow-x: auto; margin: 10px 0 0;
 }
+
+/* --- run diary ---------------------------------------------------------
+   The banner sits above the tabs so a run that finished "ready" while
+   errors were recorded cannot be read as a clean run. */
+.banner.bad { border-left: 3px solid var(--flag); background: var(--flag-soft); }
+.banner.bad > b { color: var(--flag); }
+.banner .sub { margin-top: 4px; }
+
+.tab em.bad { background: var(--flag); }
+.tab em { background: var(--human); }
+
+.filter { float: right; font-size: 13px; font-weight: 400; color: var(--muted); }
+.filter input { margin-right: 5px; vertical-align: middle; }
+
+/* A left edge coloured by severity, so the eye finds the failures while
+   scrolling past the ordinary "stage finished" entries. */
+.event { border-left: 3px solid var(--line); }
+.event.warning { border-left-color: var(--human); }
+.event.error { border-left-color: var(--flag); }
+.event .reason { margin: 6px 0 0; }
+.event pre {
+  background: #edf2f4; border-radius: 6px; padding: 8px 10px; font-size: 12px;
+  overflow-x: auto; margin: 6px 0 0; white-space: pre-wrap; word-break: break-word;
+}

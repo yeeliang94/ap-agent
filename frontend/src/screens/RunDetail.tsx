@@ -4,16 +4,22 @@ import {
   decideFlag,
   documentFileUrl,
   getRun,
+  getRunEvents,
   CORRECTABLE,
   Doc,
   FlagItem,
   RunDetailData,
+  RunEvent,
 } from "../api";
 
 // Screens B + C: review the flags, then copy the output blocks.
 export default function RunDetail({ runId }: { runId: string }) {
   const [run, setRun] = useState<RunDetailData | null>(null);
-  const [tab, setTab] = useState<"review" | "output">("review");
+  // null = "not chosen yet", so the first sensible tab can depend on how
+  // the run ended. A failed run has no flags and no output; opening it on
+  // Review would show an empty screen and hide the only thing worth
+  // reading.
+  const [chosenTab, setTab] = useState<"review" | "output" | "activity" | null>(null);
   const [error, setError] = useState("");
 
   const reload = useCallback(
@@ -27,6 +33,8 @@ export default function RunDetail({ runId }: { runId: string }) {
   if (error) return <p className="error">{error}</p>;
   if (!run) return <p className="sub">Loading…</p>;
 
+  const failed = run.status === "failed";
+  const tab = chosenTab ?? (failed ? "activity" : "review");
   const openFlags = run.flags.filter((f) => f.status === "open");
   const cleanCount = run.documents.filter(
     (d) => d.kind !== "receipt" && !run.flags.some((f) => f.document_id === d.id)
@@ -34,29 +42,154 @@ export default function RunDetail({ runId }: { runId: string }) {
 
   return (
     <section>
+      {/* A run can finish "ready" with errors recorded against it — that
+          pairing is exactly what used to slip past, so it is stated at
+          the top of the screen rather than left inside a panel. */}
+      {failed ? (
+        <div className="card banner bad">
+          <b>This run stopped before it finished</b>
+          <span className="sub">
+            {run.error || "No reason was recorded."}
+          </span>
+          <span className="sub">
+            Nothing from this run may be used. Fix the cause below, then upload
+            the batch again.
+          </span>
+        </div>
+      ) : run.errors > 0 ? (
+        <div className="card banner bad">
+          <b>
+            {run.errors} error{run.errors === 1 ? "" : "s"} happened while this run
+            was processed
+          </b>
+          <span className="sub">
+            Some documents may be incomplete or wrongly classified. Open Activity
+            below to see what failed before you trust this run's output.
+          </span>
+          <div className="actions">
+            <button className="btn warn" onClick={() => setTab("activity")}>
+              Show me what failed
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="tabs">
         <button
           className={tab === "review" ? "tab active" : "tab"}
           onClick={() => setTab("review")}
+          disabled={failed}
+          title={failed ? "This run did not finish, so there is nothing to review" : ""}
         >
           Review {openFlags.length > 0 && <em>{openFlags.length}</em>}
         </button>
         <button
           className={tab === "output" ? "tab active" : "tab"}
           onClick={() => setTab("output")}
-          disabled={openFlags.length > 0}
-          title={openFlags.length > 0 ? "Resolve all flags first" : ""}
+          disabled={failed || openFlags.length > 0}
+          title={
+            failed
+              ? "This run did not finish, so it produced no output"
+              : openFlags.length > 0
+                ? "Resolve all flags first"
+                : ""
+          }
         >
           Copy-ready output
         </button>
+        <button
+          className={tab === "activity" ? "tab active" : "tab"}
+          onClick={() => setTab("activity")}
+        >
+          Activity{" "}
+          {run.errors + run.warnings > 0 && (
+            <em className={run.errors > 0 ? "bad" : ""}>{run.errors + run.warnings}</em>
+          )}
+        </button>
       </div>
 
-      {tab === "review" ? (
+      {tab === "review" && (
         <Review run={run} onDecided={reload} cleanCount={cleanCount} />
-      ) : (
-        <Output run={run} />
       )}
+      {tab === "output" && <Output run={run} />}
+      {tab === "activity" && <Activity runId={run.id} />}
     </section>
+  );
+}
+
+const STAGE_LABEL: Record<string, string> = {
+  run: "Run",
+  reference: "Reading SharePoint",
+  sort: "Sorting",
+  extract: "Reading documents",
+  check: "Checking",
+  output: "Building output",
+};
+
+// The run diary. Everything the pipeline recorded about itself: which
+// reference files it used, how long each stage took, and — the reason
+// this exists — every failure it absorbed and carried on from.
+function Activity({ runId }: { runId: string }) {
+  const [events, setEvents] = useState<RunEvent[] | null>(null);
+  const [onlyProblems, setOnlyProblems] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    getRunEvents(runId, onlyProblems)
+      .then((e) => alive && setEvents(e))
+      .catch(() => alive && setError("Could not load the activity log"));
+    return () => {
+      alive = false;
+    };
+  }, [runId, onlyProblems]);
+
+  if (error) return <p className="error">{error}</p>;
+  if (!events) return <p className="sub">Loading…</p>;
+
+  return (
+    <div>
+      <p className="summary-line">
+        <b>What the system did with this batch</b>
+        <label className="filter">
+          <input
+            type="checkbox"
+            checked={onlyProblems}
+            onChange={(e) => setOnlyProblems(e.target.checked)}
+          />
+          Only show problems
+        </label>
+      </p>
+      {events.length === 0 && (
+        <p className="sub">
+          {onlyProblems
+            ? "Nothing went wrong — no warnings or errors were recorded."
+            : "Nothing recorded for this run."}
+        </p>
+      )}
+      {events.map((e) => (
+        <div key={e.id} className={`card event ${e.level}`}>
+          <div className="row" style={{ border: "none", padding: 0 }}>
+            <div className="grow">
+              <b>{STAGE_LABEL[e.stage] ?? e.stage}</b>
+              <span className="sub">{new Date(e.at).toLocaleTimeString()}</span>
+            </div>
+            <span className={`chip ${e.level === "error" ? "flag" : e.level === "warning" ? "review" : "ok"}`}>
+              {e.level}
+            </span>
+          </div>
+          <p className="reason">{e.message}</p>
+          {/* The engineer's version, folded away: a reviewer never needs
+              it, and whoever is debugging always asks for it. */}
+          {e.detail && (
+            <details>
+              <summary className="sub">Technical detail</summary>
+              <pre>{e.detail}</pre>
+            </details>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 

@@ -95,9 +95,23 @@ class McpSession:
     enterprise gateway is a reconnection problem we do not need.
     """
 
-    def __init__(self, url: str, headers: dict[str, str] | None = None) -> None:
+    def __init__(self, url: str, headers: dict[str, str] | None = None,
+                 auth: Any = None) -> None:
+        """headers is a static credential; auth is a live one.
+
+        The enterprise gateway wants BOTH: its own API key in a header,
+        and a delegated Entra OAuth token that has to be obtained,
+        refreshed, and stored. `auth` takes any httpx2.Auth — including
+        the SDK's own mcp.client.auth.OAuthClientProvider, which is one.
+
+        This exists so signing in never requires touching the transport
+        code below. The MCP SDK's streamable_http_client has no `auth`
+        parameter of its own, which reads as "2.x cannot do OAuth" — it
+        can; the auth belongs on the HTTP client we already build here.
+        """
         self.url = url
         self.headers = headers or {}
+        self.auth = auth
         self._session: ClientSession | None = None
         self._stack: Any = None
         self._tools: list[Any] = []
@@ -108,10 +122,12 @@ class McpSession:
         self._stack = AsyncExitStack()
         await self._stack.__aenter__()
         try:
-            # Headers (the gateway's API key) ride on a client we own; the
-            # SDK builds a default one otherwise, with no way to add them.
+            # Headers (the gateway's API key) and auth (delegated OAuth)
+            # ride on a client we own; the SDK builds a default one
+            # otherwise, with no way to attach either.
             client = await self._stack.enter_async_context(
-                httpx2.AsyncClient(headers=self.headers, timeout=TIMEOUT_SECONDS)
+                httpx2.AsyncClient(headers=self.headers, auth=self.auth,
+                                   timeout=TIMEOUT_SECONDS)
             )
             read, write, *_ = await self._stack.enter_async_context(
                 streamable_http_client(self.url, http_client=client)
@@ -133,6 +149,11 @@ class McpSession:
         if self._stack is not None:
             await self._stack.aclose()
             self._stack = None
+
+    @property
+    def tools(self) -> list[Any]:
+        """The server's tool catalogue, as the SDK's Tool objects."""
+        return list(self._tools)
 
     @property
     def tool_names(self) -> list[str]:

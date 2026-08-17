@@ -17,6 +17,13 @@ truststore>=0.9
 # fake). The enterprise SharePoint service is a streamable-HTTP MCP
 # server, not the bespoke REST contract the first adapter assumed.
 mcp>=2.0
+# mcp's own HTTP client fork; arrives with mcp, pinned because
+# mcp_client.py imports it directly and must not lose it upstream.
+httpx2>=2.5
+# Windows only: DPAPI, used to encrypt the saved SharePoint sign-in
+# against the reviewer's Windows account. Elsewhere the sign-in is kept
+# in memory and never written down, so this is not needed to run or test.
+pywin32>=306; sys_platform == "win32"
 pytest>=8.0
 pytest-asyncio>=0.23
 pymupdf>=1.24

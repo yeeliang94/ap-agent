@@ -8,6 +8,10 @@ export interface RunSummary {
   progress: { done?: number; total?: number };
   documents_total: number;
   open_flags: number;
+  /** Diary counts. A run can be "ready" AND have errors — that pairing is
+   *  the one worth showing, so it rides on every summary. */
+  errors: number;
+  warnings: number;
   created_at: string;
 }
 
@@ -30,6 +34,30 @@ export async function saveSettings(s: AppSettings): Promise<AppSettings> {
   });
   if (!r.ok) throw new Error((await r.json()).detail ?? "Could not save settings");
   return r.json();
+}
+
+/** Whether this deployment needs a SharePoint sign-in, and whether it has one. */
+export interface SharePointStatus {
+  required: boolean;
+  connected: boolean;
+}
+
+export async function getSharePointStatus(): Promise<SharePointStatus> {
+  const r = await fetch("/api/sharepoint/status");
+  if (!r.ok) throw new Error("Could not check the SharePoint connection");
+  return r.json();
+}
+
+/** Opens a browser window on the server machine — only ever from a click. */
+export async function connectSharePoint(): Promise<{ signed_in_as: string }> {
+  const r = await fetch("/api/sharepoint/connect", { method: "POST" });
+  if (!r.ok) throw new Error((await r.json()).detail ?? "Could not connect");
+  return r.json();
+}
+
+export async function disconnectSharePoint(): Promise<void> {
+  const r = await fetch("/api/sharepoint/disconnect", { method: "POST" });
+  if (!r.ok) throw new Error("Could not disconnect");
 }
 
 export interface Doc {
@@ -104,6 +132,28 @@ export async function listRuns(): Promise<RunSummary[]> {
 export async function getRun(id: string): Promise<RunDetailData> {
   const r = await fetch(`/api/runs/${id}`);
   if (!r.ok) throw new Error("Could not load run");
+  return r.json();
+}
+
+/** One moment in a run's life, as recorded by the backend's telemetry. */
+export interface RunEvent {
+  id: number;
+  at: string;
+  stage: string;
+  level: "info" | "warning" | "error";
+  code: string;
+  message: string;
+  detail: string;
+  document_id: string;
+}
+
+export async function getRunEvents(
+  id: string,
+  onlyProblems = false
+): Promise<RunEvent[]> {
+  const query = onlyProblems ? "?level=problems" : "";
+  const r = await fetch(`/api/runs/${id}/events${query}`);
+  if (!r.ok) throw new Error("Could not load the run diary");
   return r.json();
 }
 

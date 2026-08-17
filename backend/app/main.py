@@ -62,12 +62,54 @@ def _configure_logging() -> None:
 
 # During development the frontend dev server runs on a different port (5173),
 # so the browser needs explicit permission to call this API from there.
+DEV_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=DEV_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Methods that change something. GET is left alone: it changes nothing,
+# and blocking it would break the browser loading the app itself.
+_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+@app.middleware("http")
+async def _refuse_cross_site_writes(request, call_next):
+    """Refuse state-changing requests that came from another website.
+
+    CORS is not a defence here. It stops a page READING our answers; it
+    does not stop it SENDING a request. Any web page a reviewer visits can
+    post an ordinary HTML form at http://127.0.0.1:8002/api/... and the
+    browser will deliver it with the reviewer's own machine's authority —
+    approving a flag, deleting the SharePoint sign-in, or popping a
+    sign-in window open.
+
+    Browsers do attach an Origin header to those cross-site posts, so
+    checking it is enough. A request with NO Origin is not a cross-site
+    browser request at all (curl, the test client, the probe scripts), so
+    it passes.
+    """
+    if request.method in _WRITE_METHODS:
+        origin = request.headers.get("origin")
+        if origin and origin not in DEV_ORIGINS:
+            from urllib.parse import urlsplit
+
+            # Same-origin is the normal case: the app is served by this
+            # very process, so its own page's Origin is our own host.
+            if urlsplit(origin).netloc != request.url.netloc:
+                from fastapi.responses import JSONResponse
+
+                logging.getLogger("main").warning(
+                    "refused a %s to %s from another site (Origin: %s)",
+                    request.method, request.url.path, origin)
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "This request came from another "
+                                       "website and was refused."})
+    return await call_next(request)
 
 
 @app.on_event("startup")

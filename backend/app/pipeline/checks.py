@@ -282,7 +282,28 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
     for d in docs:
         if not want(d):
             continue
-        if d.kind == "unknown":
+        if d.kind == "unknown" and d.status == "error":
+            # The system never managed to LOOK at this file. Saying it
+            # "does not look like an invoice" would blame the document for
+            # a failure it had nothing to do with.
+            #
+            # But the opposite mistake is just as costly: a corrupt PDF
+            # also lands here, and calling that "a problem with the
+            # system" sends the reviewer to IT over a file they could
+            # simply rescan. So only a KNOWN dependency failure is named
+            # as one; anything else stays neutral and points at the diary.
+            # rstrip('.'): the reason is a sentence fragment from
+            # telemetry and may or may not already end in a full stop.
+            from ..telemetry import is_service_failure
+
+            where = ("This is a problem with the system, not with the document."
+                     if is_service_failure(d.error)
+                     else "The Activity tab shows what failed.")
+            flags.append(_mk_flag(d.id, "COULD_NOT_PROCESS",
+                f"{d.filename} could not be processed: {d.error.rstrip('.')}. "
+                f"{where} It is excluded from all output.",
+                "Rule: a file the system could not read is never treated as reviewed."))
+        elif d.kind == "unknown":
             flags.append(_mk_flag(d.id, "UNCLASSIFIED",
                 f"{d.filename} does not look like an invoice, claim, or receipt. "
                 "It is excluded from all output until a person decides what it is.",

@@ -54,27 +54,17 @@ class LocalFolderSource:
 # 408 and 429 are deliberately absent — those ARE worth retrying.
 NO_RETRY_STATUSES = {400, 401, 403, 404, 405, 410, 501}
 
-# Markers of a name-resolution failure, across platforms: Windows raises
-# WSAHOST_NOT_FOUND (11001), Unix EAI_NONAME (8). The run's error text is
-# read by a reviewer, not an engineer, so "ConnectError" gets translated.
-_DNS_MARKERS = ("getaddrinfo", "11001", "nodename nor servname",
-                "name or service not known", "temporary failure in name resolution")
-
-
 def _describe(exc: Exception) -> str:
-    """A short, safe label for a transport failure — no URLs, no secrets."""
-    text = str(exc).lower()
-    if any(m in text for m in _DNS_MARKERS):
-        return ("the server name could not be looked up — this usually means "
-                "the VPN or corporate network is not connected")
-    if "certificate" in text or "ssl" in text or "tls" in text:
-        return ("the server's security certificate was rejected — the "
-                "corporate certificate may not be trusted by this app")
-    if "timed out" in text or isinstance(exc, httpx.TimeoutException):
-        return "the server did not answer in time"
-    if isinstance(exc, httpx.ConnectError):
-        return "the server refused the connection or could not be reached"
-    return type(exc).__name__
+    """A short, safe label for a transport failure — no URLs, no secrets.
+
+    One shared translator with telemetry, so a failure does not read one
+    way in the run diary and another in the run's error text. It also
+    unwraps the ExceptionGroups the MCP SDK's task groups raise, which a
+    local copy of this logic kept failing to do.
+    """
+    from .telemetry import describe_failure
+
+    return describe_failure(exc)
 
 
 class McpSource:
@@ -221,6 +211,14 @@ class RealMcpSource:
     LIST_KEYWORDS = (("list", "library", "item"), ("list", "item"),
                      ("list", "file"), ("list", "children"),
                      ("list", "folder"), ("list", "drive"))
+    # Used only when there is no resolve-folder tool. Ordered most
+    # specific first because several tools mention "site" — matching on
+    # the bare word picks up whoami-style and search-style tools too, and
+    # find_tool refuses to guess between them.
+    SITE_KEYWORDS = (("get", "sharepoint", "site"), ("get", "site"),
+                     ("sharepoint", "site"), ("resolve", "site"), ("site",))
+    LIBRARY_KEYWORDS = (("list", "document", "librar"), ("list", "librar"),
+                        ("get", "librar"), ("librar",), ("drive",))
     DOCUMENT_KEYWORDS = (("download", "document"), ("download",),
                          ("get", "document"), ("document", "metadata"),
                          ("get", "file"), ("read", "file"))
@@ -261,33 +259,147 @@ class RealMcpSource:
         """
         from .mcp_client import McpError
 
-        try:
+        if os.getenv("MCP_TOOL_RESOLVE_FOLDER", "").strip():
+            # Explicitly configured: a wrong name must fail loudly, not
+            # be mistaken for "this server has no resolve tool".
             tool = self._tool(session, "MCP_TOOL_RESOLVE_FOLDER",
                               self.RESOLVE_KEYWORDS)
-        except (McpError, SourceUnavailable):
-            log.info("no resolve-folder tool on this server; passing the "
-                     "folder URL straight through")
-            return {"url": self.folder_url}
+        else:
+            try:
+                tool = session.find_tool(*self.RESOLVE_KEYWORDS)
+            except McpError:
+                log.info("no resolve-folder tool on this server; navigating "
+                         "from the folder URL instead")
+                return await self._navigate(session)
         resolved = await session.call(tool, {"url": self.folder_url})
         return resolved if isinstance(resolved, dict) else {"result": resolved}
+
+    async def _navigate(self, session) -> dict:
+        """Find the folder the long way: site, then library, then done.
+
+        The documented enterprise gateway has no single "here is a URL,
+        give me the folder" tool. It has the three steps a person would
+        take by hand, so this takes them: read the pasted browser address,
+        ask for the site, ask that site for its libraries, and match the
+        one the address named.
+        """
+        from .mcp_client import McpError
+
+        address = parse_sharepoint_folder_url(self.folder_url)
+
+        try:
+            site_tool = session.find_tool(*self.SITE_KEYWORDS)
+        except McpError as exc:
+            raise SourceUnavailable(
+                f"This MCP server offers no way to look up a SharePoint site, "
+                f"and no resolve-folder tool either, so the folder cannot be "
+                f"found. {exc}") from exc
+        site = await session.call(site_tool, {
+            "url": address.site_url, "site_url": address.site_url,
+            "site_path": address["site_path"], "hostname": address["host"],
+            "host": address["host"], "site_name": address["site_path"].rsplit("/", 1)[-1],
+        })
+        _raise_if_error(site, f"find the SharePoint site {address.site_url}")
+        site_id = _first_string(site, ("site_id", "siteId", "id"))
+        if not site_id:
+            raise SourceUnavailable(
+                f"The site lookup did not return a site id for "
+                f"{address.site_url}. It returned: "
+                f"{sorted(site) if isinstance(site, dict) else type(site).__name__}")
+
+        # The library step is optional: some gateways accept a library by
+        # name directly, and asking for a list we do not need is a wasted
+        # call plus another way to fail.
+        library_id = ""
+        try:
+            library_tool = session.find_tool(*self.LIBRARY_KEYWORDS)
+        except McpError:
+            log.info("no list-libraries tool; using the library name from the URL")
+        else:
+            libraries = await session.call(library_tool, {
+                "site_id": site_id, "siteId": site_id, "url": address.site_url})
+            _raise_if_error(libraries, "list the site's document libraries")
+            matched = _match_library(libraries, address["library"],
+                                     address["browser_library"])
+            if matched is None:
+                offered = ", ".join(_names_from(libraries)) or "(none listed)"
+                raise SourceUnavailable(
+                    f"The site has no document library called "
+                    f"{address['browser_library']!r}. It offers: {offered}. "
+                    f"Check the SharePoint folder setting.")
+            library_id = _first_string(matched, _ID_KEYS)
+
+        resolved = {"site_id": site_id, "library": address["library"]}
+        if library_id:
+            # Both, because gateways differ on which they want and the
+            # schema filter drops whichever this one does not declare.
+            resolved["library_id"] = library_id
+            resolved["drive_id"] = library_id
+        if address["folder_path"]:
+            resolved["folder_path"] = address["folder_path"]
+            resolved["path"] = address["folder_path"]
+        log.info("navigated %s -> site %s, library %r, folder %r",
+                 self.folder_url, site_id, address["library"],
+                 address["folder_path"] or "(root)")
+        return resolved
+
+    async def _alisting(self, session, resolved: dict):
+        """The raw folder listing, exactly as the server returned it.
+
+        Kept raw (not reduced to names) because the download step needs the
+        identifiers that live alongside each name.
+        """
+        tool = self._tool(session, "MCP_TOOL_LIST_ITEMS", self.LIST_KEYWORDS)
+        payload = await session.call(tool, _folder_args(resolved, self.folder_url))
+        # "No such folder" arrives as an ordinary result carrying an error
+        # key. Left unread it becomes an empty list, and the run then
+        # reports "no payment listing in the folder" — blaming the folder's
+        # contents for an address that never pointed anywhere.
+        _raise_if_error(payload, "list the SharePoint folder")
+        return payload
+
+    def _auth(self):
+        """The delegated sign-in, if this gateway needs one.
+
+        interactive=False without exception: this class only ever runs
+        inside a background pipeline run, and a background run must never
+        open a browser. The Connect button builds its own provider.
+        """
+        from .sharepoint_auth import build_provider
+
+        return build_provider(self.url, interactive=False)
 
     async def _alist_names(self) -> list[str]:
         from .mcp_client import McpSession
 
-        async with McpSession(self.url, self.headers) as session:
+        async with McpSession(self.url, self.headers, auth=self._auth()) as session:
             resolved = await self._resolve(session)
-            tool = self._tool(session, "MCP_TOOL_LIST_ITEMS", self.LIST_KEYWORDS)
-            payload = await session.call(tool, _folder_args(resolved, self.folder_url))
+            payload = await self._alisting(session, resolved)
         return sorted(_names_from(payload))
 
     async def _aget_reference(self, name: str) -> bytes:
         from .mcp_client import McpSession
 
-        async with McpSession(self.url, self.headers) as session:
+        async with McpSession(self.url, self.headers, auth=self._auth()) as session:
             resolved = await self._resolve(session)
+            # Real SharePoint addresses a document by an opaque drive-item
+            # ID, never by its display name, so the listing is re-read to
+            # translate the one into the other. Servers that genuinely are
+            # name-addressed publish no ID; for those the name is the ID.
+            listing = await self._alisting(session, resolved)
+            item_id = _item_id_for(listing, name) or name
+
             tool = self._tool(session, "MCP_TOOL_GET_DOCUMENT", self.DOCUMENT_KEYWORDS)
-            args = _folder_args(resolved, self.folder_url)
-            payload = await session.call(tool, {**args, "item_id": name, "name": name})
+            # Servers spell the identifier argument differently. Send it
+            # under every spelling THIS tool declares — and plain item_id
+            # when it declares no schema at all, which is what the previous
+            # behaviour assumed.
+            accepted = session.accepted_arguments(tool)
+            id_args = [k for k in _ID_KEYS if accepted and k in accepted] or ["item_id"]
+            args = {**_folder_args(resolved, self.folder_url), "name": name}
+            args.update(dict.fromkeys(id_args, item_id))
+
+            payload = await session.call(tool, args)
             # Servers answer either with bytes inline (base64) or with a
             # temporary download link. The link is bearer-like: fetch it
             # here, never log it, never return it.
@@ -296,20 +408,33 @@ class RealMcpSource:
                 return data
             link = _download_link(payload)
             if not link:
-                raise SourceUnavailable(
-                    f"The document tool returned neither file content nor a "
-                    f"download link for {name!r}. Keys returned: "
-                    f"{sorted(payload) if isinstance(payload, dict) else type(payload).__name__}")
+                log.warning("document tool %s returned no content for %r "
+                            "(item id %r); payload keys: %s", tool, name, item_id,
+                            sorted(payload) if isinstance(payload, dict) else type(payload).__name__)
+                raise SourceUnavailable(_no_document_reason(name, payload))
+            # The auth header is the GATEWAY's credential. Download links
+            # usually point at a different host (pre-signed storage) and
+            # carry their own authorisation, so the key travels only when
+            # the link stays on the gateway itself.
+            link_headers = self.headers if _same_host(link, self.url) else {}
             async with httpx.AsyncClient(timeout=60) as client:
-                r = await client.get(link, headers=self.headers)
+                r = await client.get(link, headers=link_headers)
                 r.raise_for_status()
                 return r.content
 
     def _guarded(self, coro, what: str):
         from .mcp_client import McpError, run_sync
+        from .sharepoint_auth import SignInRequired
 
         try:
             return run_sync(coro)
+        except SourceUnavailable:
+            raise  # already carries its specific, user-facing reason
+        except SignInRequired as exc:
+            # Already written for the reviewer, and it tells them exactly
+            # which button to press. Passed through untouched.
+            log.warning("MCP %s needs a sign-in: %s", what, exc)
+            raise SourceUnavailable(str(exc)) from exc
         except McpError as exc:
             log.warning("MCP %s failed: %s", what, exc, exc_info=True)
             raise SourceUnavailable(str(exc)) from exc
@@ -326,6 +451,132 @@ class RealMcpSource:
         return self._guarded(self._aget_reference(name), f"get_reference {name!r}")
 
 
+# --- reading a SharePoint address the way a person copies it ----------------
+# The enterprise gateway has no resolve-folder tool, so the browser URL a
+# reviewer pastes has to be taken apart here. Two forms appear in practice:
+#
+#   .../sites/ClientABC/Shared Documents/AP Reference
+#   .../sites/ClientABC/Shared Documents/Forms/AllItems.aspx?id=%2Fsites%2F…
+#
+# The second is what the address bar shows once you click into a folder:
+# the real path hides in the "id" query parameter, and the visible path
+# stops at the library.
+_VIEW_PAGES = ("forms/allitems.aspx", "forms/dispform.aspx", "forms/editform.aspx")
+
+# SharePoint shows "Shared Documents" in the browser and calls the same
+# library "Documents" over the API. Matching literally finds nothing.
+_LIBRARY_ALIASES = {"shared documents": "Documents"}
+
+
+class FolderAddress(dict):
+    """Where a SharePoint folder lives, in the parts the gateway asks for."""
+
+    @property
+    def site_url(self) -> str:
+        return f"{self['scheme']}://{self['host']}{self['site_path']}"
+
+
+def parse_sharepoint_folder_url(url: str) -> FolderAddress:
+    """Split a browser folder URL into site, library, and folder path.
+
+    Raises SourceUnavailable with a readable message rather than guessing:
+    a misread address means listing the wrong folder, and checking this
+    month's invoices against the wrong listing is worse than stopping.
+    """
+    from urllib.parse import parse_qs, unquote, urlsplit
+
+    parts = urlsplit((url or "").strip())
+    if not parts.scheme or not parts.netloc:
+        raise SourceUnavailable(
+            "The SharePoint folder setting is not a full web address. Open the "
+            "folder in your browser and copy the whole address bar, starting "
+            "with https://.")
+
+    # When the address is a view page, the real path is in "id" (or
+    # "RootFolder"), and the visible path is just the page's own location.
+    path = unquote(parts.path)
+    if any(page in path.lower() for page in _VIEW_PAGES):
+        query = parse_qs(parts.query)
+        inner = (query.get("id") or query.get("RootFolder")
+                 or query.get("rootfolder") or [""])[0]
+        if not inner:
+            raise SourceUnavailable(
+                "That SharePoint address points at a list view rather than a "
+                "folder. Click into the folder itself, then copy the address.")
+        path = unquote(inner)
+
+    segments = [s for s in path.split("/") if s]
+    # A site lives at /sites/<name> or /teams/<name>; without either, the
+    # address is the tenant root and names no document library.
+    for marker in ("sites", "teams"):
+        if marker in segments:
+            index = segments.index(marker)
+            if len(segments) > index + 1:
+                site_path = "/" + "/".join(segments[:index + 2])
+                rest = segments[index + 2:]
+                break
+    else:
+        raise SourceUnavailable(
+            "That SharePoint address does not include a site (the /sites/… or "
+            "/teams/… part). Copy the address from inside the document "
+            "library you want to use.")
+
+    if not rest:
+        raise SourceUnavailable(
+            "That SharePoint address stops at the site and does not name a "
+            "document library. Open the library (for example Documents), then "
+            "copy the address.")
+
+    library = rest[0]
+    folder_path = "/".join(rest[1:])
+    # "Shared Documents" arrives as two segments in some tenants.
+    if len(rest) > 1 and f"{rest[0]} {rest[1]}".lower() in _LIBRARY_ALIASES:
+        library = f"{rest[0]} {rest[1]}"
+        folder_path = "/".join(rest[2:])
+
+    return FolderAddress(
+        scheme=parts.scheme, host=parts.netloc, site_path=site_path,
+        library=_LIBRARY_ALIASES.get(library.lower(), library),
+        browser_library=library, folder_path=folder_path,
+    )
+
+
+def _match_library(payload, library: str, browser_library: str) -> dict | None:
+    """The library entry the pasted address named, or None.
+
+    Matched against both spellings because the browser says "Shared
+    Documents" and the API says "Documents", and different gateways
+    report one, the other, or both.
+    """
+    wanted = {library.strip().lower(), browser_library.strip().lower()}
+    wanted |= {_LIBRARY_ALIASES.get(w, "").lower() for w in list(wanted)} - {""}
+    for item in _unwrap_items(payload):
+        if not isinstance(item, dict):
+            continue
+        names = {_item_name(item).strip().lower()}
+        names |= {str(item.get(k, "")).strip().lower()
+                  for k in ("library", "libraryName", "driveName")}
+        if names & wanted:
+            return item
+    return None
+
+
+def _first_string(payload, keys: tuple[str, ...]) -> str:
+    """The first of `keys` holding a non-empty string, at the top level or
+    one envelope down. Servers wrap single results inconsistently."""
+    candidates = [payload]
+    if isinstance(payload, dict):
+        candidates += [v for v in payload.values() if isinstance(v, dict)]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        for key in keys:
+            value = candidate.get(key)
+            if isinstance(value, (str, int)) and str(value).strip():
+                return str(value)
+    return ""
+
+
 def _folder_args(resolved: dict, folder_url: str) -> dict:
     """Whatever identifiers the resolve step produced, plus the raw URL.
 
@@ -339,25 +590,132 @@ def _folder_args(resolved: dict, folder_url: str) -> dict:
     return args
 
 
-def _names_from(payload) -> list[str]:
-    """File names out of a list-items result, whatever it is wrapped in."""
+def _unwrap_items(payload) -> list:
+    """The list of items inside whatever envelope the server wrapped it in."""
     if isinstance(payload, dict):
         for key in ("items", "files", "value", "children", "documents", "results"):
             if isinstance(payload.get(key), list):
-                payload = payload[key]
-                break
-    if not isinstance(payload, list):
-        return []
+                return payload[key]
+    return payload if isinstance(payload, list) else []
+
+
+def _item_name(item: dict) -> str:
+    return str(item.get("name") or item.get("displayName") or item.get("title") or "")
+
+
+# How servers spell "which document". SharePoint's own is an opaque
+# drive-item ID; the display name is NOT interchangeable with it.
+_ID_KEYS = ("item_id", "itemId", "id", "drive_item_id", "driveItemId",
+            "file_id", "fileId", "unique_id", "uniqueId")
+
+
+def _item_id_for(payload, name: str) -> str:
+    """The server's own identifier for the file displayed as `name`.
+
+    Returns "" when the listing publishes no identifier — some servers
+    really are name-addressed, and callers fall back to the name for those.
+    """
+    items = [i for i in _unwrap_items(payload) if isinstance(i, dict)]
+    # Exact first; SharePoint itself treats names case-insensitively, so a
+    # case-only difference is the same file rather than a miss.
+    for match in (lambda n: n == name, lambda n: n.lower() == name.lower()):
+        for item in items:
+            if not match(_item_name(item)):
+                continue
+            for key in _ID_KEYS:
+                value = item.get(key)
+                if isinstance(value, (str, int)) and str(value):
+                    return str(value)
+    return ""
+
+
+def _redact_links(text: str) -> str:
+    """Server text may quote a temporary download URL; those are secrets.
+
+    One shared redactor with telemetry: two copies of "hide the secrets"
+    is one copy too many, because only one of them gets fixed.
+    """
+    from .telemetry import redact_links
+
+    return redact_links(text)
+
+
+def _text_at(payload: dict, keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, dict):
+            value = value.get("message") or value.get("code") or ""
+        if isinstance(value, str) and value.strip():
+            return _redact_links(value.strip())[:300]
+    return ""
+
+
+# Keys that MEAN failure wherever they appear. Deliberately short: a
+# "message" or "detail" beside a perfectly good list of files is a
+# gateway being chatty ("showing 100 of 250"), not an error, and treating
+# it as one would fail a run that had already succeeded.
+_ERROR_KEYS = ("error", "errorMessage")
+_EXPLANATION_KEYS = ("message", "detail", "description")
+
+
+def _reported_error(payload) -> str:
+    """An explicit, unambiguous server-reported failure — or "".
+
+    Used to decide whether an otherwise-successful response is really a
+    failure, so it only trusts keys that can mean nothing else.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    return _text_at(payload, _ERROR_KEYS)
+
+
+def _failure_reason(payload) -> str:
+    """Why a call failed, when we ALREADY know it failed.
+
+    Looser than _reported_error on purpose: at this point there is no
+    risk of mistaking chatter for a failure, and any sentence the server
+    offers beats saying nothing.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    return (_text_at(payload, _ERROR_KEYS)
+            or _text_at(payload, _EXPLANATION_KEYS))
+
+
+def _raise_if_error(payload, what: str) -> None:
+    """Stop when a successful-looking result is actually a failure.
+
+    This gateway reports bad requests as ordinary results carrying an
+    "error" key. Every call therefore has to look, or the failure turns
+    into an empty list and gets blamed on whatever comes next.
+    """
+    reason = _reported_error(payload)
+    if reason:
+        raise SourceUnavailable(f"SharePoint could not {what}: {reason}")
+
+
+def _no_document_reason(name: str, payload) -> str:
+    """Why the document tool produced no bytes, in words a reviewer can use."""
+    reported = _failure_reason(payload)
+    if reported:
+        return f"SharePoint could not return {name!r}: {reported}"
+    return (f"The document tool returned neither file content nor a download "
+            f"link for {name!r}. Keys returned: "
+            f"{sorted(payload) if isinstance(payload, dict) else type(payload).__name__}")
+
+
+def _names_from(payload) -> list[str]:
+    """File names out of a list-items result, whatever it is wrapped in."""
     names = []
-    for item in payload:
+    for item in _unwrap_items(payload):
         if isinstance(item, str):
             names.append(item)
         elif isinstance(item, dict):
             if item.get("kind") not in (None, "file") or item.get("folder"):
                 continue  # a subfolder, not a document
-            name = item.get("name") or item.get("displayName") or item.get("title")
+            name = _item_name(item)
             if name:
-                names.append(str(name))
+                names.append(name)
     return names
 
 
@@ -372,19 +730,33 @@ def _inline_bytes(payload) -> bytes | None:
             try:
                 return base64.b64decode(raw, validate=True)
             except Exception:
-                return None
+                continue  # not base64 under this key; another may be
     return None
 
 
 def _download_link(payload) -> str:
+    """A download-specific link only.
+
+    Generic keys ("url", "href") are excluded on purpose: servers echo
+    arguments back, and we SEND a "url" — accepting it here would fetch
+    the folder's web page and call it a document.
+    """
     if not isinstance(payload, dict):
         return ""
     for key in ("download_url", "downloadUrl",
-                "@microsoft.graph.downloadUrl", "url", "href"):
+                "@microsoft.graph.downloadUrl"):
         link = payload.get(key)
         if isinstance(link, str) and link.startswith("http"):
             return link
     return ""
+
+
+def _same_host(link: str, base: str) -> bool:
+    """True when a link points at the same scheme://host:port as base."""
+    from urllib.parse import urlsplit
+
+    a, b = urlsplit(link), urlsplit(base)
+    return (a.scheme, a.netloc) == (b.scheme, b.netloc) and bool(a.netloc)
 
 
 def get_source(folder_url: str | None = None):

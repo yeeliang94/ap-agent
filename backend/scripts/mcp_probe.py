@@ -48,7 +48,7 @@ async def main() -> int:
     try:
         async with McpSession(url, headers) as session:
             print(f"Handshake OK. {len(session.tool_names)} tool(s):\n")
-            for tool in session._tools:
+            for tool in session.tools:
                 schema = getattr(tool, "input_schema", None) or {}
                 props = list((schema.get("properties") or {})) if isinstance(schema, dict) else []
                 required = list(schema.get("required") or []) if isinstance(schema, dict) else []

@@ -14,6 +14,12 @@ Deliberate frictions, kept from the probe learnings:
     works rather than lucky naming
   - the "Shared Documents" (browser URL) vs "Documents" (MCP) alias
   - download URLs are temporary and single-use
+  - documents are addressed by an OPAQUE item ID, never by their file
+    name. Real SharePoint issues drive-item IDs; a fake that accepted
+    file names would let a name-for-ID bug pass every local test and
+    fail only on the enterprise gateway — which is exactly what happened
+  - a bad item ID comes back as a normal result carrying an "error" key,
+    not as an MCP protocol error, because that is what the gateway does
 
 It serves the sample reference workbooks read-only. It cannot write —
 neither can the real one.
@@ -26,7 +32,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_DIR = REPO_ROOT / "samples" / "generated" / "reference"
@@ -60,27 +66,51 @@ def list_library_items(site_id: str = "", library: str = "",
     if not REFERENCE_DIR.is_dir():
         return {"items": []}
     return {"items": [
-        {"item_id": f.name, "name": f.name, "size": f.stat().st_size,
+        {"item_id": _opaque_id(f.name), "name": f.name, "size": f.stat().st_size,
          "kind": "file"}
         for f in sorted(REFERENCE_DIR.iterdir()) if f.is_file()
     ]}
 
 
+def _opaque_id(name: str) -> str:
+    """A stable, opaque drive-item ID, as real SharePoint issues."""
+    import hashlib
+
+    return "01" + hashlib.sha1(name.encode()).hexdigest()[:24].upper()
+
+
+def _name_for(item_id: str) -> str | None:
+    if not REFERENCE_DIR.is_dir():
+        return None
+    for f in sorted(REFERENCE_DIR.iterdir()):
+        if f.is_file() and _opaque_id(f.name) == item_id:
+            return f.name
+    return None
+
+
 @mcp.tool(name="sp_get_document_metadata",
           description="Metadata for one document, including a temporary "
                       "single-use download URL.")
-def get_document_metadata(item_id: str = "", site_id: str = "",
+def get_document_metadata(ctx: Context, item_id: str = "", site_id: str = "",
                           library: str = "") -> dict:
-    path = REFERENCE_DIR / item_id
+    resolved = _name_for(item_id)
+    if resolved is None:
+        # Like the enterprise gateway: a bad item ID comes back as an
+        # ordinary result carrying an "error" key, NOT an MCP error.
+        return {"error": f"itemNotFound: no drive item {item_id!r}"}
+    path = REFERENCE_DIR / resolved
     # Containment check: item_id must name a file directly in the folder.
     if not path.is_file() or path.resolve().parent != REFERENCE_DIR.resolve():
         raise ValueError(f"No such document: {item_id!r}")
     token = uuid.uuid4().hex
     _download_tokens[token] = path
+    # Built from the request's own Host so the link works on whatever
+    # port this server was actually given (the tests pick a free one).
+    host = (ctx.headers or {}).get("host", "127.0.0.1:8004")
     return {
         "item_id": path.name, "name": path.name, "size": path.stat().st_size,
         # Temporary bearer-like link — treat as sensitive, never log it.
-        "download_url": f"http://127.0.0.1:8004/download/{token}",
+        "download_url": f"http://{host}/download/{token}",
     }
 
 

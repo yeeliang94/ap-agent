@@ -1,10 +1,16 @@
 """Database tables.
 
-Four ideas, four tables:
+Five ideas, five tables:
   Run       — one uploaded batch working its way through the pipeline
   Document  — one file inside a run, plus what the AI extracted from it
   Flag      — one thing that needs a human decision, with its cited basis
   AuditEvent— who decided what, when (the audit trail)
+  RunEvent  — what the SYSTEM did and where it struggled (the run diary)
+
+AuditEvent and RunEvent answer different questions and are kept apart on
+purpose: the audit trail is about people and must never be diluted by
+machine noise, while the diary is about the pipeline and is expected to
+be noisy.
 """
 import uuid
 from datetime import datetime, timezone
@@ -100,6 +106,32 @@ class AuditEvent(Base):
     action: Mapped[str] = mapped_column(String)  # what they did
     detail: Mapped[str] = mapped_column(Text, default="")
     at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class RunEvent(Base):
+    """One moment in a run's life — a stage starting, a document failing.
+
+    Written by telemetry.record(), which also logs it. The review screen
+    reads these so a failure is visible to the person using the app, not
+    only to whoever can read the server log.
+    """
+    __tablename__ = "run_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String, index=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    # Which pipeline stage: reference / sort / extract / check / output / run
+    stage: Mapped[str] = mapped_column(String, default="")
+    # info / warning / error — what the reviewer's attention is owed
+    level: Mapped[str] = mapped_column(String, default="info")
+    # Machine code, e.g. STAGE_DONE / DOCUMENT_FAILED / ALL_SORTS_FAILED
+    code: Mapped[str] = mapped_column(String, default="")
+    # The plain sentence a reviewer reads.
+    message: Mapped[str] = mapped_column(Text, default="")
+    # The engineer's version (exception type and text), already redacted.
+    detail: Mapped[str] = mapped_column(Text, default="")
+    # Set when the event is about one specific file.
+    document_id: Mapped[str] = mapped_column(String, default="")
 
 
 class AppSetting(Base):
