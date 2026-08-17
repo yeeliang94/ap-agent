@@ -356,15 +356,22 @@ class RealMcpSource:
         missing = session.required_arguments(tool) - set(
             _folder_args(resolved, self.folder_url))
         if missing:
-            # The gateway requires drive_id here. Saying so beats letting
-            # the server answer "'drive_id' is a required property",
-            # which names the symptom and not the missing step.
+            # Saying which earlier step should have produced it beats
+            # letting the server answer "'drive_id' is a required
+            # property" — that names the symptom, not the gap.
+            named = ", ".join(sorted(missing))
+            if missing & _LIBRARY_ID_KEYS:
+                raise SourceUnavailable(
+                    f"The folder could not be listed because {named} is "
+                    f"needed and was not found earlier — the document library "
+                    f"lookup did not return an id for "
+                    f"{resolved.get('library', 'the library')!r}. Check the "
+                    f"SharePoint folder setting names a real library.")
             raise SourceUnavailable(
-                f"The folder could not be listed because {', '.join(sorted(missing))} "
-                f"is needed and was not found earlier — the document library "
-                f"lookup did not return an id for "
-                f"{resolved.get('library', 'the library')!r}. Check the "
-                f"SharePoint folder setting names a real library.")
+                f"The folder could not be listed because {tool!r} requires "
+                f"{named}, which this app does not know how to supply. Name "
+                f"the right tool with MCP_TOOL_LIST_ITEMS in .env, or pass "
+                f"these argument names on to whoever maintains this app.")
         return await _all_pages(session, tool,
                                 _folder_args(resolved, self.folder_url),
                                 "list the SharePoint folder")
@@ -600,14 +607,31 @@ _PAGE_TOKEN_KEYS = ("skip_token", "skipToken", "next_skip_token",
 MAX_PAGES = 25
 
 
-def _next_page_token(payload) -> str:
+def _next_page_token(payload) -> tuple[str, str]:
+    """(key, token) for "there is more", or ("", "") when the page is last."""
     if not isinstance(payload, dict):
-        return ""
+        return "", ""
     for key in _PAGE_TOKEN_KEYS:
         value = payload.get(key)
         if isinstance(value, (str, int)) and str(value).strip():
-            return str(value)
-    return ""
+            return key, str(value)
+    return "", ""
+
+
+def _cursor_arguments(session, tool: str, response_key: str) -> list[str]:
+    """Which ARGUMENT this tool wants the continuation token in.
+
+    The name a server answers with need not be the name it asks for, and
+    arguments a tool does not declare are dropped before sending. Picking
+    the request name out of the tool's own schema is what stops us
+    politely re-requesting page one forever.
+    """
+    accepted = session.accepted_arguments(tool)
+    if accepted is None:
+        # No published schema, so nothing will be filtered. Echo the key
+        # the server itself used, which most servers accept back.
+        return [k for k in dict.fromkeys([response_key, "skip_token"]) if k]
+    return [k for k in _PAGE_TOKEN_KEYS if k in accepted]
 
 
 async def _all_pages(session, tool: str, args: dict, what: str) -> list:
@@ -617,6 +641,12 @@ async def _all_pages(session, tool: str, args: dict, what: str) -> list:
     means a long folder arrives in pieces. Reading only the first piece
     looks exactly like a short folder, so it would never be noticed —
     the run would simply not see some of the files.
+
+    Every way this can go wrong ends in an exception rather than a short
+    list. A partial folder listing is the one outcome that must never
+    pass quietly: it reads as "the payment listing is not there", or
+    worse, quietly matches last year's file because this year's was on a
+    page nobody fetched.
     """
     args = dict(args)
     entries: list = []
@@ -625,15 +655,33 @@ async def _all_pages(session, tool: str, args: dict, what: str) -> list:
         payload = await session.call(tool, args)
         _raise_if_error(payload, what)
         entries.extend(_unwrap_items(payload))
-        token = _next_page_token(payload)
-        if not token or token in seen:
+        response_key, token = _next_page_token(payload)
+        if not token:
             if page > 1:
                 log.info("%s: read %d entries across %d page(s)",
                          tool, len(entries), page)
             return entries
+
+        if token in seen:
+            # The same token twice means asking again returned the same
+            # page. Treating that as "finished" would hand back a
+            # duplicated, truncated folder and call it complete.
+            raise SourceUnavailable(
+                f"SharePoint offered the same continuation token twice when "
+                f"asked to {what}, so the rest of the folder cannot be "
+                f"reached. Refusing to work from a partial listing.")
+
+        cursor_args = _cursor_arguments(session, tool, response_key)
+        if not cursor_args:
+            raise SourceUnavailable(
+                f"SharePoint said there is more to read when asked to "
+                f"{what}, but {tool!r} publishes no argument to ask for the "
+                f"next page (it answered with {response_key!r}). Refusing to "
+                f"work from a partial listing.")
+
         seen.add(token)
-        args["skip_token"] = token
-        args["skipToken"] = token
+        for key in cursor_args:
+            args[key] = token
     raise SourceUnavailable(
         f"SharePoint kept offering more pages when asked to {what} "
         f"({MAX_PAGES} requested). Refusing to continue rather than work "
@@ -660,6 +708,11 @@ _ENVELOPE_KEYS = ("items", "files", "value", "children", "documents",
                   "results", "libraries", "drives", "lists", "entries",
                   "document_libraries", "documentLibraries")
 
+# Lists that are ABOUT the call rather than the answer. Never mistaken
+# for content, however lonely they are in the payload.
+_DIAGNOSTIC_KEYS = frozenset({"errors", "warnings", "messages", "diagnostics",
+                              "notes", "logs", "links", "hints", "details"})
+
 
 def _unwrap_items(payload) -> list:
     """The list of items inside whatever envelope the server wrapped it in."""
@@ -673,9 +726,19 @@ def _unwrap_items(payload) -> list:
     # Last resort: exactly one key holds a list, so there is nothing to
     # confuse it with. This is what stops the NEXT unrecognised envelope
     # name from silently becoming "the folder is empty".
-    lists = [v for v in payload.values() if isinstance(v, list)]
-    if len(lists) == 1:
-        return lists[0]
+    candidates = [value for key, value in payload.items()
+                  if isinstance(value, list)
+                  and key.lower() not in _DIAGNOSTIC_KEYS]
+    if len(candidates) != 1:
+        return []
+    only = candidates[0]
+    # Entries in a real listing are objects with fields. A bare list of
+    # strings under a name we do not recognise is far likelier to be
+    # messages than files — and turning error text into "file names" is
+    # how a failed call becomes a folder full of documents that
+    # do not exist.
+    if all(isinstance(entry, dict) for entry in only):
+        return only
     return []
 
 
@@ -687,6 +750,11 @@ def _item_name(item: dict) -> str:
 # drive-item ID; the display name is NOT interchangeable with it.
 _ID_KEYS = ("item_id", "itemId", "id", "drive_item_id", "driveItemId",
             "file_id", "fileId", "unique_id", "uniqueId")
+
+# The subset that identifies a LIBRARY rather than a document. A missing
+# one of these means the library lookup came up short, which is a
+# different story from a tool wanting an argument we have never heard of.
+_LIBRARY_ID_KEYS = frozenset({"drive_id", "driveId", "library_id", "libraryId"})
 
 
 def _item_id_for(payload, name: str) -> str:

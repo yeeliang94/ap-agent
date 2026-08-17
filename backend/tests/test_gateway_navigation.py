@@ -169,18 +169,112 @@ def test_an_unknown_envelope_name_still_yields_its_one_list():
     assert _unwrap_items({"a": [{"x": 1}], "b": [{"y": 2}]}) == []
 
 
-def test_a_missing_drive_id_is_explained_before_the_server_rejects_it(
+def test_a_missing_drive_id_names_the_step_that_should_have_supplied_it(
         gateway_source, monkeypatch):
     """list_library_items REQUIRES drive_id. Letting the call go anyway
     returns "'drive_id' is a required property", which names the symptom
-    and not the step that failed to produce it."""
+    and not the step that failed to produce it.
+
+    The library must MATCH and still carry no id — returning no match at
+    all stops one branch earlier, at "no such library", and never reaches
+    this check.
+    """
     from app import docsource
 
-    monkeypatch.setattr(docsource, "_match_library", lambda *a, **k: None)
+    monkeypatch.setattr(docsource, "_match_library",
+                        lambda *a, **k: {"name": "Documents"})  # matched, but no id
     with pytest.raises(SourceUnavailable) as exc:
         gateway_source().list_names()
-    # It fails at the library match, naming the library it could not find.
-    assert "document library" in str(exc.value)
+    message = str(exc.value)
+    assert "drive_id" in message                      # what is missing
+    assert "document library lookup" in message       # ...and which step owed it
+
+
+def test_an_unexpected_required_argument_is_not_blamed_on_the_library(
+        gateway_source, monkeypatch):
+    """The library wording is only right for a library id. Any other
+    missing argument needs its own explanation, or it sends the reviewer
+    to check a SharePoint folder that was never the problem."""
+    from app import mcp_client
+
+    monkeypatch.setattr(mcp_client.McpSession, "required_arguments",
+                        lambda self, tool: {"tenant_id"})
+    with pytest.raises(SourceUnavailable) as exc:
+        gateway_source().list_names()
+    message = str(exc.value)
+    assert "tenant_id" in message
+    assert "document library lookup" not in message
+    assert "MCP_TOOL_LIST_ITEMS" in message           # ...and what to try
+
+
+# --- paging that goes wrong -------------------------------------------------
+
+class _StubSession:
+    """A server that answers with whatever pages it was handed."""
+
+    def __init__(self, pages, accepted=None):
+        self.pages, self.accepted, self.calls = pages, accepted, []
+
+    def accepted_arguments(self, tool):
+        return self.accepted
+
+    async def call(self, tool, arguments):
+        self.calls.append(dict(arguments))
+        return self.pages[min(len(self.calls) - 1, len(self.pages) - 1)]
+
+
+def _walk(session):
+    import asyncio
+
+    from app.docsource import _all_pages
+
+    return asyncio.run(_all_pages(session, "list_items", {"drive_id": "d"},
+                                  "list the folder"))
+
+
+def test_a_repeated_continuation_token_stops_the_run(gateway_source):
+    """A server that keeps handing back the same token is handing back the
+    same page. Treating that as "finished" returns a duplicated, truncated
+    folder and calls it complete — which is the one outcome paging exists
+    to prevent."""
+    stuck = {"items": [{"name": "a.xlsx", "id": "1"}], "skip_token": "SAME"}
+    with pytest.raises(SourceUnavailable) as exc:
+        _walk(_StubSession([stuck], accepted={"drive_id", "skip_token"}))
+    assert "same continuation token twice" in str(exc.value)
+
+
+def test_the_next_page_is_asked_for_under_the_name_this_tool_accepts():
+    """Servers need not answer with the name they ask for, and arguments a
+    tool does not declare are dropped before sending — so asking under the
+    wrong name re-requests page one politely, forever."""
+    pages = [{"items": [{"name": "a.xlsx", "id": "1"}], "nextSkipToken": "P2"},
+             {"items": [{"name": "b.xlsx", "id": "2"}]}]
+    session = _StubSession(pages, accepted={"drive_id", "continuation_token"})
+    assert len(_walk(session)) == 2
+    # Answered with nextSkipToken; asked with continuation_token.
+    assert session.calls[1]["continuation_token"] == "P2"
+    assert "nextSkipToken" not in session.calls[1]
+
+
+def test_more_pages_with_no_way_to_ask_for_them_is_a_failure():
+    """Not a short folder — an unreadable one."""
+    pages = [{"items": [{"name": "a.xlsx", "id": "1"}], "skip_token": "P2"}]
+    with pytest.raises(SourceUnavailable) as exc:
+        _walk(_StubSession(pages, accepted={"drive_id"}))  # no cursor argument
+    assert "no argument to ask for the next page" in str(exc.value)
+
+
+def test_a_diagnostic_list_is_never_mistaken_for_the_folder_contents():
+    """Turning error text into "file names" would produce a folder full of
+    documents that do not exist."""
+    from app.docsource import _unwrap_items
+
+    assert _unwrap_items({"errors": ["access denied"]}) == []
+    assert _unwrap_items({"warnings": [{"code": "x"}]}) == []
+    # A bare list of strings under an unknown key is messages, not files.
+    assert _unwrap_items({"somethingNew": ["not a file record"]}) == []
+    # ...but real entries under an unknown key are still read.
+    assert _unwrap_items({"somethingNew": [{"name": "a.xlsx"}]}) == [{"name": "a.xlsx"}]
 
 
 def test_a_folder_that_is_not_there_says_so_plainly(gateway_source):
