@@ -12,10 +12,17 @@ path — parsing the pasted browser URL, finding the site, matching the
 library — ran for the first time on the enterprise gateway, over a VPN,
 where the only feedback was a failed run.
 
-Deliberate frictions, all taken from the real gateway's behaviour:
+Deliberate frictions, all taken from the real gateway's behaviour — the
+tool names below are the real ones, not inventions:
   - NO resolve-folder tool. The URL must be taken apart by the client.
-  - Several tools mention "site", so a client matching on that word alone
-    cannot tell them apart and must ask for the specific one.
+  - EVERY tool is namespaced "sharepointmcp-", so the word "sharepoint"
+    appears in all of them and discriminates nothing. An earlier fake used
+    an "sp_" prefix, which let a keyword search for "sharepoint" look like
+    it was working; against the real gateway it matched three tools at
+    once and the run died. Namespaces are noise and are stripped before
+    matching — that is what these names exist to prove.
+  - Several tools also contain "site" and "get", so the search has to be
+    specific rather than merely plausible.
   - The library is "Documents"; the browser URL says "Shared Documents".
   - Documents are addressed by an opaque item ID, never by file name.
   - A bad request comes back as a normal result carrying an "error" key,
@@ -58,13 +65,13 @@ def _name_for(item_id: str) -> str | None:
     return None
 
 
-@mcp.tool(name="sp_whoami",
+@mcp.tool(name="sharepointmcp-whoami",
           description="The signed-in user this connection is acting as.")
 def whoami() -> dict:
     return {"displayName": "Test Reviewer", "mail": "reviewer@example.com"}
 
 
-@mcp.tool(name="sp_get_sharepoint_site",
+@mcp.tool(name="sharepointmcp-get_sharepoint_site",
           description="Look up a SharePoint site by its web address.")
 def get_sharepoint_site(url: str = "", site_url: str = "") -> dict:
     address = (site_url or url or "").rstrip("/")
@@ -74,23 +81,25 @@ def get_sharepoint_site(url: str = "", site_url: str = "") -> dict:
             "displayName": address.rsplit("/", 1)[-1]}
 
 
-# Two more tools whose names contain "site". They exist so that a client
-# matching on the bare word cannot tell the three apart — which is the
-# ambiguity the real gateway produced, and the reason tool discovery has
-# to ask for the specific spelling first.
-@mcp.tool(name="sp_search_site_content",
-          description="Full-text search across a site's content.")
-def search_site_content(site_id: str = "", query: str = "") -> dict:
-    return {"items": []}
+# The other two tools the real gateway offers whose names contain both
+# "get" and "site". With the shared namespace included they ALSO contain
+# "sharepoint", so ("get", "sharepoint", "site") matched all three and
+# discovery refused to guess. Stripping the namespace first leaves
+# get_root_site and get_site_analytics without "sharepoint", so only
+# get_sharepoint_site matches.
+@mcp.tool(name="sharepointmcp-get_root_site",
+          description="The tenant's root site.")
+def get_root_site() -> dict:
+    return {"site_id": "root", "displayName": "Root"}
 
 
-@mcp.tool(name="sp_get_site_permissions",
-          description="Who has access to a site.")
-def get_site_permissions(site_id: str = "") -> dict:
-    return {"roles": []}
+@mcp.tool(name="sharepointmcp-get_site_analytics",
+          description="Visit statistics for a site.")
+def get_site_analytics(site_id: str = "") -> dict:
+    return {"views": 0}
 
 
-@mcp.tool(name="sp_list_document_libraries",
+@mcp.tool(name="sharepointmcp-list_document_libraries",
           description="The document libraries (drives) belonging to a site.")
 def list_document_libraries(site_id: str = "") -> dict:
     if site_id != SITE_ID:
@@ -102,7 +111,7 @@ def list_document_libraries(site_id: str = "") -> dict:
     ]}
 
 
-@mcp.tool(name="sp_list_library_items",
+@mcp.tool(name="sharepointmcp-list_library_items",
           description="The files and folders inside a library folder.")
 def list_library_items(site_id: str = "", library_id: str = "",
                        folder_path: str = "") -> dict:
@@ -121,7 +130,7 @@ def list_library_items(site_id: str = "", library_id: str = "",
     ]}
 
 
-@mcp.tool(name="sp_download_document",
+@mcp.tool(name="sharepointmcp-download_document",
           description="A temporary, single-use download URL for one document.")
 def download_document(ctx: Context, item_id: str = "", site_id: str = "",
                       library_id: str = "") -> dict:

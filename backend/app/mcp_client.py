@@ -174,6 +174,36 @@ class McpSession:
     def tool_names(self) -> list[str]:
         return [t.name for t in self._tools]
 
+    @property
+    def namespace(self) -> str:
+        """The prefix every tool on this server shares, if there is one.
+
+        Enterprise gateways namespace their whole catalogue —
+        "sharepointmcp-get_sharepoint_site", "sharepointmcp-get_root_site".
+        That prefix is pure noise for matching, and worse than noise: the
+        word "sharepoint" then appears in EVERY tool name, so searching
+        for it tells the client nothing while looking like it should.
+        """
+        names = self.tool_names
+        if len(names) < 2:
+            return ""
+        shared = ""
+        for index, char in enumerate(names[0]):
+            if all(len(n) > index and n[index] == char for n in names):
+                shared += char
+            else:
+                break
+        # Cut at the last separator so a real word is never chopped in
+        # half ("get_si" from get_site/get_signature would be nonsense).
+        cut = max((shared.rfind(sep) for sep in ("-", "_", ".", "/", ":")),
+                  default=-1)
+        return shared[:cut + 1] if cut >= 0 else ""
+
+    def _without_namespace(self, name: str) -> str:
+        prefix = self.namespace
+        return (name[len(prefix):] if prefix and name.startswith(prefix)
+                else name).lower()
+
     def find_tool(self, *keyword_sets: tuple[str, ...]) -> str:
         """The server's own name for a tool we need.
 
@@ -183,19 +213,33 @@ class McpSession:
         without hardcoding either. Ambiguity and absence both raise —
         picking one of several plausible tools is how you end up calling
         a write tool by accident.
+
+        Matching ignores the catalogue's shared prefix first, and only
+        falls back to whole names if that finds nothing at all. Without
+        that, a gateway whose tools are ALL called "sharepointmcp-…"
+        makes the word "sharepoint" match everything.
         """
-        for words in keyword_sets:
-            matches = [t.name for t in self._tools
-                       if all(w in t.name.lower() for w in words)]
-            if len(matches) == 1:
-                return matches[0]
-            if len(matches) > 1:
-                raise McpError(
-                    f"{len(matches)} tools match {words}: {', '.join(matches)}. "
-                    "Set the tool name explicitly in .env rather than guessing.")
+        for readable in (self._without_namespace, lambda n: n.lower()):
+            found = self._match(readable, keyword_sets)
+            if found:
+                return found
         raise McpError(
             f"No tool matches any of {list(keyword_sets)}. The server offers: "
             f"{', '.join(self.tool_names) or '(none)'}")
+
+    def _match(self, readable, keyword_sets) -> str:
+        for words in keyword_sets:
+            matches = [t.name for t in self._tools
+                       if all(w in readable(t.name) for w in words)]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                # Ambiguity is never resolved by trying harder — say which
+                # tools collided and how to settle it.
+                raise McpError(
+                    f"{len(matches)} tools match {words}: {', '.join(matches)}. "
+                    "Set the tool name explicitly in .env rather than guessing.")
+        return ""
 
     def accepted_arguments(self, tool: str) -> set[str] | None:
         """The argument names a tool declares, or None if it declares none.

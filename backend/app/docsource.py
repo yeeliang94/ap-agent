@@ -288,12 +288,13 @@ class RealMcpSource:
         address = parse_sharepoint_folder_url(self.folder_url)
 
         try:
-            site_tool = session.find_tool(*self.SITE_KEYWORDS)
+            site_tool = self._tool(session, "MCP_TOOL_SITE", self.SITE_KEYWORDS)
         except McpError as exc:
             raise SourceUnavailable(
                 f"This MCP server offers no way to look up a SharePoint site, "
                 f"and no resolve-folder tool either, so the folder cannot be "
-                f"found. {exc}") from exc
+                f"found. {exc} You can name it directly by putting "
+                f"MCP_TOOL_SITE=<tool name> in .env.") from exc
         site = await session.call(site_tool, {
             "url": address.site_url, "site_url": address.site_url,
             "site_path": address["site_path"], "hostname": address["host"],
@@ -312,7 +313,8 @@ class RealMcpSource:
         # call plus another way to fail.
         library_id = ""
         try:
-            library_tool = session.find_tool(*self.LIBRARY_KEYWORDS)
+            library_tool = self._tool(session, "MCP_TOOL_LIST_LIBRARIES",
+                                      self.LIBRARY_KEYWORDS)
         except McpError:
             log.info("no list-libraries tool; using the library name from the URL")
         else:
