@@ -1,8 +1,14 @@
 """Step 3 smoke test: one live model call must return validated fields.
 
-Runs against the real API (needs OPENAI_API_KEY in .env and network).
+Runs against the real API (needs OPENAI_API_KEY in .env and network) and
+COSTS MONEY, so it is opt-in — the plain `pytest` run must never make a
+paid call by surprise:
+
+    AP_LIVE_TESTS=1 pytest tests/test_model_layer.py
+
 Kept tiny on purpose — one image, one call.
 """
+import os
 from pathlib import Path
 
 import pytest
@@ -10,6 +16,10 @@ from pydantic_ai import BinaryContent
 
 from app.model_layer import create_agent
 from app.schemas_ai import InvoiceFields
+
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("AP_LIVE_TESTS"),
+    reason="paid live-model smoke test: set AP_LIVE_TESTS=1 to run it")
 
 SAMPLE = (
     Path(__file__).resolve().parents[2]

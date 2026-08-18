@@ -216,8 +216,11 @@ def _secs(started: float) -> str:
 def _record_reference_files(db, run_id: str, files: dict, started: float) -> None:
     """Which reference file played which role — and which role had none.
 
-    A missing policy sheet or bank template degrades a run silently by
-    design (the check simply does not happen), so it is stated here.
+    A missing policy sheet or bank template does not stop a run: the checks
+    that need the file do not happen. That is stated here for the diary,
+    and — when the batch actually needed the file — raised as a run-level
+    MISSING_REFERENCE flag by run_checks, so a reviewer must acknowledge
+    it before any output leaves.
     """
     found = {role: name for role, name in files.items() if name}
     telemetry.record(db, run_id, "reference", telemetry.INFO, "REFERENCE_RESOLVED",
@@ -296,3 +299,35 @@ def _set(db, run: Run, **values) -> None:
 def start_background(run_id: str, workspace: Path) -> None:
     """Fire the pipeline without blocking the upload response."""
     asyncio.get_event_loop().create_task(process_run(run_id, workspace))
+
+
+# The statuses a run passes through while the pipeline is working on it.
+# A run found in one of these when the server STARTS was interrupted: the
+# task that owned it died with the old process and nothing will resume it.
+IN_PROGRESS_STATUSES = ("queued", "sorting", "extracting", "checking")
+
+INTERRUPTED_ERROR = ("The server restarted before this run finished, so it "
+                     "could not be completed. Start a new run.")
+
+
+def fail_interrupted_runs() -> int:
+    """Mark runs left mid-stage by a restart as failed. Called at startup.
+
+    Runs are in-process tasks, so a restart (crash, deploy, laptop lid) is
+    fatal to any run that was under way. Without this, such a run would
+    show "extracting" forever and the reviewer could not tell a stuck run
+    from a slow one. Returns how many were reconciled.
+    """
+    db = SessionLocal()
+    try:
+        stuck = db.query(Run).filter(Run.status.in_(IN_PROGRESS_STATUSES)).all()
+        for run in stuck:
+            _set(db, run, status="failed", error=INTERRUPTED_ERROR)
+            telemetry.record(db, run.id, "run", telemetry.ERROR, "RUN_INTERRUPTED",
+                             INTERRUPTED_ERROR)
+        if stuck:
+            log.warning("%d run(s) were in progress at startup and were marked "
+                        "failed (interrupted by restart)", len(stuck))
+        return len(stuck)
+    finally:
+        db.close()

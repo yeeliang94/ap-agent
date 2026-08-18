@@ -68,7 +68,18 @@ RULE_FIELDS: dict[str, set[str]] = {
     "UNATTACHED_RECEIPT": set(),
     "LOW_CONFIDENCE": set(),
     "PROCESSING_ERROR": set(),
+    # Run-level: a reference file the batch needed was not in the folder.
+    "MISSING_REFERENCE": set(),
 }
+
+
+def _receipt_flag(d, f: dict) -> dict | None:
+    """The one claim check that needs no policy: do the receipts add up?"""
+    if f.get("receipts_match_amount") is False:
+        return _mk_flag(d.id, "RECEIPT_MISMATCH",
+            f"Receipts for {f.get('claimant')}'s claim do not support the claimed amount.",
+            "Rule: every claim needs receipts matching the amount.")
+    return None
 
 
 def _norm(text: str) -> str:
@@ -334,11 +345,47 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
         for c in clauses
     )
     clause_by_id = {c["clause"]: c for c in clauses}
+    claim_docs = [d for d in docs
+                  if d.kind == "claim" and d.status in ("extracted", "checked")]
 
-    for d in docs:
-        if d.kind != "claim" or d.status not in ("extracted", "checked") or not want(d):
+    # ---- a control that is missing must be SEEN, not silently skipped ----
+    # Which reference files a batch needs depends on what is in it: a batch
+    # with staff claims needs the expense policy; the bank upload block
+    # needs the bank template. Their absence is one run-level flag each
+    # (document_id empty) that a reviewer must acknowledge before any
+    # output leaves — never just a line in the diary. Whole-batch check
+    # only: a per-document re-check must not raise them again.
+    if only_doc_ids is None:
+        if claim_docs and not clauses:
+            n = len(claim_docs)
+            flags.append(_mk_flag("", "MISSING_REFERENCE",
+                f"No expense policy sheet was in the reference folder, so "
+                f"{n} staff claim{'s' if n != 1 else ''} could not be "
+                f"categorised or checked against spending caps.",
+                "Rule: a batch with staff claims needs the client's expense "
+                "policy. Accept to proceed without the policy checks, or add "
+                "the policy sheet to the reference folder and start a new run."))
+        if refs is not None and not reference.load_maybank_headers(refs):
+            flags.append(_mk_flag("", "MISSING_REFERENCE",
+                "No bank upload template was in the reference folder, so no "
+                "Maybank entry rows can be built for this run.",
+                "Rule: the bank upload block follows the client's own template. "
+                "Accept to proceed without bank rows, or add the template to "
+                "the reference folder and start a new run."))
+
+    for d in claim_docs:
+        if not want(d):
             continue
         f = d.fields
+        if not clauses:
+            # No policy: nothing to categorise against, and paying for an
+            # AI judgment of an empty policy would only produce a confusing
+            # flag per claim. The MISSING_REFERENCE flag above says why;
+            # the receipt check needs no policy, so it still runs.
+            receipt = _receipt_flag(d, f)
+            if receipt:
+                flags.append(receipt)
+            continue
         agent = create_agent("judge", CategoryJudgment, _JUDGE_INSTRUCTIONS,
                              temperature=0)
         try:
@@ -402,10 +449,9 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
                 f"by {over:.2f}.",
                 f"Policy {clause['clause']}: \"{clause['text']}\""))
 
-        if f.get("receipts_match_amount") is False:
-            flags.append(_mk_flag(d.id, "RECEIPT_MISMATCH",
-                f"Receipts for {f.get('claimant')}'s claim do not support the claimed amount.",
-                "Rule: every claim needs receipts matching the amount."))
+        receipt = _receipt_flag(d, f)
+        if receipt:
+            flags.append(receipt)
 
     # ---- nothing may silently vanish -----------------------------------
     for d in docs:

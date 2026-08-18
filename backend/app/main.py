@@ -117,6 +117,10 @@ def _startup() -> None:
     _configure_logging()
     _configure_tls()  # after logging, so its own result is visible
     init_db()
+    # Runs are in-process tasks: any run still mid-stage now was orphaned
+    # by the previous process and must be shown as failed, not "extracting".
+    from .pipeline.runner import fail_interrupted_runs
+    fail_interrupted_runs()
 
 
 @app.get("/api/health")

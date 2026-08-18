@@ -268,12 +268,17 @@ function FlagCard({
   }
 
   const correctable = doc && CORRECTABLE[doc.kind]?.length > 0;
+  // A flag with no document is about the whole batch (e.g. a reference
+  // file the batch needed was missing). There is nothing to exclude or
+  // correct — the reviewer acknowledges it and the run proceeds without.
+  const runLevel = !flag.document_id;
   return (
     <div className="card flagcard">
       <div className="row" style={{ border: "none", padding: 0 }}>
         <div className="grow">
           <b>{flag.code.replaceAll("_", " ")}</b>
           {doc && <span className="sub">{doc.filename}</span>}
+          {runLevel && <span className="sub">whole batch</span>}
         </div>
         {doc && (
           <button className="btn" onClick={() => setShowDoc(!showDoc)}>
@@ -309,7 +314,7 @@ function FlagCard({
             onChange={(e) => setNote(e.target.value)}
           />
           <button className="btn primary" disabled={busy} onClick={() => decide("accepted")}>
-            Accept — include in output
+            {runLevel ? "Acknowledge — proceed without it" : "Accept — include in output"}
           </button>
           {correctable && (
             <button
@@ -323,9 +328,11 @@ function FlagCard({
               Fix a value
             </button>
           )}
-          <button className="btn warn" disabled={busy} onClick={() => decide("rejected")}>
-            Exclude &amp; query
-          </button>
+          {!runLevel && (
+            <button className="btn warn" disabled={busy} onClick={() => decide("rejected")}>
+              Exclude &amp; query
+            </button>
+          )}
         </div>
       )}
       {error && <p className="error">{error}</p>}
@@ -444,11 +451,21 @@ function Output({ run }: { run: RunDetailData }) {
       )}
       <ListingDraftCard runId={run.id} draft={out.listing_draft} />
       {/* No template in the reference folder means no column layout to
-          follow, so the block is omitted rather than shown empty. */}
-      {!out.bank_skipped && (
+          follow, so the block is omitted — and the reviewer is told why,
+          rather than left to wonder where the bank rows went. */}
+      {out.bank_skipped ? (
+        <div className="card">
+          <b>Maybank entry rows</b>
+          <p className="basis">
+            No bank rows were built: the reference folder has no bank upload template,
+            so there is no column layout to follow. Add the template to the folder and
+            start a new run to get them.
+          </p>
+        </div>
+      ) : (
         <CopyBlock
           title={`Maybank entry rows (${out.bank_rows.length})`}
-          hint="Format learned from the uploaded Maybank template — account numbers must be filled from the vendor master"
+          hint="Format learned from the uploaded Maybank template — account numbers are template-aligned placeholders until a vendor master exists"
           text={[out.bank_header, ...out.bank_rows].join("\n")}
           preview={out.bank_rows}
         />
@@ -522,7 +539,10 @@ function ListingDraftCard({
       <p className="basis">
         This is a DRAFT on a copy of the client's workbook. Payment dates are left blank
         and the voucher numbers and fund figures are to be confirmed after the bank run —
-        a person finalises it; nothing is written into the live listing.
+        a person finalises it; nothing is written into the live listing. The rules used
+        to group entries, continue voucher numbers and work out the fund request are
+        working assumptions taken from two past tabs and are not yet confirmed by the
+        client — check them before relying on the figures.
       </p>
     </div>
   );

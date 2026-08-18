@@ -18,6 +18,12 @@
       "runtimeExecutable": "backend/.venv/bin/uvicorn",
       "runtimeArgs": ["app.main:app", "--port", "8002", "--app-dir", "backend"],
       "port": 8002
+    },
+    {
+      "name": "backend-py",
+      "runtimeExecutable": "backend/.venv/bin/python",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--port", "8002", "--app-dir", "backend"],
+      "port": 8002
     }
   ]
 }
