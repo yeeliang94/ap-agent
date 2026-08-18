@@ -1,143 +1,190 @@
-# Implementation Plan: AP Agent MVP — thin end-to-end demo
+# Implementation Plan: Employee Claims Verification Module
 
-**Overall Progress:** `100%` — all 13 steps done, all verifications passed (2026-08-12)
-**PRD Reference:** [ap-agent-design.html](../ap-agent-design.html) (solution design doc — sections 2, 5, 6, 9)
-**Last Updated:** 2026-08-12
+**Overall Progress:** `0%`
+**PRD Reference:** [docs/PRD.md](PRD.md) (flows 1–5, check catalogue in Flow 3, steering, decisions table)
+**Last Updated:** 2026-08-18
+**Previous plan (invoice pipeline MVP, complete):** [docs/PLAN-MVP.md](PLAN-MVP.md)
 
 ## Summary
-Build a working thin slice of the AP agent: a user uploads a small demo batch (invoices + claims, including scans), the pipeline sorts, extracts, and checks them, flags land on a review screen, and the app produces copy-ready payment-listing and Maybank rows. Every stage is real but minimal. Development happens on this Mac against synthetic sample files and a direct OpenAI key; the enterprise proxy, real SharePoint MCP, and real documents are swapped in during Windows testing (see design doc section 9, "Assumptions to validate").
+
+Build a *Claims run* — a second run type inside the AP Agent — that takes a
+SharePoint folder link (plus a link to the month's listing), finds each
+employee's expense report and receipts by itself, verifies every claim row
+and mileage trip with code-checked arithmetic and cited evidence, and, once a
+person has cleared the flags, produces one copy-ready listing row per
+employee. The invoice pipeline is not touched. Delivery is in two tiers: **v1
+is deliberately Copilot-simple** (folder + optional paragraph of
+instructions → verified tables → listing rows), and **v2 adds discovery and
+learning** so a new company needs no instructions at all.
 
 ## Key Decisions
-- **MVP scope: thin end-to-end** — every pipeline stage present but basic, so the full concept is demoable; depth comes later.
-- **Standalone app** — own repo, but mirrors the enterprise repo's conventions (Python + FastAPI + PydanticAI, LiteLLM-compatible model layer, Node-built frontend) so it transplants cleanly.
-- **Synthetic sample data first** — generated fake invoices/claims/listing/policy/template; real anonymized files swap in later without code changes.
-- **React + TypeScript SPA (Vite), 3 screens** — upload/runs, review, copy-output. Minimal styling; nothing throwaway.
-- **OpenAI direct key locally, via the swappable model layer** — all model calls go through one factory reading env config, so pointing at the enterprise proxy (`LLM_PROXY_URL` + catalogue model IDs) is a config change, not a rebuild.
-- **SharePoint is read-only and stubbed locally** — a fake MCP server mimics the probed tool contract (search sites, list folder, get metadata, download URL) including the `Shared Documents`/`Documents` alias and intermittent-error retry behaviour. Real MCP is Windows-only testing.
-- **Copy-paste output, never file writes** — the agent formats rows (tab-separated for clean Excel paste); a person pastes. No SharePoint or workbook writes anywhere in the app.
-- **AI judgments must cite their policy basis** — category and policy-clause decisions carry a quoted policy line; "unsure" always becomes a flag.
+
+- **Separate module, shared plumbing** — new package `backend/app/claims/`,
+  new routes `/api/claims-runs`, new *Claims* tab; reuses the model factory,
+  SharePoint reader, PDF→image, settings, telemetry. `backend/app/pipeline/*`
+  is not modified — the working invoice pipeline cannot be broken by this.
+- **Own tables** (`claims_runs`, `claim_employees`, `claim_rows`,
+  `claim_evidence`, `claim_flags`) rather than adding columns to the invoice
+  tables — isolation beats reuse here; rollback is "drop the claims tables".
+  Frontend *components* (flag card, field editor, totals card, copy block)
+  are shared by moving them into a `components/` folder.
+- **AI reads and reasons; code measures and decides; a person clears flags**
+  — the same principle as the listing reader. No number the AI reads is
+  believed until code has checked it against something else.
+- **The agent finds things itself** — the map step *peeks inside* every file
+  (tab names + first rows; page‑1 thumbnail) and proposes each file's role
+  with a reason, verified by code. The per-client instructions paragraph is
+  optional, for oddities only.
+- **One worker per employee, five at a time**, each sealed to that
+  employee's files and within the per-agent request cap; one employee
+  failing never fails the batch.
+- **Company values are not hard-coded** — rates, receipt-optional items,
+  category rule, mileage layout live in a per-client profile + playbook.
+  LinkedIn's confirmed values are the *sample's* defaults, not the code's.
+- **v1 before v2 (recommended sequencing, awaiting explicit confirmation)** —
+  Phases 1–5 ship the simple experience the owner liked in the Copilot test;
+  Phase 6 (Discovery, learn-from-decisions, second client) starts only after
+  v1 passes its verifier. Nothing from the PRD is dropped, only ordered.
+- **Listing columns come from the client's own listing** — the reviewer links
+  the month's listing; the AI maps its header row; code emits rows in that
+  order.
+- **Old plan preserved** — the finished MVP plan is now `docs/PLAN-MVP.md`;
+  README links to both.
+
+## Screens & UX (what the reviewer sees)
+
+Design rules for every screen below: same look as the existing screens
+(same tabs, cards, buttons, CSS classes — no new component library); one
+primary action per screen; every AI judgment shows its reason next to it;
+every flag shows its evidence inline; loading, empty and error states are
+written, not left blank; labels on every control, keyboard reachable,
+readable contrast. Plain-language wording throughout — the reviewer is not
+a programmer either.
+
+| Screen / view | Purpose | Key elements | States |
+|---|---|---|---|
+| **Claims list** (new *Claims* tab beside *Runs*) | See past batches, start a new one | *New claims run* card at top; table of runs: client, folder, started, status chip ("Map ready", "Verifying 3/10", "Ready", "Failed"), employees, open flags | Empty: "No claims runs yet — start one above." Failed row shows the reason inline |
+| **New claims run** form | The Copilot-simple start | Folder link · listing link · received date · *Instructions for this client* (textarea, prefilled from the client playbook, optional, placeholder shows an example paragraph) · *Start*. Local dev only: zip upload | Inline validation (link shape, date); disabled *Start* until valid; "Starting…" then redirect |
+| **Run detail → Map & Rules** | Confirm the agent's map with one click; correct if needed | One row per subfolder: employee · ER code · report file+tab · mileage tab · receipt files · ignored · unplaced · warnings badge; each role is a dropdown; **reason on hover/expand** ("tab `Expense Report`: name header, Date/Item/Amount columns"); *remember for <client>* tick per correction; **Confirm & verify** (disabled until valid, tooltip says why); v2 adds a *Rules* panel beside the map | Loading skeleton while mapping; warnings listed above the table; invalid edit → inline message |
+| **Run detail → Verifying** | Watch progress without refreshing | Employee chips: queued / verifying / done (n flags) / failed (retry button); overall bar; Activity link | Poll every 3 s (as today); failed employee shows reason and *Retry* |
+| **Run detail → Review** | Clear flags fast | Employee summary table (name, ER code, category + why, rows verified/flagged, total, status); below it flag cards **grouped by employee**, each: code, reason, basis ("client profile: car RM 0.64/km"), **evidence preview** — page image with the receipt's position highlighted, or the sheet row — and actions *Accept* / *Exclude (note)* / *Fix a value* / *Re-verify employee* | "All flags resolved — Output unlocked" banner; per-flag saving state; instant re-check spinner on fix |
+| **Run detail → Output** | Copy the listing rows | Totals cards (employees included, total MYR), reconciliation line (green/red with the difference named), copy block (TSV preview, header order from the client's listing), *Not included* list with reasons | Locked state: "Review is not complete: 4 flags open" with link to Review; header-fallback notice when the listing headers could not be read |
+| **Run detail → Activity** | What the system did | Run diary as today: map rounds, per-employee timings, AI cost, warnings, RULE_DRIFT (v2) | — |
+| **Settings → Claims (per client)** | The few values code needs | Mileage rates by vehicle type; km tolerance (default 0); receipt-optional items; mileage item pattern; the playbook textarea; last confirmed map (read-only, with *forget*) | Save confirmation; values carry "set by reviewer on <date>" (v2: evidence) |
 
 ## Pre-Implementation Checklist
-- [x] 🟩 Interaction model agreed (user-initiated runs, copy-paste output)
-- [x] 🟩 Enterprise constraints folded into design doc (read-only MCP, delegated auth, proxy catalogue)
-- [x] 🟩 Stack agreed (FastAPI + PydanticAI backend, React/TS frontend, SQLite)
-- [ ] 🟥 OpenAI API key placed in local `.env` (never committed)
-- [ ] 🟥 No conflicting in-progress work (fresh repo — confirm)
+- [x] 🟩 PRD written and updated with the owner's decisions (2026-08-18)
+- [ ] 🟨 Owner confirms the two open items in the PRD: Story 5 promoted to MUST; v1→v2 sequencing
+- [ ] 🟨 Owner confirms the four "still assumed" defaults (pause at map; received date typed; quotas; 5-minute target) — build proceeds with defaults meanwhile
+- [x] 🟩 No conflicting in-progress work (repo clean at start)
+- [ ] 🟥 Local `.env` OpenAI key still valid (`pytest backend/tests/test_model_layer.py` passes)
 
 ## Tasks
 
-### Phase 1: Foundation
-- [x] 🟩 **Step 1: Repo scaffold** — backend and frontend skeletons, so every later step has a home.
-  - [x] 🟩 `backend/` — FastAPI app with `/api/health`, venv (Python 3.12 via uv), SQLite via SQLAlchemy, tables: runs/documents/flags/audit_events
-  - [x] 🟩 `frontend/` — Vite + React + TS app, placeholder page proxying `/api` to the backend
-  - [x] 🟩 `.gitignore`, `.env.example`; user's `.env` reformatted (key had been pasted without the `OPENAI_API_KEY=` name — apps couldn't read it)
-  - **Note:** system Python was 3.9; used Homebrew Python 3.12 to match the enterprise 3.10+ rule.
-  - **Verify:** `uvicorn` serves `/api/health` → `{"ok": true}`; `npm run dev` shows the placeholder page calling it.
+### Phase 1: Foundation — sample data, tables, reader
+- [ ] 🟥 **Step 1: Synthetic claims sample (Client A, LinkedIn-shaped)** — the test bed for everything else; no real employee data is ever used.
+  - [ ] 🟥 `samples/generate_claims_sample.py`: 10 employee folders `Name_n/`, each with `Name_ER(<period>).xlsx` (tabs *Instructions*, *Expense Types* with GL codes, *Expense Report*, *KM*), a PDF print of the report, `_Approval.pdf`, and 1–2 receipt bundles (receipts drawn 3-per-page in random order; map pages at the back with a narrative line + a fake route image with the km in small text)
+  - [ ] 🟥 A "Summary of Invoices" listing workbook with the header row from the screenshot and two past tabs holding earlier ER rows
+  - [ ] 🟥 Planted errors, one per kind: overstated row (RM 10, as in the owner's Copilot test); missing receipt; same receipt used twice; km ≠ map; wrong rate; a genuine return trip (must *not* flag); "receipt = N" on Mobile Allowance (must not flag) and on Taxi (must flag); a foreign-currency row; an employee with no report; an unplaced file; a mixed-category report whose stated purpose is an offsite
+  - [ ] 🟥 `ground_truth_claims.json` (every row, every receipt with page + position, every trip, expected flags, expected listing rows) + `demo_claims_batch.zip`
+  - **Verify:** run the generator; open two workbooks and one receipt PDF by eye; a small script asserts 10 folders, tab names, page counts, that receipts are legible at 150 dpi, and that the km text on map pages is readable at full resolution.
 
-- [x] 🟩 **Step 2: Synthetic sample data** — `samples/generate_samples.py`: 8 invoices (6 PDF, 2 photo-style incl. 1 blurry), 4 claims + 4 receipts, listing/policy/Maybank workbooks, `demo_batch.zip`, `ground_truth.json` with the 5 planted anomalies. Verified: images render legibly (fixed an em-dash glyph the default font couldn't draw).
+- [ ] 🟥 **Step 2: Claims tables + run skeleton** — a run can be created and watched before any AI exists.
+  - [ ] 🟥 `backend/app/claims/models.py`: `claims_runs`, `claim_employees`, `claim_rows`, `claim_evidence`, `claim_flags`; created alongside existing tables (no change to existing ones)
+  - [ ] 🟥 `POST /api/claims-runs` (folder link + listing link + received date + optional instructions; zip alternative for local), `GET /api/claims-runs`, `GET /api/claims-runs/{id}`; per-run workspace `runs/<id>/claims/`; background job with status transitions `queued → surveying → mapping → map_ready → verifying → ready / failed`; run diary events via telemetry
+  - [ ] 🟥 Restart-safe from day one (lesson from the MVP peer review): claims runs in an in-progress status at server start are marked failed with a plain reason via the same startup reconciliation the invoice runs now use; `map_ready` is *not* in-progress (a run waiting for a click survives a restart)
+  - **Verify:** `curl` creates a run from the zip; status advances to `surveying` and (for now) stops with a diary event; a run left at `surveying` in the DB is marked failed on the next startup while a `map_ready` run is untouched; the invoice pipeline's existing tests still pass unchanged.
 
-- [x] 🟩 **Step 3: Model layer (the swap point)** — `app/model_layer.py` factory (direct OpenAI locally, proxy when `LLM_PROXY_URL` set) + `app/schemas_ai.py` answer forms. **Verified live:** `pytest tests/test_model_layer.py` passed — gpt-4o read a photo-style invoice and returned exact invoice number, amount, currency as a validated object.
+- [ ] 🟥 **Step 3: SharePoint reader walks subfolders** — the real batches live in nested folders.
+  - [ ] 🟥 `docsource.py`: list a folder *and its subfolders* (depth ≤ 3) and download any file under it, with the existing 3× retry; same for the fake MCP (`fake_mcp/`) with a nested test folder and the every‑7th‑call ReadError
+  - [ ] 🟥 Quotas enforced before download: 30 employee folders; 60 files / 200 pages per employee; 25 MB per file — refusal names the quota
+  - **Verify:** `pytest` against the fake MCP: nested folder → all files listed and downloaded, a transient error retried; stub down → structured "source unavailable"; a 31-folder tree → refused with the quota named.
 
-### Phase 2: Pipeline core (backend, no UI yet)
-- [x] 🟩 **Step 4: Intake** — `POST /api/runs` (zip + client), per-run workspace, SQLite records, background job; status endpoint with stage counts. Verified via the e2e script: 16 documents registered and processed.
+### Phase 2: The map — the agent finds things itself
+- [ ] 🟥 **Step 4: Survey + peek (code only)** — everything the map AI is allowed to see, gathered without a model call.
+  - [ ] 🟥 Survey: path, type, size, page count, `ER(...)` code from the name, per subfolder
+  - [ ] 🟥 Peek: workbook → tab names + first ~15 rows of each tab as text; PDF/image → page‑1 thumbnail + page count; stored with the run
+  - **Verify:** survey JSON for the sample lists 10 folders / all files; every workbook peek shows the four tab names; every receipt bundle has a thumbnail; runtime under 10 s for the sample.
 
-- [x] 🟩 **Step 5: Sort stage** — per-document AI classification + filename-convention receipt pairing. **Verified: 16/16 correct.**
+- [ ] 🟥 **Step 5: Map agent + audit loop** — propose roles with reasons; code checks the guess; look again if it doesn't fit.
+  - [ ] 🟥 Map agent ("judge" role): input = survey + peeks (+ playbook + last confirmed map if any); output = per subfolder: employee?, name, ER code, report file+tab, mileage tab, receipt files, ignored files, unplaced files — **each with a one-line reason**
+  - [ ] 🟥 Audit (code): every folder/file placed; one ER code per employee, none shared; the "report" tab yields dated rows with amounts that sum to a total; a "receipts" file yields ≥ 1 receipt on page 1; mismatches go back to the AI, ≤ 3 rounds; leftovers become map warnings; status → `map_ready`; the request cap is respected
+  - **Verify:** on the sample with **no** playbook: 10/10 employees mapped correctly, the approval and report-print PDFs ignored with sensible reasons, the no-report employee marked "build rows from receipts", the planted stray file listed as unplaced; ≤ 2 rounds on every folder; a test playbook line ("maps are in folder `Maps/`") changes the map accordingly.
 
-- [x] 🟩 **Step 6: Extract stage** — parallel workers (cap 5), typed fields + per-field confidence, PDF→PNG + downsizing. **Verified: 24/24 key fields correct; blurry scan read correctly AND flagged low-confidence.**
-  - **Finding worth remembering:** with heavier blur, the model *confidently invented* an invoice number without admitting doubt — the listing lookup caught it as a side effect. This is the concrete argument for the "double-read on scans" dial before production. Prompt now states an empty low_confidence asserts every character was crisp.
+- [ ] 🟥 **Step 6 (UI): Claims tab, New claims run form, runs list, Map & Rules view** — the reviewer can start a run and confirm the map in the browser.
+  - [ ] 🟥 App shell: *Runs* / *Claims* tabs; Claims list with status chips and empty state; New claims run card (links, date, optional instructions textarea prefilled from playbook, zip upload in local mode) with inline validation
+  - [ ] 🟥 Map & Rules view: table per subfolder, role dropdowns, reason on hover/expand, warnings above, *remember for <client>* per correction, **Confirm & verify** with disabled-state tooltip; `POST /api/claims-runs/{id}/confirm-map` saves the map + audit event + last confirmed map
+  - **Verify:** in the browser: start a run from the zip → land on Map & Rules → hover a role and read its reason → change one role, tick remember → Confirm; the audit trail shows who confirmed and what changed; the client's last confirmed map is stored; screenshot kept as proof.
 
-- [x] 🟩 **Step 7: Checks** — code: listing lookup, date age, duplicates, currency/cap arithmetic; AI: category + clause with quoted policy line, unsure→flag (incl. the rule that a clause needing absent information — per-head caps without headcount — means unsure). **Verified: all 5 planted anomalies flagged; extra flags are legitimate (MX-2214 is both old-dated and not-in-listing, as the design doc's own example says).**
+### Phase 3: Verify — one worker per employee
+- [ ] 🟥 **Step 7: Expense report reader (+ KM tab)** — the AI maps the sheet's structure, code pulls and audits the numbers.
+  - [ ] 🟥 Report tab: AI returns column roles + header cells + row span + total cell (coordinates only); code extracts; audit: amount × rate = total per row, rows sum to total, header name = mapped employee, dates within the ER period; ≤ 3 rounds; `REPORT_UNREADABLE` after that
+  - [ ] 🟥 KM tab: same; code checks km × rate = amount and rate ∈ profile rates; each report mileage line (per trip) pairs with a KM row by date + amount → `MILEAGE_RATE`, `MILEAGE_LINE_MISMATCH`
+  - [ ] 🟥 Category by the client's rule (LinkedIn: stated purpose) from the report's *Expense Types* list, with the quoted header text; `CATEGORY_UNCLEAR` when unsettled
+  - **Verify:** on the sample: every row of every report matches ground truth (dates, items, amounts, currency, totals); the mixed-category report gets *Company Event* with the header quoted; a deliberately scrambled tab ends as `REPORT_UNREADABLE` without stopping the employee.
 
-- [x] 🟩 **Step 8: Copy-ready output builder** — TSV listing rows with continued running numbers, Maybank rows from the template's learned headers, filename list, totals reconciliation, new-vendor detection ("Apex Renovation Works" caught). Excel paste check deferred to the Phase 3 browser demo where copy buttons exist.
+- [ ] 🟥 **Step 8: Evidence page inventory** — every receipt and map trip found on every page, with where it is.
+  - [ ] 🟥 Page classify + read ("extract" role): receipts page → list of receipts (vendor, date, amount, currency, position L/M/R, hard-to-read notes); map page → list of trips (date, purpose, from, to, "and back"?, km printed); other kinds named
+  - [ ] 🟥 Receipts pages read twice; disagreement on amount/date → low-confidence; map pages re-rendered at full resolution for the km; "km unreadable" is a value, never a guess
+  - **Verify:** on the sample the inventory equals ground truth: receipt count, amounts, positions per page; every map trip's km read; a receipt with a deliberately smudged amount comes out low-confidence, not wrong; cost per employee logged.
 
-### Phase 3: The three screens
-- [x] 🟩 **Step 9: Runs dashboard + upload** — upload card, 3s polling, stage chips ("Reading documents 5/12"), failed-run surfacing. Verified in browser against three live runs.
+- [ ] 🟥 **Step 9: Matching + checks (code decides)** — the check catalogue from PRD Flow 3c–3e.
+  - [ ] 🟥 Rows ↔ receipts: same day + same amount + same currency; AI tie-break only among candidates; flags `NO_RECEIPT` (with "searched N pages in M files"), `RECEIPT_AMBIGUOUS` (candidates listed with page + position), `DUPLICATE_RECEIPT`, `UNCLAIMED_RECEIPT`, `CURRENCY_MISMATCH`; receipt-optional items from the profile
+  - [ ] 🟥 Mileage rows ↔ map trips: same date; km equal, or exactly double for a return trip; `MILEAGE_DISCREPANCY` (both numbers, page, reading tried), `MILEAGE_NO_MAP`
+  - [ ] 🟥 No-report employee: receipts become the row list + `NO_REPORT`; employee summary (totals, category, counts); every flag carries file + page + position or sheet + row, and the basis it rests on
+  - [ ] 🟥 A control the batch needs but cannot find is a run-level flag, never a silent skip (lesson from the MVP peer review): no listing link readable → `MISSING_REFERENCE` before output; profile has no mileage rate but the batch has mileage rows → `MISSING_REFERENCE`; the reviewer acknowledges or fixes and re-runs
+  - **Verify:** every planted error in the sample is flagged with the expected code; the return trip and the Mobile-Allowance N row are **not** flagged; false flags ≤ 1 per employee; a script asserts every flag has a citation.
 
-- [x] 🟩 **Step 10: Review screen** — flag cards with reason + cited basis + inline source preview; accept/exclude with optional note; resolved flags collapse; output tab locked until review complete. Verified: decision in browser (with note) + 6 via the same API; **audit trail: 7 events in SQLite with actor/action/detail/timestamp**.
-  - **Note:** browser PDF embeds rendered as a black box — replaced with a backend-rendered PNG preview endpoint (works for every file type, no browser plugin dependence).
+- [ ] 🟥 **Step 10: Worker runner** — per-employee workers, five at a time, failure isolated, retryable.
+  - [ ] 🟥 Worker = steps 7–9 for one employee with only that employee's files; pool of 5; per-agent request cap; per-employee status + timing + cost in the diary; `POST /api/claims-runs/{id}/employees/{eid}/retry`; run → `ready` when all employees are done or failed
+  - **Verify:** full run on the sample completes under 5 minutes; a forced model error for one employee marks only that employee failed while nine finish; retry succeeds; two consecutive clean runs.
 
-- [x] 🟩 **Step 11: Copy-output screen** — totals cards, new-vendor warning, three copy blocks with TSV preview. Verified: rejecting MX-2214 rebuilt the blocks — 7 rows instead of 8, totals RM 14,930.00 both sides (hand-checked), reconciliation green, "Apex Renovation Works" flagged for Maybank registration.
+- [ ] 🟥 **Step 11 (UI): Verifying progress + Review view** — clear flags fast, with the evidence in front of you.
+  - [ ] 🟥 Verifying: employee chips with states, overall bar, 3‑second polling, per-employee *Retry*
+  - [ ] 🟥 Review: employee summary table; flag cards grouped by employee reusing the shared flag card / field editor; **evidence preview endpoint** for claims files (`/preview?page=n`) with the receipt position highlighted; *Accept* / *Exclude with note* / *Fix a value* (audited; instant per-employee re-check; flags auto-resolve or raise) / *Re-verify employee*; "all flags resolved" banner
+  - **Verify:** in the browser: watch chips move; open a `NO_RECEIPT` card and see the cited page; fix the RM 10 row → the mismatch flag resolves by correction; exclude a flag with a note; audit trail lists each action; screenshots kept.
 
-### Phase 4: Enterprise-readiness seams
-- [x] 🟩 **Step 12: Fake SharePoint MCP + adapter** — `fake_mcp/server.py` implements the probed contract (site search, folder-URL resolve with the Shared Documents/Documents alias, metadata with single-use temporary download URLs, deterministic every-7th-call ReadError); `backend/app/docsource.py` adapter with 3× retry; `DOC_SOURCE=local|mcp` in .env. **Verified: references loaded through the stub with a transient 500 retried transparently; stub killed → clean `SourceUnavailable`, not a crash.**
+### Phase 4: Output — the listing rows
+- [ ] 🟥 **Step 12: Listing header map + batch rows + gate** — one row per employee in the client's own column order.
+  - [ ] 🟥 Read the linked listing's header row (AI maps headers, as the bank template today; code emits); fallback minimal set with a notice; one row per included employee (received date, name, ER code, category/GL, MYR total, remark); totals recomputed independently with `Decimal`; server-side gate while any flag is open; *not included* list; TSV sanitised as today
+  - **Verify:** with one flag open the API returns no output; after clearing, rows = included employees, header order equals the sample listing's; excluding an employee changes totals and reconciliation stays green (hand-checked); a listing with a scrambled header triggers the fallback notice.
 
-- [x] 🟩 **Step 13: Windows handoff pack** — `README.md` (local-vs-enterprise .env table, inherited enterprise rules, 4-point Windows test checklist mapped to design doc §9), `start.sh` + `start.bat` (sets `PYTHONUTF8=1`), `.env.example` extended with `DOC_SOURCE`/`MCP_URL`/`SHAREPOINT_FOLDER_URL`.
+- [ ] 🟥 **Step 13 (UI): Output view** — totals, reconciliation, copy block, not-included list, locked state.
+  - **Verify:** in the browser: locked message with open flags → unlocked after review → copy block pasted into a spreadsheet lands in the right columns; reconciliation line green; screenshot kept.
 
-## Peer-review fix pass (2026-08-12, after MVP completion)
+- [ ] 🟥 **Step 14: End-to-end verifier** — proof, repeatable.
+  - [ ] 🟥 `backend/scripts/verify_claims_run.py`: runs the sample end to end, simulates a competent reviewer (fixes the RM 10 row, excludes the acceptable N flag), asserts every planted error found, false positives ≤ 1/employee, every flag cited, the gate, totals, listing header order
+  - **Verify:** `ALL CHECKS PASSED` on two consecutive runs; the run's AI cost printed.
 
-An external peer review found 12 issues; 10 confirmed, 2 partially valid, 0 invalid. All fixed and re-verified (two consecutive clean end-to-end runs):
-- **No synthesized bank accounts** (was CRITICAL): every account cell is an explicit `[ACCOUNT UNKNOWN]` marker until a vendor master exists.
-- **Server-side human gate**: the API returns no outputs while any flag is open.
-- **Deeper listing match**: Paid-status, amount, and vendor of the matched row are checked; listing block emits only genuinely new rows.
-- **Real reconciliation**: totals recomputed independently from the emitted text with `Decimal`; bank rows built by template-header mapping (unknown headers refuse loudly); non-MYR invoices flagged out of the bank block.
-- **Double-read extraction** (promoted from follow-up after three runs showed *confident* misreads of the blurry scan): two independent reads per document; key-field disagreement ⇒ low-confidence flag. Judge runs at temperature 0.
-- **Citation verification**: the AI's quoted policy line must appear in the cited clause; category must match the clause; strict field constraints (positive finite amounts, real dates, currency codes).
-- **Nothing vanishes**: unknown documents and orphan receipts are flagged; unknown docs never enter output.
-- Plus: zip quotas, enforced 40-request cap, fixed-client guard, redacted source errors with fresh-URL download retries, TSV/formula/filename sanitization, FastAPI serves `frontend/dist` so `start.bat` yields a working app.
-- **Verifier hardened**: asserts all 56 declared fields (correct-or-excused), tests the gate, recomputes totals independently, simulates a competent reviewer (excludes hard-to-read documents that also contradict the listing), reports false positives.
-- ~~**Deferred follow-up:** audited in-app field correction at review time.~~ **Done (2026-08-12):** "Fix a value" on the flag card — audited corrections (before → after + reason), per-document instant re-check (no pipeline re-run; claims re-judge for ~a tenth of a cent), flags auto-resolve as `resolved_by_correction` / new ones raise, outputs rebuild. Verified end-to-end (verifier now *corrects* the blurry invoice instead of excluding it — ALL CHECKS PASSED) and manually in the browser (9 open flags → 6 after correcting two fields; audit trail confirmed).
+### Phase 5: Steering v1 — the few things a client needs to say
+- [ ] 🟥 **Step 15: Client profile + playbook + Settings UI** — rates, receipt-optional items, tolerances, the paragraph.
+  - [ ] 🟥 Per-client profile stored under the client name (rates by vehicle, km tolerance default 0, receipt date window default same day, receipt-optional items, mileage item pattern, checks on/off) + playbook text + last confirmed map; snapshot taken per run; *Settings → Claims* section with save confirmation and "set by reviewer on <date>"
+  - **Verify:** change the car rate → the next run flags `MILEAGE_RATE` on every trip; add *Taxi* to receipt-optional → the Taxi N flag disappears; the playbook prefills the New-run form; a run started before a settings change is still judged by its snapshot.
 
-## Listing reframed as past-payment history (2026-08-18)
+- [ ] 🟥 **Step 16: Docs + Windows handoff** — so the enterprise test can include claims.
+  - [ ] 🟥 README: Claims section, .env notes; `docs/WINDOWS-AGENT-TASK.md`: add "nested folder read through the real MCP" and "listing header read on a real Summary of Invoices" to the checklist; PRD status line updated
+  - **Verify:** `start.bat`/`start.sh` serve the Claims tab; docs read through once by the owner.
 
-Reading two real ICMR monthly tabs (Apr'26, Jul'26) sharpened the goal: the
-listing is the record of PAST payments, and the run's central question is
-"has this invoice been paid before — where?" See `docs/LISTING-HARDENING.md`.
-- **One reader.** The canonical fast path (flat six-column sample layout,
-  first tab only) is gone; every listing, samples included, goes through the
-  AI-mapped, code-audited reader across every tab.
-- **Pair by row.** Grouped entries pair invoice numbers to line amounts by
-  the row they share, not by list position (Lim Shea-Fee: 2 numbers among 4
-  amounts now keeps its amounts). Remark text like "(Revised invoice)" in the
-  invoice column is a note, not a number.
-- **Provenance in every flag.** Rows carry tab / row / voucher / date; a match
-  reads "already paid: tab Jul'26 row 28, voucher PV0726/07, dated
-  2026-07-23, RM 1,044.95, payee Lim Shea Fee". Ambiguous matches list every
-  candidate the same way; "not found" says how many rows/tabs were searched.
-- **Never blocked by a bookkeeping nit.** After 3 rounds, arithmetic-only
-  leftovers (a line total or balance step off) are accepted with a WARNING
-  in the Activity tab naming the rows; structural problems still fail.
-  Content rows, not Excel's formatted max_row, count toward the 300 limit.
-- **Read first, say how.** The listing is read before any invoice is
-  extracted, and each tab's outcome (payment sheet / skipped and why, column
-  map, entries → rows, rounds) is written to the run's Activity tab.
-- **Paste-ready listing rows dropped.** They only ever fit the sample layout.
-  Writing new entries in the client's own layout is the next piece.
-- **Each run keeps its own copy of the reference files** (`runs/<id>/reference/`
-  + manifest), taken at run start. Flag decisions and corrections read that
-  copy — no re-download per click, and a run is judged against the files it
-  started with even if the folder changes or another run starts.
-- **Peer review of the above (same day):** one CRITICAL confirmed and fixed —
-  an entry cut short could drop later invoice rows and the arithmetic-only
-  soft-accept would have let it through; invoice/line-amount cells are now
-  covered like money cells and a line-sum mismatch is structural. Positional
-  pairing removed; rows carry both invoice row and entry row; twice-declined
-  payment-like tabs are a WARNING; physical-cell ceiling; adversarial tests.
+### Phase 6: v2 — Discovery & learning (start after Phase 4's verifier passes; confirm sequencing first)
+- [ ] 🟥 **Step 17: Discovery (PRD Flow 2b)** — the app proposes the client's rules from its own files, with evidence.
+  - [ ] 🟥 Evidence gathering: *Expense Types* tab → category list; *KM* tab → rates; how employees fill mileage (per trip vs summed); listing past tabs → how ER rows were categorised; policy doc if present; optional links to previous batches
+  - [ ] 🟥 Proposals with evidence per line; *Rules* panel beside the map (accept / edit / reject / "no evidence — please set"); confirmed values → profile + playbook with evidence and date; light pass on later runs → `RULE_DRIFT` note
+  - **Verify:** on Client A with an **empty** profile, discovery proposes: the 23 categories, RM 0.64 / 0.35, per-trip mileage, Mobile Allowance receipt-optional, `_Approval.pdf` ignore, "category follows stated purpose" with the count of matching past rows; adding a new category to the template raises `RULE_DRIFT` on the next run.
 
-## Listing hardening, second pass (2026-08-18)
+- [ ] 🟥 **Step 18: Learn from decisions (PRD Flow 5)** — reviewer decisions become proposals.
+  - [ ] 🟥 End-of-review proposals from exclude notes, corrections and category choices; accept → profile/playbook with the run as evidence; audited
+  - **Verify:** exclude three `NO_RECEIPT` flags on the same item with a note → one proposal appears → accept → the next run raises none for that item; the audit trail shows the acceptance.
 
-All "Next" items of `docs/LISTING-HARDENING.md` built, one commit each:
-- **N3** `NOT_IN_LISTING` dropped; one Activity line counts new / matched /
-  ambiguous invoices and what was searched.
-- **N4** loose reference matching (unique + vendor-supported, else
-  ambiguous; raw values shown); AI `observations` printed.
-- **N6/N5** input limits (20 MB, 40 tabs, 60 columns, 200-char cell texts),
-  stale-formula WARNING per tab, hidden tabs labelled; tests for each plus
-  duplicate references across tabs and an opt-in real-model evaluation.
-- **N2** sample regenerated as an ICMR-shaped past-payments workbook; two
-  ALREADY_PAID plants; golden test.
-- **N1** next month's entries drafted as a new tab on a copy of the client
-  workbook (deterministic writer, `ListingLayout` contract, round-trip
-  through the reader's audit, formulas for balances, `.xlsm` preserved,
-  Settings for signatures / bank charge, download route, run-screen card).
-  Business rules taken as recommended and marked "assumed — confirm".
-- Verified end to end with the real model on the regenerated sample:
-  ALL CHECKS PASSED (both plants found, zero false positives, draft
-  written and downloaded).
+- [ ] 🟥 **Step 19: Client B (deliberately different) + success criterion 5** — proof it isn't a LinkedIn tool.
+  - [ ] 🟥 Generator adds Client B: flat folder, different report template and category list, one rate, one all-in-one PDF per person, different listing columns, its own ground truth
+  - **Verify:** discovery on Client B needs ≤ 2 corrections; the batch verifies; the verifier passes on both clients.
+
+- [ ] 🟥 **Step 20: Peer review + simplification pass** — as after the MVP.
+  - **Verify:** review findings fixed and re-verified with two clean end-to-end runs on both clients.
 
 ## Rollback Plan
-- Every step lands as its own git commit — `git revert` any step cleanly.
-- The app never writes to SharePoint or user workbooks, so there is no external state to undo; worst case is deleting the local SQLite file and per-run workspace folders.
-- `.env` holds all secrets and is git-ignored; if a key is ever committed by accident, rotate it immediately and rewrite history before pushing.
-
-## Out of scope for the MVP (agreed)
-Real MCP integration, Entra sign-in, Azure hosting, Teams/email notifications, multi-user auth, model-tier cost optimization beyond sort-vs-extract, batch scheduling.
+- Every step lands as its own commit — `git revert` any step cleanly.
+- The module has its own tables and its own workspace folder (`runs/<id>/claims/`); dropping the `claims_*` tables and deleting those folders removes it entirely — the invoice pipeline's data is untouched.
+- Nothing is ever written to SharePoint or to a client workbook, so there is no external state to undo.
+- The client profile/playbook lives in app settings under the client name; *forget* on the Settings screen or deleting those keys resets a client.
+- If a real-model step misbehaves, the run diary records every AI call's role, rounds and cost — read it before changing code.
