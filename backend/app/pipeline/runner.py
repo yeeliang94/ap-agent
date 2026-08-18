@@ -46,20 +46,23 @@ async def process_run(run_id: str, workspace: Path) -> None:
     try:
         run = db.get(Run, run_id)
         docs = db.query(Document).filter(Document.run_id == run_id).all()
-        folder_url = run.snapshot.get("sharepoint_folder_url")
+        folder_url = run.snapshot.get("sharepoint_folder_url")  # where the copy comes from
 
         telemetry.record(db, run_id, "run", telemetry.INFO, "RUN_STARTED",
                          f"Run started for {run.client} with {len(docs)} uploaded file(s).")
 
-        # Resolve the reference files FIRST. An unreachable folder or an
-        # ambiguous file name is fatal, and finding that out before the AI
-        # reads a single page avoids paying for a run that cannot finish.
-        # Recorded on the run so its record shows what it was judged
-        # against — a None role means that check did not happen.
-        # Reassigned, not mutated: SQLAlchemy only persists JSON on rebind.
+        # Take the run's own copy of the reference files FIRST. An
+        # unreachable folder or an ambiguous file name is fatal, and finding
+        # that out before the AI reads a single page avoids paying for a run
+        # that cannot finish. From here on the run — and its review — reads
+        # only this copy, never SharePoint again. Recorded on the run so its
+        # record shows what it was judged against — a None role means that
+        # check did not happen. Reassigned, not mutated: SQLAlchemy only
+        # persists JSON on rebind.
+        refs = reference.run_refs(run_id)
         started = time.monotonic()
         try:
-            reference_files = reference.resolve_reference_files(folder_url)
+            reference_files = reference.snapshot_references(folder_url, refs)
         except Exception as exc:
             telemetry.record_failure(db, run_id, "reference", "REFERENCE_UNAVAILABLE",
                                      "Could not read the SharePoint reference folder", exc)
@@ -67,6 +70,24 @@ async def process_run(run_id: str, workspace: Path) -> None:
         run.snapshot = {**run.snapshot, "reference_files": reference_files}
         db.commit()
         _record_reference_files(db, run_id, reference_files, started)
+
+        # Read the payment listing NOW, before any invoice is read. It is
+        # the whole point of the run (has this invoice been paid before?),
+        # it costs AI calls, and it can fail — so find that out first, and
+        # tell the diary how each tab was read (cached: replayed for free).
+        started = time.monotonic()
+        try:
+            notes = await reference.load_listing_notes(refs)
+        except Exception as exc:
+            telemetry.record_failure(db, run_id, "reference", "LISTING_UNREADABLE",
+                                     "Could not read the payment listing", exc)
+            raise
+        for level, text in notes:
+            telemetry.record(db, run_id, "reference",
+                             telemetry.WARNING if level == "WARNING" else telemetry.INFO,
+                             "LISTING_READ", text)
+        telemetry.record(db, run_id, "reference", telemetry.INFO, "STAGE_DONE",
+                         f"Payment listing ready in {_secs(started)}.")
 
         # ---- sort -------------------------------------------------------
         _set(db, run, status="sorting", progress={"done": 0, "total": len(docs)})
@@ -121,7 +142,7 @@ async def process_run(run_id: str, workspace: Path) -> None:
         _set(db, run, status="checking", progress={})
         started = time.monotonic()
         try:
-            flag_dicts = await run_checks(docs, folder_url=folder_url)
+            flag_dicts = await run_checks(docs, refs=refs)
         except Exception as exc:
             telemetry.record_failure(db, run_id, "check", "CHECKS_FAILED",
                                      "The checking stage could not complete", exc)
@@ -138,7 +159,7 @@ async def process_run(run_id: str, workspace: Path) -> None:
         started = time.monotonic()
         try:
             run.outputs = await output.build_outputs(docs, excluded_doc_ids=set(),
-                                                     folder_url=folder_url)
+                                                     refs=refs)
         except Exception as exc:
             telemetry.record_failure(db, run_id, "output", "OUTPUT_FAILED",
                                      "Could not build the copy-ready output", exc)

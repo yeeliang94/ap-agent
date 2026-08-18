@@ -422,12 +422,11 @@ function FieldEditor({
 
 function Output({ run }: { run: RunDetailData }) {
   const out = run.outputs;
-  if (!out || !("listing_rows" in out)) return <p className="sub">No output yet.</p>;
+  if (!out || !("bank_rows" in out)) return <p className="sub">No output yet.</p>;
 
   return (
     <div>
       <div className="totals">
-        <TotalCard label="New listing rows total" value={`RM ${out.totals.listing.toFixed(2)}`} />
         <TotalCard label="Bank entries total" value={`RM ${out.totals.bank.toFixed(2)}`} />
         <TotalCard
           label="Reconciliation"
@@ -437,26 +436,17 @@ function Output({ run }: { run: RunDetailData }) {
       </div>
       {out.new_vendors.length > 0 && (
         <p className="basis">
-          ⚠ Register in Maybank before uploading: {out.new_vendors.join(", ")}
+          ⚠ No past payment to these vendors in the listing — verify they are
+          registered Maybank beneficiaries before uploading: {out.new_vendors.join(", ")}
         </p>
       )}
-      {out.listing_skipped ? (
-        <p className="muted">
-          The client's payment listing uses its own layout (grouped rows,
-          monthly tabs), so paste-ready listing rows are not generated —
-          checks still ran against its data. Add new entries in the
-          listing workbook directly.
-        </p>
-      ) : (
-        <CopyBlock
-          title={`New payment listing rows (${out.listing_rows.length})`}
-          hint={`Only invoices not already in the listing${
-            out.already_listed ? ` — ${out.already_listed} already listed, nothing to paste for those` : ""
-          }`}
-          text={[out.listing_header, ...out.listing_rows].join("\n")}
-          preview={out.listing_rows}
-        />
-      )}
+      <p className="muted">
+        This output covers the bank upload and file names only. Drafting the
+        new payment-listing entries in the client's own workbook layout is
+        planned but not built yet — add them in the listing workbook by hand
+        for now. Every invoice was already checked against the existing
+        listing (see flags).
+      </p>
       {/* No template in the reference folder means no column layout to
           follow, so the block is omitted rather than shown empty. */}
       {!out.bank_skipped && (

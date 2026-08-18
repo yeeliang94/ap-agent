@@ -6,9 +6,9 @@ Uploads demo_batch.zip, waits for the pipeline, then asserts:
      low-confidence note on that same field (the design's actual promise)
   3. every planted anomaly flagged; false-positive count reported
   4. the server-side gate: outputs are EMPTY while flags are open
-  5. after resolving all flags via the API: outputs present, totals
+  5. after resolving all flags via the API: outputs present, bank total
      recomputed independently from ground truth, no fabricated account
-     numbers, correct new-row selection
+     numbers
 
 Usage: python scripts/verify_run.py   (server must be running on :8002)
 """
@@ -176,24 +176,13 @@ def main() -> int:
 
     inv = {n: s for n, s in truth["documents"].items()
            if s["kind"] == "invoice" and n not in excluded_files}
-    # Expectations use the EXTRACTED invoice numbers for included docs (the
-    # app can only act on what it read); excluded docs drop out entirely.
-    extracted_no = {d["filename"]: str(d["fields"].get("invoice_number", ""))
-                    for d in run["documents"]}
-    want_new = {extracted_no[n] for n, s in inv.items() if not s.get("in_listing")}
-    want_new_total = sum(Decimal(str(s["fields"]["amount"])) for s in inv.values()
-                         if not s.get("in_listing"))
     want_bank_total = sum(Decimal(str(s["fields"]["amount"])) for s in inv.values()
                           if s["fields"]["currency"] == "MYR")
 
-    got_new = {row.split("\t")[3] for row in out["listing_rows"]}
-    got_new_total = sum(Decimal(r.split("\t")[4]) for r in out["listing_rows"])
     amount_col = out["bank_header"].split("\t").index("Amount (RM)")
     got_bank_total = sum(Decimal(r.split("\t")[amount_col]) for r in out["bank_rows"])
 
     checks = [
-        ("new listing rows are exactly the not-in-listing invoices", got_new == want_new),
-        ("listing block total (independent)", got_new_total == want_new_total),
         ("bank block total (independent)", got_bank_total == want_bank_total),
         ("app reconciliation agrees", bool(out["totals"]["match"])),
         ("no fabricated account numbers",
@@ -205,8 +194,7 @@ def main() -> int:
     for label, passed in checks:
         print(f"  {'PASS' if passed else 'FAIL'}  {label}")
         ok = ok and passed
-    print(f"  ({len(out['listing_rows'])} new listing rows, {out['already_listed']} already "
-          f"listed, {len(out['bank_rows'])} bank rows, new vendors={out['new_vendors']})")
+    print(f"  ({len(out['bank_rows'])} bank rows, new vendors={out['new_vendors']})")
 
     print(f"\n{'ALL CHECKS PASSED' if ok else 'SOME CHECKS FAILED'}")
     return 0 if ok else 1

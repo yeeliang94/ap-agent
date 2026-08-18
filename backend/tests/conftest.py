@@ -21,6 +21,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
+@pytest.fixture(autouse=True)
+def _fresh_reference_caches():
+    """The AI-read listing is cached by content hash across runs; tests
+    fake the AI differently from one another, so start each one clean."""
+    from app.pipeline import reference
+    reference._LISTING_CACHE.clear()
+    yield
+
+
 def _serve(module, monkeypatch, tmp_path):
     """Run one fake MCP server on a free port for the duration of a test.
 

@@ -102,19 +102,15 @@ export interface FlagItem {
 }
 
 export interface Outputs {
-  listing_header: string;
-  listing_rows: string[];
-  already_listed: number;
-  /** True when the client listing has its own layout — no paste-ready rows. */
-  listing_skipped: boolean;
   bank_header: string;
   bank_rows: string[];
   /** True when the reference folder had no bank template, so no block exists. */
   bank_skipped: boolean;
   excluded_non_myr: number;
   filenames: string[];
+  /** Vendors the payment listing has never paid — likely not yet Maybank beneficiaries. */
   new_vendors: string[];
-  totals: { listing: number; bank: number; match: boolean };
+  totals: { bank: number; match: boolean };
 }
 
 export interface RunDetailData extends RunSummary {

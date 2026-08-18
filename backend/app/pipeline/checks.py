@@ -81,6 +81,32 @@ def _vendor_matches(a: str, b: str) -> bool:
     return bool(na) and bool(nb) and (na in nb or nb in na)
 
 
+def where_in_listing(row: dict) -> str:
+    """Point a reviewer at a listing row: tab, row, voucher, date, amount,
+    payee — whatever the row knows. Rows read from a real workbook know
+    all of it; older or hand-built rows may know less, so each part is
+    optional and the sentence still reads."""
+    bits = []
+    if row.get("sheet"):
+        where = f"tab {row['sheet']}"
+        if row.get("row"):
+            where += f" row {row['row']}"
+            if row.get("entry_row") and row["entry_row"] != row["row"]:
+                where += f" (entry starts row {row['entry_row']})"
+        bits.append(where)
+    if row.get("no"):
+        bits.append(f"voucher {row['no']}")
+    if row.get("date"):
+        bits.append(f"dated {row['date']}")
+    if row.get("amount") is not None:
+        bits.append(f"RM {float(row['amount']):.2f}")
+    if row.get("vendor"):
+        bits.append(f"payee {row['vendor']}")
+    if row.get("note"):
+        bits.append(f"note '{row['note']}'")
+    return ", ".join(bits) if bits else "the payment listing"
+
+
 def match_listing_row(by_number: dict[str, list[dict]], number: str,
                       vendor: str) -> tuple[dict | None, list[dict]]:
     """(matched row, all candidates) for an invoice number + vendor.
@@ -101,27 +127,32 @@ def match_listing_row(by_number: dict[str, list[dict]], number: str,
 
 
 async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
-                     folder_url: str | None = None) -> list[dict]:
+                     refs=None) -> list[dict]:
     """Return flag dicts for everything a human must decide.
 
     only_doc_ids narrows WHICH documents get flags (used when re-checking a
     single corrected document) — cross-document context (duplicate numbers)
-    is still built from the whole batch. folder_url is the run's snapshotted
-    SharePoint folder, so an old run is always judged against ITS client's
-    reference files, not whichever client Settings points at today.
+    is still built from the whole batch. refs is the run's private copy of
+    the reference files (reference.run_refs), so a run is always judged
+    against the files it started with — not whatever the folder holds now.
     """
     flags: list[dict] = []
 
     def want(d) -> bool:
         return only_doc_ids is None or d.id in only_doc_ids
-    listing = await reference.load_payment_listing(folder_url)
+    listing = await reference.load_payment_listing(refs)
     # Number -> ALL rows with that number. A plain dict would keep only the
     # last row, silently discarding same-numbered rows from other vendors
     # or other monthly tabs.
     listing_by_number: dict[str, list[dict]] = {}
     for r in listing:
         listing_by_number.setdefault(r["invoice_number"], []).append(r)
-    clauses = reference.load_policy_clauses(folder_url)
+    # What "not found" was measured against, so the flag can say so.
+    listing_tabs = sorted({r["sheet"] for r in listing if r.get("sheet")})
+    searched = (f"{len(listing)} invoice row(s)"
+                + (f" across {len(listing_tabs)} tab(s): {', '.join(listing_tabs)}"
+                   if listing_tabs else ""))
+    clauses = reference.load_policy_clauses(refs)
     today = date.today()
 
     # ---- invoices: pure code -------------------------------------------
@@ -146,22 +177,25 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
             listing_by_number, number, str(f.get("vendor", "")))
         if not candidates:
             flags_out.append(_mk_flag(d.id, "NOT_IN_LISTING",
-                f"Invoice {number} ({f.get('vendor')}) is not in the payment listing.",
+                f"Invoice {number} ({f.get('vendor')}) is not in the payment "
+                f"listing — searched {searched}.",
                 "Rule: every invoice must match a planned-payment row in the listing."))
         elif listed is None:
-            vendors = sorted({str(r["vendor"]) for r in candidates})
             flags_out.append(_mk_flag(d.id, "LISTING_AMBIGUOUS",
-                f"Invoice {number} matches {len(candidates)} listing rows "
-                f"(vendors: {', '.join(vendors)}) and the document vendor "
-                f"'{f.get('vendor')}' does not single one out.",
+                f"Invoice {number} matches {len(candidates)} listing rows and "
+                f"the document vendor '{f.get('vendor')}' does not single one "
+                "out. Candidates: "
+                + "; ".join(where_in_listing(r) for r in candidates) + ".",
                 "Rule: a listing match must be unambiguous — a human picks."))
         else:
             # A number match alone is not enough — the matched row must
             # actually be this invoice, and must not already be paid.
+            where = where_in_listing(listed)
             if "paid" in str(listed["status"]).lower():
                 flags_out.append(_mk_flag(d.id, "ALREADY_PAID",
-                    f"Invoice {number} matches a listing row marked "
-                    f"'{listed['status']}' — paying it again would be a duplicate payment.",
+                    f"Invoice {number} was already paid: {where} (status "
+                    f"'{listed['status']}'). Paying it again would be a "
+                    "duplicate payment.",
                     "Rule: invoices matching a Paid listing row need review."))
             # amount None = the file grouped several invoices under one
             # payment without per-line amounts, so there is no number to
@@ -170,13 +204,14 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
                     abs(float(f.get("amount", 0)) - listed["amount"]) > 0.01:
                 flags_out.append(_mk_flag(d.id, "AMOUNT_MISMATCH",
                     f"Invoice {number}: document reads {f.get('currency')} "
-                    f"{f.get('amount'):.2f} but the listing row says {listed['amount']:.2f}.",
+                    f"{f.get('amount'):.2f} but the listing row says "
+                    f"{listed['amount']:.2f} ({where}).",
                     "Rule: extracted amount must equal the listing row's amount."))
             v_doc, v_listing = _norm(f.get("vendor", "")), _norm(listed["vendor"])
             if v_doc and v_listing and v_doc not in v_listing and v_listing not in v_doc:
                 flags_out.append(_mk_flag(d.id, "VENDOR_MISMATCH",
                     f"Invoice {number}: document vendor '{f.get('vendor')}' does not "
-                    f"match the listing row's vendor '{listed['vendor']}'.",
+                    f"match the listing row's payee '{listed['vendor']}' ({where}).",
                     "Rule: the matched listing row must belong to the same vendor."))
 
         if str(f.get("currency", "")).upper() != "MYR":

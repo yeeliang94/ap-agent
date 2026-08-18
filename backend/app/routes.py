@@ -14,9 +14,21 @@ from . import config, settings_store
 from .db import SessionLocal
 from .models import AuditEvent, Document, Flag, Run, RunEvent
 from .pipeline import output as output_builder
+from .pipeline import reference
 from .pipeline.runner import start_background
 
 router = APIRouter()
+
+
+def _refs_for(run: Run) -> Path:
+    """The run's private copy of the reference files. A run created before
+    snapshots existed has none yet; it is taken now, once, from the folder
+    the run recorded at start — never from whatever Settings says today."""
+    refs = reference.run_refs(run.id)
+    reference.ensure_snapshot(refs, run.snapshot.get("sharepoint_folder_url"))
+    return refs
+
+
 log = logging.getLogger("routes")
 
 
@@ -402,8 +414,7 @@ async def correct_fields(run_id: str, doc_id: str, body: dict) -> dict:
         }
         try:
             new_flag_dicts = await run_checks(
-                docs, only_doc_ids=scope,
-                folder_url=run.snapshot.get("sharepoint_folder_url"))
+                docs, only_doc_ids=scope, refs=_refs_for(run))
         except Exception as exc:
             raise HTTPException(
                 500, f"Correction saved, but re-check failed: {exc} — "
@@ -469,7 +480,7 @@ async def correct_fields(run_id: str, doc_id: str, body: dict) -> dict:
             for fl in db.query(Flag).filter(Flag.run_id == run_id, Flag.status == "rejected")
         } | {d.id for d in docs if d.kind == "unknown"}
         run.outputs = await output_builder.build_outputs(
-            docs, excluded, folder_url=run.snapshot.get("sharepoint_folder_url"))
+            docs, excluded, refs=_refs_for(run))
         db.commit()
         return {"ok": True}
     finally:
@@ -510,7 +521,7 @@ async def decide_flag(run_id: str, flag_id: str, body: dict) -> dict:
         excluded |= {d.id for d in docs if d.kind == "unknown"}
         try:
             run.outputs = await output_builder.build_outputs(
-                docs, excluded, folder_url=run.snapshot.get("sharepoint_folder_url"))
+                docs, excluded, refs=_refs_for(run))
         except Exception as exc:
             db.commit()  # the decision itself still stands
             raise HTTPException(500, f"Decision recorded, but output rebuild failed: {exc}")

@@ -303,7 +303,7 @@ def test_a_run_whose_every_document_fails_sorting_stops_there(db, monkeypatch):
     session.close()
 
     monkeypatch.setattr(runner, "SessionLocal", db)
-    monkeypatch.setattr(runner.reference, "resolve_reference_files",
+    monkeypatch.setattr(runner.reference, "snapshot_references",
                         lambda *a, **k: {"payment_listing": "listing.xlsx",
                                          "policy_sheet": None, "bank_template": None})
     monkeypatch.setattr(runner, "document_to_pngs", lambda *a, **k: [b"png"])
@@ -344,7 +344,7 @@ def test_a_run_where_only_some_documents_fail_still_finishes(db, monkeypatch):
     session.close()
 
     monkeypatch.setattr(runner, "SessionLocal", db)
-    monkeypatch.setattr(runner.reference, "resolve_reference_files",
+    monkeypatch.setattr(runner.reference, "snapshot_references",
                         lambda *a, **k: {"payment_listing": "listing.xlsx",
                                          "policy_sheet": None, "bank_template": None})
     monkeypatch.setattr(runner, "document_to_pngs", lambda *a, **k: [b"png"])

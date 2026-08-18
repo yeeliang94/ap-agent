@@ -24,7 +24,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base
 from app.main import app
 from app.models import Document, Flag, Run
-from app import routes
+from app import config, routes
 from app.pipeline import checks, reference
 
 LISTING = [
@@ -60,12 +60,12 @@ def db(tmp_path, monkeypatch):
     TestSession = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     monkeypatch.setattr(routes, "SessionLocal", TestSession)
     async def fake_listing(*a, **k):
-        return LISTING  # load_payment_listing is async (AI-capable) now
-
-    async def fake_canonical(*a, **k):
-        return True
+        return LISTING  # load_payment_listing is async (AI-read) now
     monkeypatch.setattr(reference, "load_payment_listing", fake_listing)
-    monkeypatch.setattr(reference, "listing_is_canonical", fake_canonical)
+    # A run's reference snapshot lives on disk under RUNS_DIR; keep tests
+    # out of the real data folder and out of SharePoint entirely.
+    monkeypatch.setattr(config, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(reference, "ensure_snapshot", lambda refs, url: {})
     monkeypatch.setattr(reference, "load_policy_clauses", lambda *a, **k: [])
     monkeypatch.setattr(reference, "load_maybank_headers", lambda *a, **k: HEADERS)
 
@@ -210,7 +210,10 @@ def test_rejected_flag_superseded_when_its_value_is_corrected(db):
     s.close()
 
 
-def test_recheck_and_rebuild_use_the_runs_snapshot_folder(db, monkeypatch):
+def test_recheck_and_rebuild_use_the_runs_own_reference_copy(db, monkeypatch):
+    """Re-checks and rebuilds read the run's private reference snapshot —
+    and if an older run has none, it is taken from the folder the run
+    recorded at start, never from today's Settings."""
     s = db()
     s.get(Run, "r1").snapshot = {"sharepoint_folder_url": "https://snap.example/AP"}
     s.commit()
@@ -218,16 +221,22 @@ def test_recheck_and_rebuild_use_the_runs_snapshot_folder(db, monkeypatch):
 
     seen = {}
 
-    async def spy_checks(docs, only_doc_ids=None, folder_url=None):
-        seen["checks"] = folder_url
+    async def spy_checks(docs, only_doc_ids=None, refs=None):
+        seen["checks"] = refs
         return []
 
-    async def spy_outputs(docs, excluded, folder_url=None):
-        seen["outputs"] = folder_url
+    async def spy_outputs(docs, excluded, refs=None):
+        seen["outputs"] = refs
         return {"built": True}
+
+    def spy_snapshot(refs, folder_url):
+        seen["snapshot"] = (refs, folder_url)
+        return {}
 
     monkeypatch.setattr(checks, "run_checks", spy_checks)
     monkeypatch.setattr(routes.output_builder, "build_outputs", spy_outputs)
+    monkeypatch.setattr(reference, "ensure_snapshot", spy_snapshot)
     assert _correct("docA", {"vendor": "Alpha Trading"}).status_code == 200
-    assert seen == {"checks": "https://snap.example/AP",
-                    "outputs": "https://snap.example/AP"}
+    refs = reference.run_refs("r1")
+    assert seen["checks"] == refs and seen["outputs"] == refs
+    assert seen["snapshot"] == (refs, "https://snap.example/AP")

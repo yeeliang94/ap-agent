@@ -3,7 +3,7 @@
 An AI-assisted Accounts Payable checker. A user uploads a client's monthly
 batch (invoices + staff claims, including scans); the pipeline sorts, reads,
 and checks every document; flags land on a review screen with cited reasons;
-and the app produces **copy-ready** payment-listing and Maybank rows. The
+and the app produces **copy-ready** Maybank upload rows and file names. The
 agent never writes to SharePoint or any working file — a person pastes.
 
 Design doc: [ap-agent-design.html](ap-agent-design.html) · Plan & status: [docs/PLAN.md](docs/PLAN.md)
@@ -71,7 +71,8 @@ Rules inherited from the enterprise repo, already honored in code:
    roles, run `pytest backend/tests/test_model_layer.py`, then the full
    verify script; compare extraction accuracy and cost with the local run.
 4. **Template output pastes cleanly** — run a real (anonymized) batch, copy
-   the three blocks, paste into the real listing workbook and bank template.
+   the bank block into the real bank template. (Drafting new payment-listing
+   entries in the client's own layout is planned — see docs/LISTING-HARDENING.md.)
 
 ## Honest limitations (MVP)
 

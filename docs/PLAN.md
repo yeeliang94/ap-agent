@@ -77,6 +77,42 @@ An external peer review found 12 issues; 10 confirmed, 2 partially valid, 0 inva
 - **Verifier hardened**: asserts all 56 declared fields (correct-or-excused), tests the gate, recomputes totals independently, simulates a competent reviewer (excludes hard-to-read documents that also contradict the listing), reports false positives.
 - ~~**Deferred follow-up:** audited in-app field correction at review time.~~ **Done (2026-08-12):** "Fix a value" on the flag card — audited corrections (before → after + reason), per-document instant re-check (no pipeline re-run; claims re-judge for ~a tenth of a cent), flags auto-resolve as `resolved_by_correction` / new ones raise, outputs rebuild. Verified end-to-end (verifier now *corrects* the blurry invoice instead of excluding it — ALL CHECKS PASSED) and manually in the browser (9 open flags → 6 after correcting two fields; audit trail confirmed).
 
+## Listing reframed as past-payment history (2026-08-18)
+
+Reading two real ICMR monthly tabs (Apr'26, Jul'26) sharpened the goal: the
+listing is the record of PAST payments, and the run's central question is
+"has this invoice been paid before — where?" See `docs/LISTING-HARDENING.md`.
+- **One reader.** The canonical fast path (flat six-column sample layout,
+  first tab only) is gone; every listing, samples included, goes through the
+  AI-mapped, code-audited reader across every tab.
+- **Pair by row.** Grouped entries pair invoice numbers to line amounts by
+  the row they share, not by list position (Lim Shea-Fee: 2 numbers among 4
+  amounts now keeps its amounts). Remark text like "(Revised invoice)" in the
+  invoice column is a note, not a number.
+- **Provenance in every flag.** Rows carry tab / row / voucher / date; a match
+  reads "already paid: tab Jul'26 row 28, voucher PV0726/07, dated
+  2026-07-23, RM 1,044.95, payee Lim Shea Fee". Ambiguous matches list every
+  candidate the same way; "not found" says how many rows/tabs were searched.
+- **Never blocked by a bookkeeping nit.** After 3 rounds, arithmetic-only
+  leftovers (a line total or balance step off) are accepted with a WARNING
+  in the Activity tab naming the rows; structural problems still fail.
+  Content rows, not Excel's formatted max_row, count toward the 300 limit.
+- **Read first, say how.** The listing is read before any invoice is
+  extracted, and each tab's outcome (payment sheet / skipped and why, column
+  map, entries → rows, rounds) is written to the run's Activity tab.
+- **Paste-ready listing rows dropped.** They only ever fit the sample layout.
+  Writing new entries in the client's own layout is the next piece.
+- **Each run keeps its own copy of the reference files** (`runs/<id>/reference/`
+  + manifest), taken at run start. Flag decisions and corrections read that
+  copy — no re-download per click, and a run is judged against the files it
+  started with even if the folder changes or another run starts.
+- **Peer review of the above (same day):** one CRITICAL confirmed and fixed —
+  an entry cut short could drop later invoice rows and the arithmetic-only
+  soft-accept would have let it through; invoice/line-amount cells are now
+  covered like money cells and a line-sum mismatch is structural. Positional
+  pairing removed; rows carry both invoice row and entry row; twice-declined
+  payment-like tabs are a WARNING; physical-cell ceiling; adversarial tests.
+
 ## Rollback Plan
 - Every step lands as its own git commit — `git revert` any step cleanly.
 - The app never writes to SharePoint or user workbooks, so there is no external state to undo; worst case is deleting the local SQLite file and per-run workspace folders.

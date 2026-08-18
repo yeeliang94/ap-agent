@@ -2,16 +2,20 @@
 
 All bytes come through the DocumentSource adapter (local folder in
 development, SharePoint MCP on Windows) — this module only parses them
-into the shapes the pipeline uses. Parsed once per run would be ideal;
-at demo scale, parsing per call is fine and always fresh.
+into the shapes the pipeline uses. Each run takes its own copy of the files
+at start (see snapshot_references); the AI-read listing is parsed once per
+distinct file content.
 """
 from __future__ import annotations
 
 import hashlib
 import io
+import json
+from pathlib import Path
 
 from openpyxl import load_workbook
 
+from .. import config
 from ..docsource import get_source
 from . import listing_agent
 
@@ -85,119 +89,134 @@ def resolve_name(role: str, names: list[str]) -> str | None:
     return None
 
 
-def resolve_reference_files(folder_url: str | None = None) -> dict[str, str | None]:
-    """The role → file name map for a folder, for recording on the run.
+# --- one private copy per run --------------------------------------------------
+# A run's reference files are downloaded ONCE, when the run starts, into the
+# run's own workspace (<runs>/<run_id>/reference/), together with a manifest
+# saying which file plays which role. Every later touch — the checks, the
+# output builder, a re-check after a correction during review — reads that
+# copy and never goes back to SharePoint. Two consequences, both wanted:
+#   - review of a run never costs a network round trip;
+#   - a run is judged against the files as they were when it started, even
+#     if the client changed the workbook or another run started since.
+# The AI reading of a listing is still cached across runs by content hash
+# (_LISTING_CACHE), so an unchanged file is read by the AI once, ever.
+MANIFEST = "manifest.json"
 
-    Runs once at the start of a run so the run's record shows exactly which
-    files it used, and which roles had no file at all.
+
+def run_refs(run_id: str) -> Path:
+    """Where a run keeps its private copy of the reference files."""
+    return config.RUNS_DIR / run_id / "reference"
+
+
+def snapshot_references(folder_url: str | None, dest: Path) -> dict[str, str | None]:
+    """Run start: list the folder, resolve each role, copy each role's file
+    into dest, and write the manifest. Returns the role → file-name map,
+    which the run records so its history shows what it was judged against.
+
+    Raises MissingReference / AmbiguousReference before copying anything,
+    so a run never starts against a folder it cannot be judged by.
     """
-    names = get_source(folder_url).list_names()
-    return {role: resolve_name(role, names) for role in ROLE_KEYWORDS}
-
-
-def _open(role: str, folder_url: str | None = None):
-    """Open the workbook for `role`, or return None if the folder has none."""
     source = get_source(folder_url)
-    name = resolve_name(role, source.list_names())
-    if name is None:
-        if role in REQUIRED_ROLES:
-            raise MissingReference(
-                f"No {role.replace('_', ' ')} found in the reference folder. "
-                f"Expected a spreadsheet whose name contains: "
-                f"{', '.join(ROLE_KEYWORDS[role])}."
-            )
-        return None
-    return load_workbook(io.BytesIO(source.get_reference(name)), read_only=True)
-
-
-# The exact header row the canonical sample listing uses. A workbook whose
-# first row matches is parsed instantly in code; anything else is a real
-# client file and goes through the AI reading loop.
-_CANONICAL_LISTING_HEADERS = ("No.", "Date", "Vendor", "Invoice No.",
-                              "Amount (RM)", "Status")
-
-# Parsed listings keyed by (folder_url, content hash), as
-# {"rows": [...], "canonical": bool}. A run touches the listing several
-# times (checks, outputs, per-correction re-checks); the AI reading must be
-# paid for once per distinct file, not once per touch. canonical records
-# WHICH parser succeeded: output building must know, because "rows to paste
-# into the listing" only make sense for the canonical column layout.
-_LISTING_CACHE: dict[tuple[str, str], dict] = {}
-
-
-def _parse_canonical_listing(data: bytes) -> list[dict] | None:
-    """The fixed-shape parse. None when the workbook isn't that shape."""
-    wb = load_workbook(io.BytesIO(data), read_only=True)
-    try:
-        ws = wb.active
-        first = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
-        if tuple(str(c) if c is not None else "" for c in first[:6]) != _CANONICAL_LISTING_HEADERS:
-            return None
-        rows = []
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if not row or row[3] is None:
-                continue
-            rows.append({
-                "no": str(row[0]), "date": str(row[1]), "vendor": str(row[2]),
-                "invoice_number": str(row[3]), "amount": float(row[4]), "status": str(row[5]),
-            })
-        return rows
-    finally:
-        wb.close()
-
-
-async def _listing_entry(folder_url: str | None) -> dict:
-    source = get_source(folder_url)
-    name = resolve_name("payment_listing", source.list_names())
-    if name is None:
+    names = source.list_names()
+    roles = {role: resolve_name(role, names) for role in ROLE_KEYWORDS}
+    if roles["payment_listing"] is None:
         raise MissingReference(
             "No payment listing found in the reference folder. Expected a "
             "spreadsheet whose name contains: payment, listing.")
-    data = source.get_reference(name)
-    key = (folder_url or "", hashlib.sha256(data).hexdigest())
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in roles.values():
+        if name:
+            (dest / name).write_bytes(source.get_reference(name))
+    (dest / MANIFEST).write_text(json.dumps(roles))
+    return roles
+
+
+def ensure_snapshot(refs: Path, folder_url: str | None) -> dict[str, str | None]:
+    """The manifest for a run — taking the snapshot now if it has none.
+
+    Runs created before snapshots existed have no reference folder; the
+    first review action snapshots the folder for them, once. New runs never
+    hit this path: the runner snapshots explicitly at start.
+    """
+    manifest = refs / MANIFEST
+    if manifest.is_file():
+        return json.loads(manifest.read_text())
+    return snapshot_references(folder_url, refs)
+
+
+def _role_file(refs: Path, role: str) -> Path | None:
+    roles = json.loads((refs / MANIFEST).read_text())
+    name = roles.get(role)
+    if name is None:
+        if role in REQUIRED_ROLES:
+            raise MissingReference(
+                f"No {role.replace('_', ' ')} was in the reference folder when "
+                "this run started.")
+        return None
+    return refs / name
+
+
+def _open(role: str, refs: Path):
+    """Open the run's copy of the workbook for `role`, or None if it had none."""
+    path = _role_file(refs, role)
+    if path is None:
+        return None
+    return load_workbook(io.BytesIO(path.read_bytes()), read_only=True)
+
+
+# Parsed listings keyed by content hash, as {"rows": [...], "notes":
+# [(level, text), ...]}. The AI reading must be paid for once per distinct
+# file, not once per run or per touch. The notes are cached with the rows so
+# a later run on an unchanged file can still say how it was read.
+_LISTING_CACHE: dict[str, dict] = {}
+
+
+async def _listing_entry(refs: Path) -> dict:
+    data = _role_file(refs, "payment_listing").read_bytes()
+    key = hashlib.sha256(data).hexdigest()
     if key in _LISTING_CACHE:
         return _LISTING_CACHE[key]
 
-    rows = _parse_canonical_listing(data)
-    canonical = rows is not None
-    if rows is None:
-        # data_only=True: balance columns are usually formulas, and the
-        # audit needs their cached values, not "=J5-K5" strings.
-        wb = load_workbook(io.BytesIO(data), data_only=True)
-        try:
-            rows = await listing_agent.ingest_workbook(wb)
-        finally:
-            wb.close()
-    entry = {"rows": rows, "canonical": canonical}
+    # data_only=True: balance columns are usually formulas, and the
+    # audit needs their cached values, not "=J5-K5" strings.
+    wb = load_workbook(io.BytesIO(data), data_only=True)
+    try:
+        result = await listing_agent.ingest_workbook(wb)
+    finally:
+        wb.close()
+    entry = {"rows": result.rows, "notes": result.notes}
     _LISTING_CACHE[key] = entry
     return entry
 
 
-async def load_payment_listing(folder_url: str | None = None) -> list[dict]:
-    """Every payment row as {no, date, vendor, invoice_number, amount, status}.
+async def load_payment_listing(refs: Path) -> list[dict]:
+    """Every past-payment row as {sheet, row, no, date, vendor,
+    invoice_number, amount, status, note}.
 
-    Canonical-shaped files (the samples) parse deterministically in code.
-    Human-shaped client files go through listing_agent's reason/act loop:
-    the AI maps the structure, code extracts and audits the numbers.
-    amount can be None where the file genuinely doesn't pair an amount to
-    an invoice — callers must treat that as "cannot compare", never zero.
+    Every listing — the samples included — goes through listing_agent's
+    reason/act loop: the AI maps the structure, code extracts and audits the
+    numbers. One reader, one behaviour. amount can be None where the file
+    genuinely doesn't pair an amount to an invoice — callers must treat that
+    as "cannot compare", never zero.
     """
-    return (await _listing_entry(folder_url))["rows"]
+    return (await _listing_entry(refs))["rows"]
 
 
-async def listing_is_canonical(folder_url: str | None = None) -> bool:
-    """Did the canonical parser read this folder's listing? Cached with it."""
-    return (await _listing_entry(folder_url))["canonical"]
+async def load_listing_notes(refs: Path) -> list[tuple[str, str]]:
+    """How the listing was read, tab by tab, as (level, sentence) pairs for
+    the run's Activity tab. Reading it (and paying for it) happens on the
+    first call; later calls replay from the cache."""
+    return (await _listing_entry(refs))["notes"]
 
 
-def load_policy_clauses(folder_url: str | None = None) -> list[dict]:
+def load_policy_clauses(refs: Path) -> list[dict]:
     """Every policy clause as {clause, category, cap, currency, text}.
 
     Returns [] when the folder has no policy sheet. Callers treat an empty
     list as "no policy to test against", which means no spending cap is
-    checked — recorded on the run by resolve_reference_files.
+    checked — recorded on the run by snapshot_references.
     """
-    wb = _open("policy_sheet", folder_url)
+    wb = _open("policy_sheet", refs)
     if wb is None:
         return []
     ws = wb.active
@@ -213,13 +232,13 @@ def load_policy_clauses(folder_url: str | None = None) -> list[dict]:
     return clauses
 
 
-def load_maybank_headers(folder_url: str | None = None) -> list[str]:
+def load_maybank_headers(refs: Path) -> list[str]:
     """The column layout of the bank upload template — learned, not hardcoded.
 
     Returns [] when the folder has no template. build_outputs then omits the
     bank upload block entirely rather than inventing a column layout.
     """
-    wb = _open("bank_template", folder_url)
+    wb = _open("bank_template", refs)
     if wb is None:
         return []
     ws = wb.active
