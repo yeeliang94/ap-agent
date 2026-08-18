@@ -193,13 +193,15 @@ async def _listing_entry(refs: Path) -> dict:
     # open keeps the formulas, so a formula whose value was never saved
     # can be named instead of silently reading as an empty cell.
     wb = load_workbook(io.BytesIO(data), data_only=True)
-    wb_formulas = load_workbook(io.BytesIO(data))
     try:
-        result = await listing_agent.ingest_workbook(wb, wb_formulas)
+        wb_formulas = load_workbook(io.BytesIO(data))
+        try:
+            result = await listing_agent.ingest_workbook(wb, wb_formulas)
+        finally:
+            wb_formulas.close()
     finally:
         wb.close()
-        wb_formulas.close()
-    entry = {"rows": result.rows, "notes": result.notes,
+    entry = {"rows": result.rows, "notes": result.notes, "vouchers": result.vouchers,
              "layout": result.layout.to_dict() if result.layout is not None else None}
     _LISTING_CACHE[key] = entry
     return entry
@@ -232,6 +234,13 @@ async def load_listing_layout(refs: Path):
     from .listing_layout import ListingLayout
     layout = (await _listing_entry(refs)).get("layout")
     return ListingLayout.from_dict(layout) if layout else None
+
+
+async def load_listing_vouchers(refs: Path) -> list[str]:
+    """Every voucher number on every payment entry of every tab — including
+    entries with no invoice reference, which the flat rows do not carry.
+    The draft's collision guard checks new numbers against this."""
+    return (await _listing_entry(refs)).get("vouchers", [])
 
 
 def listing_file(refs: Path) -> Path:

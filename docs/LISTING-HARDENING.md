@@ -180,6 +180,44 @@ real loop against `<name>.expected.json` beside it (format in
 
 ---
 
+### Code review of the second pass (same day) — what changed, what stayed
+
+Two reviewers (standards, spec) read the diff. Fixed on the spot: a `NaN`
+bank charge returned HTTP 500 (now 400); a layout with no line-amount
+column plus two invoices from one vendor always failed the round trip (each
+invoice is now its own entry there); tab titles are trimmed *before* the
+uniqueness suffix; the formulas workbook is closed on every path; loose
+matching now follows the spec literally — the vendor breaks the tie across
+*all* candidates for a key, raw-equal and re-typed alike, so Alpha's `AB-77`
+matches Alpha's `AB 77` row rather than Beta's identical string; unknown
+vendors spelled two ways in one batch become one payment (tolerant match);
+the voucher-collision guard sees every voucher on every payment entry, not
+only entries with an invoice number; client text beginning with `=` is kept
+and written as text; the title block's merged cells are reproduced.
+
+Known and accepted (say so, don't hide it):
+- The round trip reads a *values twin* through the reader's own audit and
+  flattening; the delivered file (formulas, no cached values) is not itself
+  re-read — openpyxl computes nothing, and Excel fills the cache on first
+  save. The opt-in real-model evaluation is the place to read a delivered
+  draft back with the AI.
+- Body styles and the signature block are not learned from the client's
+  tab: header styles, column widths, title block and merged cells are.
+- `Fund received = net payments + estimated bank charges` (the doc's
+  literal words said "= total of the new payments"; the sample's own
+  arithmetic needs the charges to return to the residual). Assumed —
+  confirm.
+- The draft month is the month after the latest tab's last payment date.
+- The reader still treats any entry with a payment total as paid;
+  "ALREADY_PAID requires execution evidence" applies only if planned and
+  executed entries ever share a workbook (see N1 lifecycle).
+- The golden sample is rebuilt in memory by the test from the generator's
+  own builder rather than checked in as a file — the shape is pinned; the
+  bytes are not.
+- `_draft_listing` catches every exception into `{"skipped": …}` (with the
+  traceback in the server log) so a bug in the draft can never withhold the
+  bank block.
+
 ## Next (as originally written, kept for the reasoning; all built above)
 
 ### N1. Write new entries in the client's own layout

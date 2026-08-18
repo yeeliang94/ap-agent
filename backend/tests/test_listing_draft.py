@@ -171,9 +171,15 @@ def _draft(docs, wb=None, settings=SETTINGS):
     wb, ws, reading = _jul() if wb is None else (wb, wb["Jul'26"], _jul()[2])
     layout = listing_layout.learn_layout(ws, reading)
     buf = io.BytesIO(); wb.save(buf)
-    listing_rows = flatten_reading(ws, reading)
-    return listing_draft.build_draft(buf.getvalue(), layout, listing_rows, docs,
+    used = _vouchers(ws, reading)
+    return listing_draft.build_draft(buf.getvalue(), layout, used, docs,
                                      settings, suffix=".xlsx")
+
+
+def _vouchers(ws, reading):
+    from app.pipeline.listing_agent import _texts
+    return [v for s in reading.entries if s.kind == "payment"
+            for v in _texts(ws, reading.columns.voucher_no, s)]
 
 
 def test_draft_appends_one_tab_in_the_client_layout_and_round_trips():
@@ -243,6 +249,61 @@ def test_draft_refuses_a_voucher_collision():
     ws["B11"] = "PV0826/01"          # the client already used next month's first number
     with pytest.raises(listing_draft.DraftError, match="PV0826/01"):
         _draft(docs, wb)
+
+
+def test_layout_without_line_amount_column_writes_one_entry_per_invoice():
+    """Without a per-line amount column the sheet cannot show two invoices'
+    amounts inside one payment, so each invoice becomes its own entry —
+    the round trip would otherwise (rightly) refuse the draft."""
+    wb, ws, reading = _jul()
+    ws.delete_cols(6)  # drop F: the line-amount column (payment now G-1 ...)
+    # rebuild a reading for the shifted sheet: F=payment, G=balance, H=receipt
+    cols = COLS.model_copy(update={"line_amount": None, "payment": "F",
+                                   "balance": "G", "receipt": "H"})
+    reading = reading.model_copy(update={"columns": cols})
+    layout = listing_layout.learn_layout(ws, reading)
+    buf = io.BytesIO(); wb.save(buf)
+    docs = [_Doc("a", "Maxis Bhd", "MX-1", 10.0), _Doc("b", "Maxis Bhd", "MX-2", 5.0)]
+    d = listing_draft.build_draft(buf.getvalue(), layout, [], docs, SETTINGS)
+    assert [e["payee"] for e in d.summary["entries"]] == ["Maxis Bhd", "Maxis Bhd"]
+    assert d.round_trip["audit_problems"] == []
+
+
+def test_batch_spellings_of_one_vendor_are_one_payment():
+    docs = [_Doc("a", "Apex Renovation Works", "A-1", 10.0),
+            _Doc("b", "APEX RENOVATION WORKS SDN BHD", "A-2", 5.0)]
+    d = _draft(docs)
+    assert len(d.summary["entries"]) == 1
+    assert [i["number"] for i in d.summary["entries"][0]["invoices"]] == ["A-1", "A-2"]
+
+
+def test_client_text_starting_with_equals_stays_text():
+    docs = [_Doc("a", "=Odd Vendor", "=INV-1", 10.0, "=see note")]
+    d = _draft(docs)
+    ws = load_workbook(io.BytesIO(d.data))[d.tab]
+    row = d.summary["entries"][0]["cells"]["row"]
+    assert ws[f"C{row}"].value == "=INV-1" and ws[f"C{row}"].data_type == "s"
+    assert ws[f"D{row}"].value == "=Odd Vendor" and ws[f"D{row}"].data_type == "s"
+    assert ws[f"H{row}"].data_type == "f"      # our balance formula is still a formula
+
+
+def test_voucher_collision_is_caught_even_on_a_reference_less_entry():
+    """A recurring payment with no invoice number yields no flat row but
+    still owns its voucher number; the guard must see it."""
+    wb, ws, reading = _jul()
+    layout = listing_layout.learn_layout(ws, reading)
+    buf = io.BytesIO(); wb.save(buf)
+    with pytest.raises(listing_draft.DraftError, match="PV0826/01"):
+        listing_draft.build_draft(buf.getvalue(), layout, ["PV0826/01"],
+                                  [_Doc("a", "Acme", "A-1", 10.0)], SETTINGS)
+
+
+def test_long_tab_titles_stay_unique_within_excel_limits():
+    from datetime import date
+    long = "A very long payments tab name indeed"
+    t1 = listing_draft.draft_title(long, date(2026, 8, 1), [])
+    t2 = listing_draft.draft_title(long, date(2026, 8, 1), [t1])
+    assert len(t1) <= 31 and len(t2) <= 31 and t1 != t2
 
 
 def test_draft_is_deterministic():
@@ -320,7 +381,7 @@ def test_draft_keeps_macros_for_xlsm():
     wb, ws, reading = _jul()
     layout = listing_layout.learn_layout(ws, reading)
     buf = io.BytesIO(); wb.save(buf)
-    d = listing_draft.build_draft(buf.getvalue(), layout, flatten_reading(ws, reading),
+    d = listing_draft.build_draft(buf.getvalue(), layout, _vouchers(ws, reading),
                                   docs, SETTINGS, suffix=".xlsm")
     assert d.suffix == ".xlsm"
     back = load_workbook(io.BytesIO(d.data), keep_vba=True)

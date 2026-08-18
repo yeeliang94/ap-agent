@@ -129,6 +129,8 @@ def test_loose_reference_match_needs_a_unique_vendor_supported_candidate():
         {"invoice_number": "AB 77", "vendor": "Alpha"},
         {"invoice_number": "AB-77", "vendor": "Beta"},
         {"invoice_number": "CD-1", "vendor": "Gamma"},
+        {"invoice_number": "XY 9", "vendor": "Same Co"},
+        {"invoice_number": "XY-9", "vendor": "Same Co"},
     ])
     # unique + vendor agrees -> a loose match, said to be loose
     m = index.match("INV 1023", "Maxis")
@@ -136,13 +138,23 @@ def test_loose_reference_match_needs_a_unique_vendor_supported_candidate():
     # unique but the vendor does not support it -> ambiguous, not a pick
     m = index.match("INV 1023", "Unrelated Trading")
     assert m.row is None and len(m.candidates) == 1 and m.loose is True
-    # two loose candidates -> ambiguous even though the vendor fits one
+    # two candidates, the vendor supports exactly one -> that one (loosely)
     m = index.match("AB77", "Alpha")
-    assert m.row is None and len(m.candidates) == 2 and m.loose is True
-    # an exact raw hit is preferred over loose neighbours and is not "loose"
+    assert m.row is not None and m.row["vendor"] == "Alpha" and m.loose is True
+    # a raw-equal hit whose vendor agrees is not "loose"
     m = index.match("AB-77", "Beta")
     assert m.row is not None and m.row["vendor"] == "Beta" and m.loose is False
-    # exact-vs-loose: the exact hit wins even when the vendor differs
+    # a raw-equal hit is NOT preferred when the vendor points at its loose
+    # sibling: Alpha's invoice 'AB-77' is Alpha's row, not Beta's
+    m = index.match("AB-77", "Alpha")
+    assert m.row is not None and m.row["vendor"] == "Alpha" and m.loose is True
+    # the vendor supports none of several -> ambiguous
+    m = index.match("AB-77", "Nobody")
+    assert m.row is None and len(m.candidates) == 2
+    # the vendor supports both (same vendor, two spellings) -> ambiguous
+    m = index.match("XY9", "Same Co")
+    assert m.row is None and len(m.candidates) == 2 and m.loose is True
+    # a lone raw-equal hit matches even when the vendor differs (VENDOR_MISMATCH follows)
     m = index.match("CD-1", "Nobody")
     assert m.row is not None and m.loose is False
 
@@ -165,16 +177,20 @@ async def test_loose_match_is_named_in_the_flag(monkeypatch):
         return listing
     monkeypatch.setattr(reference, "load_payment_listing", fake_listing)
     monkeypatch.setattr(reference, "load_policy_clauses", lambda *a, **k: [])
-    docs = [_Doc("a", "INV 1023", 50.0), _Doc("b", "AB77", 5.0)]
+    docs = [_Doc("a", "INV 1023", 50.0), _Doc("b", "AB77", 5.0), _Doc("c", "AB77", 5.0)]
     docs[0].fields["vendor"] = "Maxis Bhd"
-    docs[1].fields["vendor"] = "Alpha"
+    docs[1].fields["vendor"] = "Nobody Known"   # supports neither candidate
+    docs[2].fields["vendor"] = "Alpha"          # supports exactly one
     flags = await checks.run_checks(docs)
     by_code = {}
     for fl in flags:
-        by_code.setdefault(fl["code"], []).append(fl["reason"])
-    assert "matched loosely: 'INV 1023' ↔ 'INV-1023'" in by_code["ALREADY_PAID"][0]
-    ambiguous = by_code["LISTING_AMBIGUOUS"][0]
-    assert "AB77" in ambiguous and "'AB 77'" in ambiguous and "'AB-77'" in ambiguous
+        by_code.setdefault(fl["code"], []).append((fl["document_id"], fl["reason"]))
+    paid = dict(by_code["ALREADY_PAID"])
+    assert "matched loosely: 'INV 1023' ↔ 'INV-1023'" in paid["a"]
+    assert "matched loosely: 'AB77' ↔ 'AB 77'" in paid["c"]
+    ambiguous = dict(by_code["LISTING_AMBIGUOUS"])
+    assert set(ambiguous) == {"b"}
+    assert "AB77" in ambiguous["b"] and "'AB 77'" in ambiguous["b"] and "'AB-77'" in ambiguous["b"]
 
 
 @pytest.mark.asyncio

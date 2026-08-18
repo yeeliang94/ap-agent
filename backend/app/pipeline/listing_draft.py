@@ -51,7 +51,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.utils import column_index_from_string, get_column_letter
 
 from .listing_agent import EntrySpan, SheetReading, audit_reading, flatten_reading
-from .listing_layout import ListingLayout, _norm
+from .listing_layout import ListingLayout
 
 CENT = Decimal("0.01")
 
@@ -62,6 +62,11 @@ _TITLE_FORMATS = ("%b'%y", "%b %y", "%b %Y", "%B %Y", "%B'%y", "%b-%y",
 
 class DraftError(Exception):
     """The draft was not written; the message says why."""
+
+
+class _Formula(str):
+    """A cell formula we mean to write ('=SUM(F8:F9)'), as opposed to client
+    text that merely starts with '=' — which must be written as text."""
 
 
 @dataclass
@@ -78,10 +83,9 @@ def money(value) -> Decimal:
 
 
 def _safe(text) -> str:
-    """Cell-safe text: no control characters, and never a leading formula
-    character (openpyxl writes '=...' strings as formulas)."""
-    s = re.sub(r"[\x00-\x1f]", " ", str(text or "")).strip()
-    return s.lstrip("=+@") if s[:1] in "=+@" else s
+    """Cell-safe text: no control characters. A leading '=' is kept (it is
+    the client's data) but written as TEXT, not a formula — see _put."""
+    return re.sub(r"[\x00-\x1f]", " ", str(text or "")).strip()
 
 
 def _add_month(d: date) -> date:
@@ -136,10 +140,11 @@ def draft_title(latest_title: str, draft_month: date, existing: list[str]) -> st
             continue
     if base is None:
         base = f"{latest_title.strip()} {draft_month.strftime('%b')}'{draft_month.strftime('%y')}"
+    base = base[:20]  # Excel's tab-name limit is 31; leave room for " (DRAFT 99)"
     title, n = f"{base} (DRAFT)", 2
     while title in existing:
         title, n = f"{base} (DRAFT {n})", n + 1
-    return title[:31]  # Excel's tab-name limit
+    return title
 
 
 # ---- the plan ---------------------------------------------------------------------
@@ -164,25 +169,38 @@ class _Entry:
 
 def _plan_entries(docs: list, layout: ListingLayout) -> tuple[list[_Entry], int]:
     """Approved MYR invoices -> one entry per vendor, sorted by payee then
-    invoice number. Returns (entries, how many non-MYR were left out)."""
-    grouped: dict[str, _Entry] = {}
+    invoice number. Returns (entries, how many non-MYR were left out).
+
+    Vendor identity: the listing's own spelling when it has paid them
+    before; otherwise the invoice's text, with the batch's own spellings
+    matched tolerantly (the checks' rule: one name contains the other after
+    normalising) so "ABC Sdn Bhd" and "ABC Sdn. Bhd." are one payee. A
+    layout with no line-amount column cannot show per-invoice amounts, so
+    there each invoice is its own entry — grouping would lose the amounts.
+    """
+    from .checks import _vendor_matches
+    entries: list[_Entry] = []
     non_myr = 0
-    for d in docs:
+    can_group = layout.columns.line_amount is not None
+    for d in sorted(docs, key=lambda d: (str(d.fields.get("vendor", "")),
+                                         str(d.fields.get("invoice_number", "")))):
         f = d.fields
         if str(f.get("currency", "")).upper() != "MYR":
             non_myr += 1
             continue
         vendor = str(f.get("vendor", "")).strip()
-        payee = layout.payee_spelling(vendor) or vendor
-        key = _norm(payee)
+        payee = _safe(layout.payee_spelling(vendor) or vendor)
         number = _safe(f.get("invoice_number", ""))
-        entry = grouped.setdefault(key, _Entry(payee=_safe(payee), lines=[]))
-        entry.lines.append(_Line(
-            number=number,
-            description=_safe(f.get("description") or f"Invoice {number}")[:120],
-            amount=money(f["amount"]),
-        ))
-    entries = sorted(grouped.values(), key=lambda e: e.payee.lower())
+        line = _Line(number=number,
+                     description=_safe(f.get("description") or f"Invoice {number}")[:120],
+                     amount=money(f["amount"]))
+        home = next((e for e in entries if _vendor_matches(e.payee, payee)), None) \
+            if can_group else None
+        if home is None:
+            entries.append(_Entry(payee=payee, lines=[line]))
+        else:
+            home.lines.append(line)
+    entries.sort(key=lambda e: e.payee.lower())
     for e in entries:
         e.lines.sort(key=lambda ln: ln.number)
     return entries, non_myr
@@ -218,12 +236,14 @@ def _write_tab(ws, layout: ListingLayout, entries: list[_Entry], month_name: str
             else col(role_or_letter)
         cell = ws[f"{letter}{row}"]
         cell.value = value if not isinstance(value, Decimal) else float(value)
+        if isinstance(value, str) and value.startswith("=") and not isinstance(value, _Formula):
+            cell.data_type = "s"   # client text that happens to start with '=' stays text
         if number or isinstance(value, Decimal):
             cell.number_format = "#,##0.00"
         return cell.coordinate
 
     def fx(formula: str, value: Decimal):
-        return formula if formulas else value
+        return _Formula(formula) if formulas else value
 
     for coord, value in layout.title_cells:
         ws[coord] = value
@@ -320,16 +340,20 @@ def _write_tab(ws, layout: ListingLayout, entries: list[_Entry], month_name: str
 
 # ---- the whole draft ---------------------------------------------------------------
 
-def build_draft(workbook: bytes, layout: ListingLayout, listing_rows: list[dict],
+def build_draft(workbook: bytes, layout: ListingLayout, used_vouchers: list[str],
                 docs: list, settings: dict, suffix: str = ".xlsx",
                 today: date | None = None) -> Draft:
     """Append next month's draft tab to a copy of the workbook.
 
-    workbook: the run's snapshot of the listing (bytes). listing_rows: every
-    flattened past-payment row (for the voucher-collision check). docs:
-    approved invoice documents. settings: prepared_by, reviewed_by,
-    bank_charge (Decimal, per payment). Raises DraftError with the reason
-    when nothing can be written.
+    workbook: the run's snapshot of the listing (bytes). used_vouchers:
+    every voucher number already on any payment entry of any tab (the
+    collision check). docs: approved invoice documents. settings:
+    prepared_by, reviewed_by, bank_charge (Decimal, per payment). Raises
+    DraftError with the reason when nothing can be written.
+
+    The draft month is the month after the latest payment date on the
+    latest tab (the batch is paid in the month after the last one recorded);
+    with no dated payments, the current month.
     """
     entries, non_myr = _plan_entries(docs, layout)
     if not entries:
@@ -340,7 +364,7 @@ def build_draft(workbook: bytes, layout: ListingLayout, listing_rows: list[dict]
     draft_month = _add_month(anchor) if layout.last_payment_date else anchor.replace(day=1)
     vouchers = next_vouchers(layout.last_voucher, layout.last_payment_date, draft_month,
                              len(entries))
-    used = {str(r.get("no", "")).strip() for r in listing_rows} - {""}
+    used = {str(v).strip() for v in used_vouchers} - {""}
     clash = [v for v in vouchers if v in used]
     if clash:
         raise DraftError(
@@ -366,10 +390,15 @@ def build_draft(workbook: bytes, layout: ListingLayout, listing_rows: list[dict]
     month_name = draft_month.strftime("%B")
     ws = wb.create_sheet(title)
     written = _write_tab(ws, layout, entries, month_name, figures, settings, formulas=True)
-    # header styles, so the tab looks like the client's
+    # Header styles and the title block's merged cells, so the tab looks like
+    # the client's. Body styles are not copied: the body is ours, and a
+    # wrong number in the client's font is not better than a plain one.
     for role, letter in layout.columns.model_dump().items():
         if letter:
             ws[f"{letter}{layout.header_row}"]._style = src[f"{letter}{layout.header_row}"]._style
+    for rng in src.merged_cells.ranges:
+        if rng.max_row < layout.header_row:
+            ws.merge_cells(str(rng))
 
     # Round trip through the reader's own audit and flattening (no AI).
     twin_wb = Workbook()

@@ -74,6 +74,8 @@ def update_settings(body: dict) -> dict:
     if "draft_bank_charge" in body:
         try:
             charge = Decimal(str(body["draft_bank_charge"]).strip() or "0")
+            if not charge.is_finite():
+                raise InvalidOperation
         except InvalidOperation:
             raise HTTPException(400, "Bank charge per payment must be a number, e.g. 0.10.")
         if charge < 0 or charge > 1000:

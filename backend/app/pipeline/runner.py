@@ -83,9 +83,7 @@ async def process_run(run_id: str, workspace: Path) -> None:
                                      "Could not read the payment listing", exc)
             raise
         for level, text in notes:
-            telemetry.record(db, run_id, "reference",
-                             telemetry.WARNING if level == "WARNING" else telemetry.INFO,
-                             "LISTING_READ", text)
+            telemetry.record(db, run_id, "reference", _level(level), "LISTING_READ", text)
         telemetry.record(db, run_id, "reference", telemetry.INFO, "STAGE_DONE",
                          f"Payment listing ready in {_secs(started)}.")
 
@@ -149,9 +147,7 @@ async def process_run(run_id: str, workspace: Path) -> None:
                                      "The checking stage could not complete", exc)
             raise
         for level, text in check_notes:
-            telemetry.record(db, run_id, "check",
-                             telemetry.WARNING if level == "WARNING" else telemetry.INFO,
-                             "LISTING_MATCHES", text)
+            telemetry.record(db, run_id, "check", _level(level), "LISTING_MATCHES", text)
         for fd in flag_dicts:
             db.add(Flag(run_id=run_id, **fd))
         for d in docs:
@@ -204,6 +200,11 @@ def _halt_if_all_failed(reason: str) -> None:
     """Abandon the run when a stage worked for nothing at all."""
     if reason:
         raise PipelineHalted(reason)
+
+
+def _level(note_level: str) -> str:
+    """Pipeline notes say "INFO"/"WARNING"; the diary has its own constants."""
+    return telemetry.WARNING if note_level == "WARNING" else telemetry.INFO
 
 
 def _secs(started: float) -> str:

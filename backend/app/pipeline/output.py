@@ -99,7 +99,7 @@ async def _draft_listing(approved: list, refs: Path | None) -> dict:
         from ..settings_store import draft_settings
         source = reference.listing_file(refs)
         draft = listing_draft.build_draft(
-            source.read_bytes(), layout, await reference.load_payment_listing(refs),
+            source.read_bytes(), layout, await reference.load_listing_vouchers(refs),
             approved, draft_settings(), suffix=source.suffix.lower())
     except listing_draft.DraftError as exc:
         return {"skipped": str(exc)}

@@ -131,40 +131,49 @@ class ListingIndex:
     need the vendor to break the tie; anything else is genuinely
     ambiguous, which callers must surface, never guess through.
 
-    Two tiers, exact first:
-      - EXACT: the raw strings are equal. One candidate matches outright
-        (a vendor mismatch is then its own flag); several need the vendor.
-      - LOOSE: equal only after normalisation (see reference_key). This
-        catches a re-typed number — but the key can also collapse two
-        genuinely different references, so a loose hit is a match ONLY
-        when it is the sole candidate AND the vendor agrees. Anything else
-        is ambiguous.
+    The candidates are every row whose number equals the invoice's after
+    normalisation (see reference_key) — raw-equal rows and re-typed ones
+    alike. Then:
+      - ONE candidate, raw-equal: a match outright (a vendor mismatch is
+        then its own flag, so the reviewer sees the row).
+      - ONE candidate, loose (raw differs): a match ONLY if the vendor
+        agrees — the key can collapse two genuinely different references,
+        so a loose hit alone is not enough. Otherwise ambiguous.
+      - SEVERAL candidates: a match only when exactly one is vendor-
+        supported (an invoice number is vendor-scoped). Otherwise
+        ambiguous — never a pick.
+    A match found by key rather than raw string is marked loose, so the
+    flag can show both spellings.
     """
 
     def __init__(self, rows: list[dict]) -> None:
         # A plain dict keyed by number would keep only the last row and
         # silently discard same-numbered rows from other vendors or tabs.
-        self._exact: dict[str, list[dict]] = {}
-        self._loose: dict[str, list[dict]] = {}
+        self._by_key: dict[str, list[dict]] = {}
         for r in rows:
-            raw = str(r["invoice_number"]).strip()
-            self._exact.setdefault(raw, []).append(r)
-            self._loose.setdefault(reference_key(raw), []).append(r)
+            self._by_key.setdefault(reference_key(str(r["invoice_number"])), []).append(r)
 
     def match(self, number: str, vendor: str) -> ListingMatch:
         number = str(number).strip()
-        exact = self._exact.get(number, [])
-        if exact:
-            if len(exact) == 1:
-                return ListingMatch(exact[0], exact)
-            supported = [r for r in exact if _vendor_matches(vendor, r["vendor"])]
-            return ListingMatch(supported[0] if len(supported) == 1 else None, exact)
-        loose = self._loose.get(reference_key(number), [])
-        if not loose:
+        candidates = self._by_key.get(reference_key(number), [])
+        if not candidates:
             return ListingMatch(None, [])
-        if len(loose) == 1 and _vendor_matches(vendor, loose[0]["vendor"]):
-            return ListingMatch(loose[0], loose, loose=True)
-        return ListingMatch(None, loose, loose=True)
+
+        def is_loose(row: dict) -> bool:
+            return str(row["invoice_number"]).strip() != number
+
+        if len(candidates) == 1:
+            only = candidates[0]
+            if not is_loose(only):
+                return ListingMatch(only, candidates)
+            if _vendor_matches(vendor, only["vendor"]):
+                return ListingMatch(only, candidates, loose=True)
+            return ListingMatch(None, candidates, loose=True)
+        supported = [r for r in candidates if _vendor_matches(vendor, r["vendor"])]
+        loose_any = any(is_loose(r) for r in candidates)
+        if len(supported) == 1:
+            return ListingMatch(supported[0], candidates, loose=is_loose(supported[0]))
+        return ListingMatch(None, candidates, loose=loose_any)
 
 
 def _loosely(number: str, row: dict) -> str:

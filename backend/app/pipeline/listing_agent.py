@@ -162,6 +162,9 @@ class SheetResult:
     be)."""
     rows: list[dict] = field(default_factory=list)
     notes: list[tuple[str, str]] = field(default_factory=list)  # (level, text)
+    # every voucher number on a payment entry — including entries with no
+    # invoice reference, which yield no flat row (the draft's collision guard)
+    vouchers: list[str] = field(default_factory=list)
     reading: SheetReading | None = None
     layout: object | None = None  # listing_layout.ListingLayout
 
@@ -720,7 +723,10 @@ async def read_sheet(ws, ws_formulas=None) -> SheetResult:
                     "duplicate-payment check still runs. Look at: "
                     + "; ".join(arithmetic)))
             notes += stale_notes + _observation_notes(ws, reading)
-            return SheetResult(rows=rows, notes=notes, reading=reading)
+            cols = reading.columns or ColumnRoles()
+            vouchers = [v for s in reading.entries if s.kind == "payment"
+                        for v in _texts(ws, cols.voucher_no, s)]
+            return SheetResult(rows=rows, notes=notes, vouchers=vouchers, reading=reading)
         log.info("sheet %r round %d: %d problem(s): %s",
                  ws.title, round_no, len(problems),
                  "; ".join(t for _, t in problems)[:500])
@@ -757,6 +763,7 @@ async def ingest_workbook(wb, wb_formulas=None) -> SheetResult:
         one = await read_sheet(ws, twin)
         total.rows.extend(one.rows)
         total.notes.extend(one.notes)
+        total.vouchers.extend(one.vouchers)
         if one.reading is not None:
             read.append((ws, one.reading, one.rows))
     if not total.rows:

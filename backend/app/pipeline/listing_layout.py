@@ -15,11 +15,11 @@ never re-reads the workbook.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 
+from .checks import _norm, _vendor_matches
 from .listing_agent import ColumnRoles, SheetReading, _num, _text, _texts
 
 # What the writer cannot do without. Description, line amount, balance and
@@ -30,10 +30,6 @@ REQUIRED_FOR_WRITING = ("date", "voucher_no", "invoice_no", "payee", "payment")
 
 class LayoutIncomplete(Exception):
     """The latest tab did not yield everything the writer needs."""
-
-
-def _norm(text: str) -> str:
-    return re.sub(r"[^a-z0-9%]+", " ", str(text).lower()).strip()
 
 
 @dataclass
@@ -55,11 +51,8 @@ class ListingLayout:
         """The client's own spelling of a payee the listing has paid before,
         matched the way the checks match vendors (one name contains the
         other, after normalising). None if the listing never paid them."""
-        v = _norm(vendor)
-        if not v:
-            return None
-        hits = {spelling for key, spelling in self.payees.items()
-                if v in key or key in v}
+        hits = {spelling for spelling in self.payees.values()
+                if _vendor_matches(vendor, spelling)}
         return sorted(hits)[0] if len(hits) == 1 else None
 
     def to_dict(self) -> dict:
