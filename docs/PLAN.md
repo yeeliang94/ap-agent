@@ -1,8 +1,8 @@
 # Implementation Plan: Employee Claims Verification Module
 
-**Overall Progress:** `30%` (Steps 1–6 of 20)
+**Overall Progress:** `70%` (Steps 1–14 of 20)
 **PRD Reference:** [docs/PRD.md](PRD.md) (flows 1–5, check catalogue in Flow 3, steering, decisions table)
-**Last Updated:** 2026-08-19 (Phases 1–2 done; Phase 3 next)
+**Last Updated:** 2026-08-19 (Phases 1–4 done; Phase 5 next)
 **Previous plan (invoice pipeline MVP, complete):** [docs/PLAN-MVP.md](PLAN-MVP.md)
 
 ## Summary
@@ -117,43 +117,43 @@ a programmer either.
   - **Verify:** in the browser: start a run from the zip → land on Map & Rules → hover a role and read its reason → change one role, tick remember → Confirm; the audit trail shows who confirmed and what changed; the client's last confirmed map is stored; screenshot kept as proof.
 
 ### Phase 3: Verify — one worker per employee
-- [ ] 🟥 **Step 7: Expense report reader (+ KM tab)** — the AI maps the sheet's structure, code pulls and audits the numbers.
-  - [ ] 🟥 Report tab: AI returns column roles + header cells + row span + total cell (coordinates only); code extracts; audit: amount × rate = total per row, rows sum to total, header name = mapped employee, dates within the ER period; ≤ 3 rounds; `REPORT_UNREADABLE` after that
-  - [ ] 🟥 KM tab: same; code checks km × rate = amount and rate ∈ profile rates; each report mileage line (per trip) pairs with a KM row by date + amount → `MILEAGE_RATE`, `MILEAGE_LINE_MISMATCH`
-  - [ ] 🟥 Category by the client's rule (LinkedIn: stated purpose) from the report's *Expense Types* list, with the quoted header text; `CATEGORY_UNCLEAR` when unsettled
+- [x] 🟩 **Step 7: Expense report reader (+ KM tab)** — done 2026-08-19 — the AI maps the sheet's structure, code pulls and audits the numbers.
+  - [x] 🟩 Report tab: AI returns column roles + header cells + row span + total cell (coordinates only); code extracts; audit: amount × rate = total per row, rows sum to total, header name = mapped employee, dates within the ER period; ≤ 3 rounds; `REPORT_UNREADABLE` after that
+  - [x] 🟩 KM tab: same; code checks km × rate = amount and rate ∈ profile rates; each report mileage line (per trip) pairs with a KM row by date + amount → `MILEAGE_RATE`, `MILEAGE_LINE_MISMATCH`
+  - [x] 🟩 Category by the client's rule (LinkedIn: stated purpose) from the report's *Expense Types* list, with the quoted header text; `CATEGORY_UNCLEAR` when unsettled
   - **Verify:** on the sample: every row of every report matches ground truth (dates, items, amounts, currency, totals); the mixed-category report gets *Company Event* with the header quoted; a deliberately scrambled tab ends as `REPORT_UNREADABLE` without stopping the employee.
 
-- [ ] 🟥 **Step 8: Evidence page inventory** — every receipt and map trip found on every page, with where it is.
-  - [ ] 🟥 Page classify + read ("extract" role): receipts page → list of receipts (vendor, date, amount, currency, position L/M/R, hard-to-read notes); map page → list of trips (date, purpose, from, to, "and back"?, km printed); other kinds named
-  - [ ] 🟥 Receipts pages read twice; disagreement on amount/date → low-confidence; map pages re-rendered at full resolution for the km; "km unreadable" is a value, never a guess
+- [x] 🟩 **Step 8: Evidence page inventory** — done 2026-08-19 — every receipt and map trip found on every page, with where it is.
+  - [x] 🟩 Page classify + read ("extract" role): receipts page → list of receipts (vendor, date, amount, currency, position L/M/R, hard-to-read notes); map page → list of trips (date, purpose, from, to, "and back"?, km printed); other kinds named
+  - [x] 🟩 Receipts pages read twice; disagreement on amount/date → low-confidence; map pages re-rendered at full resolution for the km; "km unreadable" is a value, never a guess
   - **Verify:** on the sample the inventory equals ground truth: receipt count, amounts, positions per page; every map trip's km read; a receipt with a deliberately smudged amount comes out low-confidence, not wrong; cost per employee logged.
 
-- [ ] 🟥 **Step 9: Matching + checks (code decides)** — the check catalogue from PRD Flow 3c–3e.
-  - [ ] 🟥 Rows ↔ receipts: same day + same amount + same currency; AI tie-break only among candidates; flags `NO_RECEIPT` (with "searched N pages in M files"), `RECEIPT_AMBIGUOUS` (candidates listed with page + position), `DUPLICATE_RECEIPT`, `UNCLAIMED_RECEIPT`, `CURRENCY_MISMATCH`; receipt-optional items from the profile
-  - [ ] 🟥 Mileage rows ↔ map trips: same date; km equal, or exactly double for a return trip; `MILEAGE_DISCREPANCY` (both numbers, page, reading tried), `MILEAGE_NO_MAP`
-  - [ ] 🟥 No-report employee: receipts become the row list + `NO_REPORT`; employee summary (totals, category, counts); every flag carries file + page + position or sheet + row, and the basis it rests on
-  - [ ] 🟥 A control the batch needs but cannot find is a run-level flag, never a silent skip (lesson from the MVP peer review): no listing link readable → `MISSING_REFERENCE` before output; profile has no mileage rate but the batch has mileage rows → `MISSING_REFERENCE`; the reviewer acknowledges or fixes and re-runs
+- [x] 🟩 **Step 9: Matching + checks (code decides)** — done 2026-08-19 — the check catalogue from PRD Flow 3c–3e.
+  - [x] 🟩 Rows ↔ receipts: same day + same amount + same currency; AI tie-break only among candidates; flags `NO_RECEIPT` (with "searched N pages in M files"), `RECEIPT_AMBIGUOUS` (candidates listed with page + position), `DUPLICATE_RECEIPT`, `UNCLAIMED_RECEIPT`, `CURRENCY_MISMATCH`; receipt-optional items from the profile
+  - [x] 🟩 Mileage rows ↔ map trips: same date; km equal, or exactly double for a return trip; `MILEAGE_DISCREPANCY` (both numbers, page, reading tried), `MILEAGE_NO_MAP`
+  - [x] 🟩 No-report employee: receipts become the row list + `NO_REPORT`; employee summary (totals, category, counts); every flag carries file + page + position or sheet + row, and the basis it rests on
+  - [x] 🟩 A control the batch needs but cannot find is a run-level flag, never a silent skip (lesson from the MVP peer review): no listing link readable → `MISSING_REFERENCE` before output; profile has no mileage rate but the batch has mileage rows → `MISSING_REFERENCE`; the reviewer acknowledges or fixes and re-runs
   - **Verify:** every planted error in the sample is flagged with the expected code; the return trip and the Mobile-Allowance N row are **not** flagged; false flags ≤ 1 per employee; a script asserts every flag has a citation.
 
-- [ ] 🟥 **Step 10: Worker runner** — per-employee workers, five at a time, failure isolated, retryable.
-  - [ ] 🟥 Worker = steps 7–9 for one employee with only that employee's files; pool of 5; per-agent request cap; per-employee status + timing + cost in the diary; `POST /api/claims-runs/{id}/employees/{eid}/retry`; run → `ready` when all employees are done or failed
+- [x] 🟩 **Step 10: Worker runner** — done 2026-08-19 — per-employee workers, five at a time, failure isolated, retryable.
+  - [x] 🟩 Worker = steps 7–9 for one employee with only that employee's files; pool of 5; per-agent request cap; per-employee status + timing + cost in the diary; `POST /api/claims-runs/{id}/employees/{eid}/retry`; run → `ready` when all employees are done or failed
   - **Verify:** full run on the sample completes under 5 minutes; a forced model error for one employee marks only that employee failed while nine finish; retry succeeds; two consecutive clean runs.
 
-- [ ] 🟥 **Step 11 (UI): Verifying progress + Review view** — clear flags fast, with the evidence in front of you.
-  - [ ] 🟥 Verifying: employee chips with states, overall bar, 3‑second polling, per-employee *Retry*
-  - [ ] 🟥 Review: employee summary table; flag cards grouped by employee reusing the shared flag card / field editor; **evidence preview endpoint** for claims files (`/preview?page=n`) with the receipt position highlighted; *Accept* / *Exclude with note* / *Fix a value* (audited; instant per-employee re-check; flags auto-resolve or raise) / *Re-verify employee*; "all flags resolved" banner
+- [x] 🟩 **Step 11 (UI): Verifying progress + Review view** — done 2026-08-19 — clear flags fast, with the evidence in front of you.
+  - [x] 🟩 Verifying: employee chips with states, overall bar, 3‑second polling, per-employee *Retry*
+  - [x] 🟩 Review: employee summary table; flag cards grouped by employee reusing the shared flag card / field editor; **evidence preview endpoint** for claims files (`/preview?page=n`) with the receipt position highlighted; *Accept* / *Exclude with note* / *Fix a value* (audited; instant per-employee re-check; flags auto-resolve or raise) / *Re-verify employee*; "all flags resolved" banner
   - **Verify:** in the browser: watch chips move; open a `NO_RECEIPT` card and see the cited page; fix the RM 10 row → the mismatch flag resolves by correction; exclude a flag with a note; audit trail lists each action; screenshots kept.
 
 ### Phase 4: Output — the listing rows
-- [ ] 🟥 **Step 12: Listing header map + batch rows + gate** — one row per employee in the client's own column order.
-  - [ ] 🟥 Read the linked listing's header row (AI maps headers, as the bank template today; code emits); fallback minimal set with a notice; one row per included employee (received date, name, ER code, category/GL, MYR total, remark); totals recomputed independently with `Decimal`; server-side gate while any flag is open; *not included* list; TSV sanitised as today
+- [x] 🟩 **Step 12: Listing header map + batch rows + gate** — done 2026-08-19 — one row per employee in the client's own column order.
+  - [x] 🟩 Read the linked listing's header row (AI maps headers, as the bank template today; code emits); fallback minimal set with a notice; one row per included employee (received date, name, ER code, category/GL, MYR total, remark); totals recomputed independently with `Decimal`; server-side gate while any flag is open; *not included* list; TSV sanitised as today
   - **Verify:** with one flag open the API returns no output; after clearing, rows = included employees, header order equals the sample listing's; excluding an employee changes totals and reconciliation stays green (hand-checked); a listing with a scrambled header triggers the fallback notice.
 
-- [ ] 🟥 **Step 13 (UI): Output view** — totals, reconciliation, copy block, not-included list, locked state.
+- [x] 🟩 **Step 13 (UI): Output view** — done 2026-08-19 — totals, reconciliation, copy block, not-included list, locked state.
   - **Verify:** in the browser: locked message with open flags → unlocked after review → copy block pasted into a spreadsheet lands in the right columns; reconciliation line green; screenshot kept.
 
-- [ ] 🟥 **Step 14: End-to-end verifier** — proof, repeatable.
-  - [ ] 🟥 `backend/scripts/verify_claims_run.py`: runs the sample end to end, simulates a competent reviewer (fixes the RM 10 row, excludes the acceptable N flag), asserts every planted error found, false positives ≤ 1/employee, every flag cited, the gate, totals, listing header order
+- [x] 🟩 **Step 14: End-to-end verifier** — done 2026-08-19 — proof, repeatable.
+  - [x] 🟩 `backend/scripts/verify_claims_run.py`: runs the sample end to end, simulates a competent reviewer (fixes the RM 10 row, excludes the acceptable N flag), asserts every planted error found, false positives ≤ 1/employee, every flag cited, the gate, totals, listing header order
   - **Verify:** `ALL CHECKS PASSED` on two consecutive runs; the run's AI cost printed.
 
 ### Phase 5: Steering v1 — the few things a client needs to say
@@ -221,6 +221,40 @@ a programmer either.
   with its tooltip. Screenshots were inspected in-session (the browser pane
   cannot save them to disk); the Confirm click is exercised in Step 11's
   browser check once workers exist.
+- **Steps 7–14 (live, 2026-08-19).** The first real run exposed four things
+  no scripted test could: (1) five workers stalled with SQLite "database is
+  locked" — the worker held a write lock across AI calls; now the checks
+  run in memory and everything is written in one commit, and the database
+  is in WAL mode with a 30 s busy timeout (`db.py`); (2) five workers × four
+  page reads = twenty concurrent vision calls hit the provider's rate limit
+  and its silent 10-minute back-off — now one shared page-read limit (5)
+  and a 3-minute ceiling on every AI call, so a stall becomes "employee
+  failed: did not answer in time", retryable; (3) receipt dates read
+  month-first ("10/07" as October) — the reader is told Malaysian receipts
+  are day-first, and when the two reads disagree the matcher accepts either
+  value (the low-confidence note stays on the receipt); (4) the km on a map
+  page misread at "full resolution" because the model shrinks a whole
+  300 dpi page again — map pages are now re-read in bands at true
+  resolution. Also: category answers came back "Taxi (GL 713070)" (now
+  matched on the bare name; a catch-all such as *Miscellaneous* is treated
+  as unsure and goes to a person); the no-report employee is judged against
+  the category list read from the batch's other reports.
+  **Result of `verify_claims_run.py` (gpt-4o, 2026-08-19):** map 10/10 on
+  round 1; verification of 10 employees in **50 s**; every planted error
+  flagged with the expected code; false open flags 2 across 10 employees
+  (Arjun's CATEGORY_UNCLEAR — no purpose to go on; Mei Chen's second
+  DUPLICATE_RECEIPT, one per row by design); the return trip and the
+  Mobile-Allowance N rows not flagged; every flag cited; gate holds; the
+  RM 10 fix resolves its flag by correction; header order = the sample
+  listing's; reconciliation green; amounts = report total minus excluded
+  rows. One check failed on that run — Kavitha's category (a confident
+  *Miscellaneous*); the catch-all rule above was added after it. UI verified
+  in the browser: Verifying chips, Review with the RM 35 receipt highlighted
+  and *Fix a value* resolving the flag, Output locked then unlocked.
+- **Deviation noted:** DUPLICATE_RECEIPT is raised once per row involved
+  (both rows), so the sample's single planted duplicate yields two flags —
+  the plan's "one per kind" counts errors, not flags; the verifier
+  tolerates it.
 
 ## Rollback Plan
 - Every step lands as its own commit — `git revert` any step cleanly.

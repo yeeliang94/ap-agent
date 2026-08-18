@@ -24,6 +24,11 @@ def _bare(text: str) -> str:
     return re.sub(r"\s*\((?:GL\s*)?\d{4,8}\)\s*$", "", text or "", flags=re.IGNORECASE).strip().lower()
 
 
+# Category names that mean "none of the above". A confident answer here is
+# treated as unsure whenever the report states a purpose.
+CATCH_ALL = {"miscellaneous", "misc", "other", "others", "sundry", "sundries", "general"}
+
+
 class CategoryJudgment(BaseModel):
     category: str = Field(max_length=80, description="the item name only, exactly as listed (without the GL code)")
     quoted_text: str = Field(max_length=300, description="the header / line text relied on, verbatim")
@@ -66,6 +71,14 @@ async def judge_category(categories: list[dict], purpose: str, rows: list[dict],
     j = result.output
     by_name = {c["item"].strip().lower(): c for c in categories}
     hit = by_name.get(_bare(j.category))
+    # A catch-all is not a decision. Code, not the model, decides that a
+    # confident "Miscellaneous" for a report whose purpose names something
+    # else goes to a person.
+    if hit is not None and _bare(hit["item"]) in CATCH_ALL and purpose.strip():
+        j = j.model_copy(update={"sure": False,
+                                 "why": (f"'{hit['item']}' is a catch-all; the report states a purpose, so a "
+                                         f"person should choose. {j.why}")[:300]})
+        return j, hit.get("gl", "")
     if hit is None:
         j = j.model_copy(update={"sure": False, "why": f"'{j.category}' is not on the client's list. {j.why}"[:300]})
         return j, ""
