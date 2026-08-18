@@ -96,11 +96,91 @@ still shared across runs by file content, so an unchanged file is read by
 the AI once, ever.
 
 **Paste-ready listing rows dropped.** They only ever fit the sample layout.
-See "Next" for the replacement.
+Replaced by the drafted tab below.
 
 ---
 
-## Next
+## Done (2026-08-18, second pass — N1 to N6 below, built the same day)
+
+The "Next" items were built in one pass. Where the doc said "to confirm
+with the stakeholder", the recommended option was taken and is marked
+**(assumed — confirm)**; each is one place to change.
+
+**Not found = normal (N3).** `NOT_IN_LISTING` is gone. The checks stage
+writes one Activity line instead: "6 of 8 invoice(s) are new — not in any
+past listing tab (searched 9 invoice row(s) across 2 tab(s): Jul'26,
+Jun'26); 2 matched a past payment (see the ALREADY_PAID / mismatch flags)".
+Consequence worth knowing: for a *new* invoice there is no listing row to
+disagree with, so a misread invoice number reaches the reviewer only as
+`LOW_CONFIDENCE`; the end-to-end verifier's simulated reviewer now corrects
+every low-confidence document from its source. **(assumed — confirm)**
+
+**Loose reference matching (N4).** Lookups try the raw number first, then a
+normalised key (case, spaces and `- _ / .` ignored). A loose hit is a match
+only when it is the sole candidate *and* the vendor agrees; anything else is
+`LISTING_AMBIGUOUS`. Flags keep the raw values: "matched loosely: 'INV 1023'
+↔ 'INV-1023'". The AI's structural answer also carries `observations`
+("column F has no header"), printed to the Activity tab, never acted on.
+
+**Boundaries and stale formulas (N6).** The reader refuses a listing over
+20 MB, more than 40 tabs, or content wider than 60 columns; cell texts on
+the flat rows are capped at 200 characters. The workbook is opened twice
+(values and formulas): formula cells with no saved value are named per tab
+in a WARNING ("saved without recalculating … open in Excel and save"),
+instead of silently reading as empty. Hidden tabs are read like any other
+and labelled "(hidden tab)". Text under the line-amount column (a signature)
+no longer counts as a lost amount — only numbers do.
+
+**Sample regenerated (N2).** `samples/generate_samples.py` now writes a
+cover tab plus `Jun'26` and `Jul'26` in the client's layout (title block,
+headers on row 4, unlabelled line-amount column F, grouped entries, balance
+b/f, fund received, bank charges, totals, summary block, signatures).
+Planted: MX-7101 already paid inside a grouped Maxis entry (Jul'26), and
+MX-2214 already paid in Jun'26 (also old-dated). A golden test builds the
+same tabs in memory and reads them; the real-model run found both with
+zero false positives.
+
+**Drafting next month's tab (N1).** `listing_draft.py`, deterministic:
+- Reads a typed `ListingLayout` (`listing_layout.py`) that the reader fills
+  from the latest payment tab: header row and summary-block start (two new
+  AI coordinates, `header_row` / `summary_first_row`, checked by the audit),
+  the column map, closing balance, last voucher, latest payment date, and
+  the client's own spelling of each payee. Anything missing → the draft is
+  skipped and the output says why.
+- Writes ONE new tab (`Aug'26 (DRAFT)`, following the latest tab's title
+  pattern) on a COPY of the workbook, saved as `runs/<id>/draft/…` and
+  offered for download; `.xlsm` is kept `.xlsm` with macros. Nothing is
+  written to SharePoint or the live listing (the lifecycle rule).
+- Business rules **(assumed — confirm)**: one payment per vendor (vendor =
+  the listing's spelling when tolerant matching finds it, else the
+  invoice's text); voucher numbers continue the latest tab (`PV0726/03` →
+  `PV0826/01`: month code rolled, sequence restarted; no month code → the
+  trailing integer increments; a generated number already in the listing
+  is a refusal); Balance b/f = latest closing balance; Net payment = sum
+  of new payments; Estimated bank charges = per-payment charge (Settings)
+  × entries; Fund received = Total fund to request = net + charges, so the
+  balance returns to the same residual. Dates are left blank; a DRAFT
+  note sits in the title block. All money in `Decimal`, 2 dp, half-up.
+- Balance cells, grouped totals, the totals row and "Total fund to
+  request" are formulas; everything else values. Round trip: the same
+  plan is written as values and read back through `audit_reading` /
+  `flatten_reading` (no AI); it must audit clean and flatten to exactly
+  the approved invoices, or the draft is refused.
+- The invoice reader gained a `description` field (one line, prose) — the
+  only AI text in the draft. Prepared by / Reviewed by / bank charge per
+  payment are Settings.
+
+**Tests (N5).** Added: stale formula caches, hidden tabs, duplicate
+references across tabs (end to end), each input limit, the golden sample
+shape, layout learning, voucher numbering, tab titles, the writer's round
+trip, collisions, determinism, `.xlsm`, outputs and settings. Opt-in
+real-model evaluation: `AP_LISTING_EVAL=<anonymised workbook>` runs the
+real loop against `<name>.expected.json` beside it (format in
+`backend/tests/test_listing_eval.py`).
+
+---
+
+## Next (as originally written, kept for the reasoning; all built above)
 
 ### N1. Write new entries in the client's own layout
 The client's format (from the ICMR tabs): a title block (Name, A/C No), a

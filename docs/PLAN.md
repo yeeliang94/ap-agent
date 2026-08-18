@@ -113,6 +113,27 @@ listing is the record of PAST payments, and the run's central question is
   pairing removed; rows carry both invoice row and entry row; twice-declined
   payment-like tabs are a WARNING; physical-cell ceiling; adversarial tests.
 
+## Listing hardening, second pass (2026-08-18)
+
+All "Next" items of `docs/LISTING-HARDENING.md` built, one commit each:
+- **N3** `NOT_IN_LISTING` dropped; one Activity line counts new / matched /
+  ambiguous invoices and what was searched.
+- **N4** loose reference matching (unique + vendor-supported, else
+  ambiguous; raw values shown); AI `observations` printed.
+- **N6/N5** input limits (20 MB, 40 tabs, 60 columns, 200-char cell texts),
+  stale-formula WARNING per tab, hidden tabs labelled; tests for each plus
+  duplicate references across tabs and an opt-in real-model evaluation.
+- **N2** sample regenerated as an ICMR-shaped past-payments workbook; two
+  ALREADY_PAID plants; golden test.
+- **N1** next month's entries drafted as a new tab on a copy of the client
+  workbook (deterministic writer, `ListingLayout` contract, round-trip
+  through the reader's audit, formulas for balances, `.xlsm` preserved,
+  Settings for signatures / bank charge, download route, run-screen card).
+  Business rules taken as recommended and marked "assumed — confirm".
+- Verified end to end with the real model on the regenerated sample:
+  ALL CHECKS PASSED (both plants found, zero false positives, draft
+  written and downloaded).
+
 ## Rollback Plan
 - Every step lands as its own git commit — `git revert` any step cleanly.
 - The app never writes to SharePoint or user workbooks, so there is no external state to undo; worst case is deleting the local SQLite file and per-run workspace folders.

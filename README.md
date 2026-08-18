@@ -3,8 +3,10 @@
 An AI-assisted Accounts Payable checker. A user uploads a client's monthly
 batch (invoices + staff claims, including scans); the pipeline sorts, reads,
 and checks every document; flags land on a review screen with cited reasons;
-and the app produces **copy-ready** Maybank upload rows and file names. The
-agent never writes to SharePoint or any working file — a person pastes.
+and the app produces **copy-ready** Maybank upload rows and file names, plus
+a **draft** of next month's payment-listing tab on a copy of the client's own
+workbook. The agent never writes to SharePoint or any working file — a
+person pastes, and finalises the draft after the bank run.
 
 Design doc: [ap-agent-design.html](ap-agent-design.html) · Plan & status: [docs/PLAN.md](docs/PLAN.md)
 
@@ -71,8 +73,12 @@ Rules inherited from the enterprise repo, already honored in code:
    roles, run `pytest backend/tests/test_model_layer.py`, then the full
    verify script; compare extraction accuracy and cost with the local run.
 4. **Template output pastes cleanly** — run a real (anonymized) batch, copy
-   the bank block into the real bank template. (Drafting new payment-listing
-   entries in the client's own layout is planned — see docs/LISTING-HARDENING.md.)
+   the bank block into the real bank template, and open the downloaded
+   listing draft beside the real workbook (see docs/LISTING-HARDENING.md;
+   the draft's grouping / voucher / fund rules are marked "assumed —
+   confirm" there). Run the opt-in real-model evaluation
+   (`AP_LISTING_EVAL=<anonymised listing> pytest backend/tests/test_listing_eval.py`)
+   before switching models.
 
 ## Honest limitations (MVP)
 
