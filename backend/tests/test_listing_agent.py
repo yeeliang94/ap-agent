@@ -578,6 +578,54 @@ async def test_crashing_reading_becomes_feedback_not_exception(monkeypatch):
     assert result.rows  # recovered on the corrected reading
 
 
+def test_sample_listing_shape_reads_correctly_end_to_end():
+    """The development sample is built by samples/generate_samples.py in the
+    client's layout. Building its tabs here (in memory, from the same
+    code) and reading them with the correct structural answer pins the
+    sample's shape to the reader: a change to either that breaks the
+    other fails here, not in a client's run."""
+    from samples import generate_samples as gen
+    from app.pipeline.listing_agent import audit_reading
+
+    wb = Workbook()
+    balance = gen.LISTING_OPENING_BALANCE
+    for i, (title, pay_date, month, entries) in enumerate(gen.LISTING_TABS):
+        ws = wb.active if i == 0 else wb.create_sheet()
+        balance = gen._listing_tab(ws, title, pay_date, month, entries, balance)
+    assert balance == pytest.approx(gen.LISTING_OPENING_BALANCE)  # returns to the residual
+
+    cols = ColumnRoles(date="A", voucher_no="B", invoice_no="C", payee="D",
+                       description="E", line_amount="F", payment="G",
+                       balance="H", receipt="I")
+    all_rows = []
+    for ws in wb.worksheets:
+        # entries start on row 8; each block is len(lines) rows + 1 blank;
+        # then bank charges, total, and the summary block (figures in C)
+        spans = [EntrySpan(first_row=5, last_row=5, kind="other"),
+                 EntrySpan(first_row=6, last_row=6, kind="other")]
+        row = 8
+        _, _, _, entries = next(t for t in gen.LISTING_TABS if t[0] == ws.title)
+        for _, lines in entries:
+            spans.append(EntrySpan(first_row=row, last_row=row + len(lines) - 1, kind="payment"))
+            row += len(lines) + 1
+        spans.append(EntrySpan(first_row=row, last_row=row + 1, kind="other"))       # charges, total
+        spans.append(EntrySpan(first_row=row + 3, last_row=row + 6, kind="other"))   # summary block
+        reading = SheetReading(is_payment_sheet=True, columns=cols, entries=spans, why="golden")
+        assert audit_reading(ws, reading) == [], ws.title
+        all_rows += flatten_reading(ws, reading)
+
+    by_number = {r["invoice_number"]: r for r in all_rows}
+    assert by_number["MX-7101"]["sheet"] == "Jul'26" and by_number["MX-7101"]["row"] == 8
+    assert by_number["MX-7101"]["amount"] == pytest.approx(1240.00)   # paired by row
+    assert by_number["MX-7101"]["no"] == "PV0726/01"
+    assert by_number["MX-2214"]["sheet"] == "Jun'26" and by_number["MX-2214"]["status"] == "Paid"
+    assert by_number["CP-3250"]["amount"] == pytest.approx(150.00)
+    # every batch invoice marked paid_before is in the listing; no other is
+    planted = {n for _, n, _, _, paid, _ in gen.INVOICES if paid}
+    batch = {n for _, n, _, _, _, _ in gen.INVOICES}
+    assert planted == batch & set(by_number)
+
+
 def test_number_parsing_tolerates_text_amounts():
     assert listing_agent._num("RM 1,200.00") == pytest.approx(1200.00)
     assert listing_agent._num("(500.00)") == pytest.approx(-500.00)

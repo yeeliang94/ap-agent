@@ -395,7 +395,12 @@ def audit_reading(ws, reading: SheetReading) -> list[tuple[str, str]]:
         for row in rows:
             if row in covered or row < first_span_row:
                 continue
-            if _text(ws, col, row):
+            # Any text counts in the invoice column (a reference can be
+            # anything); only a NUMBER counts in the line-amount column —
+            # a signature or a remark under it is not a lost amount.
+            stray = (bool(_text(ws, col, row)) if col == cols.invoice_no
+                     else _num(ws[f"{col}{row}"].value) is not None)
+            if stray:
                 problems.append((STRUCTURE,
                     f"cell {col}{row} holds a value in the "
                     f"{'invoice' if col == cols.invoice_no else 'line amount'} "

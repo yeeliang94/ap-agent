@@ -6,7 +6,7 @@ Creates, under samples/generated/:
   reference/        payment listing, policy sheet, Maybank template (.xlsx)
   ground_truth.json what was planted where, so checks can be scored
 
-Five anomalies are planted deliberately (see GROUND_TRUTH below). Everything
+Anomalies are planted deliberately (see GROUND_TRUTH below). Everything
 else is clean. Run:  python samples/generate_samples.py
 """
 from __future__ import annotations
@@ -24,19 +24,47 @@ BATCH = OUT / "batch"
 REF = OUT / "reference"
 
 # ---------------------------------------------------------------- fixtures
-# (vendor, invoice number, date, amount RM, in_listing, style)
+# (vendor, invoice number, date, amount RM, paid_before, style)
+# paid_before: the invoice already appears in a PAST tab of the payment
+# listing, so the pipeline must raise ALREADY_PAID and point at the row.
+# Every other invoice is new — the normal case, which raises no flag.
 INVOICES = [
+    # Anomaly: already paid on 2026-07-10 inside a grouped Maxis entry in
+    # tab Jul'26 (two invoices, two line amounts, one payment).
     ("Maxis Bhd",              "MX-7101", "2026-07-03",  1240.00, True,  "pdf"),
-    ("Tenaga Nasional Berhad", "TNB-5520", "2026-07-05", 3480.50, True,  "pdf"),
-    ("Syabas Water",           "SYB-2210", "2026-07-08",  412.30, True,  "pdf"),
-    ("KL Office Supplies",     "KLO-0091", "2026-07-11",  867.20, True,  "photo"),
-    ("Securemax Guards Sdn Bhd", "SMG-4415", "2026-07-15", 5200.00, True, "pdf"),
-    ("CleanPro Services",      "CP-3302", "2026-07-18",  980.00, True,  "photo_blurry"),
-    # Anomaly: 7 months old — should be flagged OLD_DATED.
+    ("Tenaga Nasional Berhad", "TNB-5520", "2026-07-05", 3480.50, False, "pdf"),
+    ("Syabas Water",           "SYB-2210", "2026-07-08",  412.30, False, "pdf"),
+    ("KL Office Supplies",     "KLO-0091", "2026-07-11",  867.20, False, "photo"),
+    ("Securemax Guards Sdn Bhd", "SMG-4415", "2026-07-15", 5200.00, False, "pdf"),
+    ("CleanPro Services",      "CP-3302", "2026-07-18",  980.00, False, "photo_blurry"),
+    # Anomaly: 7 months old (OLD_DATED) AND already paid in tab Jun'26.
     ("Maxis Bhd",              "MX-2214", "2026-01-12",  1240.00, True,  "pdf"),
-    # Anomaly: missing from the payment listing — should be flagged NOT_IN_LISTING.
     ("Apex Renovation Works",  "ARW-0808", "2026-07-22", 2750.00, False, "pdf"),
 ]
+
+# The client's payment listing, in the client's own layout (modelled on
+# the ICMR file): one tab per month of PAST payments. Each entry is
+# (payee, [(invoice number, description, line amount), ...]); a single-
+# invoice entry writes its amount in the payment column only, a grouped
+# entry writes per-line amounts (column F, which — as in the real file —
+# has no header) and one payment total.
+LISTING_TABS = [
+    ("Jun'26", "2026-06-23", "June", [
+        ("Maxis Bhd", [("MX-2214", "Mobile lines - Jan 2026", 1240.00)]),
+        ("Tenaga Nasional Berhad", [("TNB-5100", "Electricity - May 2026", 3390.10)]),
+        ("CleanPro Services", [("CP-3210", "Office cleaning - May 2026", 980.00),
+                               ("CP-3250", "Carpet shampoo", 150.00)]),
+        ("Syabas Water", [("SYB-2105", "Water - May 2026", 388.40)]),
+    ]),
+    ("Jul'26", "2026-07-10", "July", [
+        ("Maxis Bhd", [("MX-7101", "Mobile lines - Jun 2026", 1240.00),
+                       ("MX-7050", "Broadband - Jun 2026", 310.00)]),
+        ("Tenaga Nasional Berhad", [("TNB-5310", "Electricity - Jun 2026", 3412.75)]),
+        ("CleanPro Services", [("CP-3260", "Office cleaning - Jun 2026", 980.00)]),
+    ]),
+]
+LISTING_OPENING_BALANCE = 7.90     # the small residual the account carries
+LISTING_BANK_CHARGE = 0.10         # per payment, as the client estimates it
 
 # (claimant, expense description, amount, currency, receipt vendor)
 CLAIMS = [
@@ -47,10 +75,11 @@ CLAIMS = [
 ]
 
 GROUND_TRUTH = {
-    "documents": {},   # filename -> {"kind": ..., "fields": {...}, "in_listing": bool}
+    "documents": {},   # filename -> {"kind": ..., "fields": {...}, "paid_before": bool}
     "expected_flags": [
         {"code": "OLD_DATED",        "match": "MX-2214",  "why": "invoice dated 2026-01-12, 7 months old"},
-        {"code": "NOT_IN_LISTING",   "match": "ARW-0808", "why": "invoice absent from July payment listing"},
+        {"code": "ALREADY_PAID",     "match": "MX-2214",  "why": "paid in tab Jun'26 (single-invoice entry)"},
+        {"code": "ALREADY_PAID",     "match": "MX-7101",  "why": "paid in tab Jul'26 inside a grouped Maxis entry"},
         {"code": "OVER_CAP",         "match": "Tan W.L.", "why": "wi-fi USD 95 exceeds USD 80 cap (policy 4.2)"},
         {"code": "AMBIGUOUS_CATEGORY", "match": "S. Priya", "why": "team lunch: staff welfare vs client entertainment (policy 5.1)"},
         {"code": "LOW_CONFIDENCE",   "match": "CP-3302",  "why": "deliberately blurry scan"},
@@ -121,21 +150,74 @@ def _receipt(vendor: str, amount: float, currency: str) -> Image.Image:
 
 
 # ---------------------------------------------------------------- workbooks
+def _listing_tab(ws, title: str, pay_date: str, month: str, entries: list,
+                 opening: float) -> float:
+    """Write one monthly tab in the client's layout; return its closing
+    balance. Numbers are written as VALUES (openpyxl computes nothing, and
+    a formula with no saved result is exactly the stale-cache case the
+    reader warns about); the client's real file carries Excel's cached
+    values, so the reader sees the same thing either way."""
+    ws.title = title
+    ws["A1"] = "Name:"; ws["B1"] = "Client ABC Sdn Bhd"
+    ws["A2"] = "A/C No:"; ws["B2"] = "514712417644"
+    for col, head in zip("ABCDEFGHI", ["Date", "Cheque/Journal No.",
+                                       "Invoice / Reference No.", "Payee Name",
+                                       "Description", None,  # F: line amounts, unlabelled
+                                       "Payment (MYR)", "Balance (MYR)",
+                                       "Receipt (MYR)"]):
+        if head:
+            ws[f"{col}4"] = head
+    net = round(sum(a for _, lines in entries for _, _, a in lines), 2)
+    charges = round(LISTING_BANK_CHARGE * len(entries), 2)
+    fund = round(net + charges, 2)          # so the balance returns to the residual
+    balance = opening
+    ws["E5"] = "Balance b/f"; ws["H5"] = balance
+    balance = round(balance + fund, 2)
+    ws["A6"] = pay_date; ws["E6"] = f"Fund received for {month} payment"
+    ws["I6"] = fund; ws["H6"] = balance
+    row = 8
+    mm_yy = f"{pay_date[5:7]}{pay_date[2:4]}"
+    for n, (payee, lines) in enumerate(entries, 1):
+        total = round(sum(a for _, _, a in lines), 2)
+        ws[f"A{row}"] = pay_date; ws[f"B{row}"] = f"PV{mm_yy}/{n:02d}"
+        ws[f"D{row}"] = payee; ws[f"G{row}"] = total
+        for i, (number, desc, amount) in enumerate(lines):
+            ws[f"C{row + i}"] = number; ws[f"E{row + i}"] = desc
+            if len(lines) > 1:
+                ws[f"F{row + i}"] = amount
+        balance = round(balance - total, 2)
+        ws[f"H{row + len(lines) - 1}"] = balance
+        row += len(lines) + 1                # one blank row between entries
+    ws[f"E{row}"] = "Bank charges"; ws[f"G{row}"] = charges
+    balance = round(balance - charges, 2); ws[f"H{row}"] = balance
+    row += 1
+    ws[f"E{row}"] = "Total"; ws[f"G{row}"] = round(net + charges, 2); ws[f"I{row}"] = fund
+    row += 2
+    for label, value in [("Opening balance to utilise", opening),
+                         ("Net payment", net),
+                         ("Estimated bank charges", charges),
+                         ("Total fund to request", fund)]:
+        ws[f"A{row}"] = label; ws[f"C{row}"] = value
+        row += 1
+    row += 1
+    ws[f"A{row}"] = "Prepared by:"; ws[f"B{row}"] = "W. Chen"
+    ws[f"E{row}"] = "Reviewed by:"; ws[f"F{row}"] = "A. Rahman"
+    return balance
+
+
 def _payment_listing() -> None:
-    """The year's payment listing. July's planned payments include every
-    invoice except the planted NOT_IN_LISTING one."""
+    """The client's listing of PAST payments — a cover tab and one tab per
+    month, in the client's own layout (title block, headers on row 4,
+    grouped entries with an unlabelled line-amount column, balance b/f,
+    fund received, bank charges, totals, summary block, signatures)."""
     wb = Workbook()
-    ws = wb.active
-    ws.title = "2026 Payments"
-    ws.append(["No.", "Date", "Vendor", "Invoice No.", "Amount (RM)", "Status"])
-    running = 701
-    for vendor, number, date, amount, in_listing, _ in INVOICES:
-        if in_listing and not number.startswith("MX-2214"):
-            ws.append([f"0{running}", date, vendor, number, amount, "Planned — July"])
-            running += 1
-    # A few historical, already-paid rows so lookups have realistic noise.
-    ws.append(["0605", "2026-06-10", "Maxis Bhd", "MX-6580", 1240.00, "Paid"])
-    ws.append(["0606", "2026-06-12", "Tenaga Nasional Berhad", "TNB-5100", 3390.10, "Paid"])
+    cover = wb.active
+    cover.title = "Cover"
+    cover["A1"] = "Client ABC Sdn Bhd — FY2026 Payment Listing"
+    cover["A3"] = "One tab per month. Prepared by the AP team."
+    balance = LISTING_OPENING_BALANCE
+    for title, pay_date, month, entries in LISTING_TABS:
+        balance = _listing_tab(wb.create_sheet(), title, pay_date, month, entries, balance)
     wb.save(REF / "payment_listing.xlsx")
 
 
@@ -176,7 +258,7 @@ def main() -> None:
     BATCH.mkdir(parents=True)
     REF.mkdir(parents=True)
 
-    for vendor, number, date, amount, _in_listing, style in INVOICES:
+    for vendor, number, date, amount, paid_before, style in INVOICES:
         img = _invoice_image(vendor, number, date, amount)
         if style == "pdf":
             name = f"invoice_{number}.pdf"
@@ -189,8 +271,7 @@ def main() -> None:
             "kind": "invoice",
             "fields": {"vendor": vendor, "invoice_number": number,
                        "date": date, "amount": amount, "currency": "MYR"},
-            # MX-2214 is excluded from the listing on purpose (see _payment_listing)
-            "in_listing": _in_listing and number != "MX-2214",
+            "paid_before": paid_before,
         }
 
     for i, (claimant, desc, amount, currency, shop) in enumerate(CLAIMS, 1):
