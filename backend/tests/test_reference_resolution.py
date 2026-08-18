@@ -284,6 +284,68 @@ async def test_single_document_recheck_writes_no_batch_count(monkeypatch):
     assert notes == []
 
 
+@pytest.mark.asyncio
+async def test_oversized_listing_is_refused_before_it_is_opened(monkeypatch, tmp_path):
+    import json
+    from app.pipeline import listing_agent
+    refs = tmp_path / "reference"; refs.mkdir()
+    (refs / "payment_listing.xlsx").write_bytes(b"x" * 100)
+    (refs / reference.MANIFEST).write_text(json.dumps({"payment_listing": "payment_listing.xlsx"}))
+    monkeypatch.setattr(reference, "MAX_LISTING_BYTES", 50)
+    opened = []
+    monkeypatch.setattr(reference, "load_workbook", lambda *a, **k: opened.append(1))
+    with pytest.raises(listing_agent.ListingUnreadable):
+        await reference.load_payment_listing(refs)
+    assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_same_reference_on_two_tabs_is_ambiguous_unless_the_vendor_decides(monkeypatch):
+    """A year of monthly tabs can hold the same invoice number twice: two
+    vendors' numbering schemes collide. Read end to end (both tabs
+    ingested), the checks must ask, not pick — unless the vendor decides."""
+    from openpyxl import Workbook
+    from app.pipeline import checks, listing_agent
+    from app.pipeline.listing_agent import ColumnRoles, EntrySpan, SheetReading
+
+    wb = Workbook()
+    for i, (title, payee) in enumerate([("Apr'26", "Howzat Creation"),
+                                        ("Jul'26", "Good News Resources")]):
+        ws = wb.active if i == 0 else wb.create_sheet()
+        ws.title = title
+        for col, head in zip("ABCDF", ["Date", "PV", "Invoice", "Payee", "Payment"]):
+            ws[f"{col}1"] = head
+        ws["A2"] = f"2026-0{4 if i == 0 else 7}-23"; ws["B2"] = f"PV{i}"
+        ws["C2"] = "4115"; ws["D2"] = payee; ws["F2"] = 72.0 + i
+    reading = SheetReading(
+        is_payment_sheet=True,
+        columns=ColumnRoles(date="A", voucher_no="B", invoice_no="C", payee="D", payment="F"),
+        entries=[EntrySpan(first_row=2, last_row=2, kind="payment")], why="t")
+
+    class _Agent:
+        async def run(self, *a, **k):
+            class R:
+                output = reading
+            return R()
+    monkeypatch.setattr(listing_agent, "create_agent", lambda *a, **k: _Agent())
+    result = await listing_agent.ingest_workbook(wb)
+    assert {r["sheet"] for r in result.rows} == {"Apr'26", "Jul'26"}
+
+    async def fake_listing(*a, **k):
+        return result.rows
+    monkeypatch.setattr(reference, "load_payment_listing", fake_listing)
+    monkeypatch.setattr(reference, "load_policy_clauses", lambda *a, **k: [])
+    docs = [_Doc("a", "4115", 72.0), _Doc("b", "4115", 73.0)]
+    docs[0].fields["vendor"] = "Unrelated Trading"
+    docs[1].fields["vendor"] = "Good News Resources Sdn Bhd"
+    flags = await checks.run_checks(docs)
+    codes = {(fl["document_id"], fl["code"]) for fl in flags}
+    assert ("a", "LISTING_AMBIGUOUS") in codes and ("a", "ALREADY_PAID") not in codes
+    assert ("b", "ALREADY_PAID") in codes and ("b", "LISTING_AMBIGUOUS") not in codes
+    paid = next(fl for fl in flags if fl["document_id"] == "b" and fl["code"] == "ALREADY_PAID")
+    assert "tab Jul'26 row 2" in paid["reason"]
+
+
 def test_each_run_keeps_its_own_copy_of_the_reference_files(monkeypatch, tmp_path):
     """The files are copied ONCE, when the run starts. Every later touch —
     flag decisions, corrections, output rebuilds — reads the run's copy

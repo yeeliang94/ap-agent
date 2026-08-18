@@ -68,6 +68,21 @@ MAX_SHEET_ROWS = 300
 # it before walking a million cells.
 MAX_SHEET_CELLS = 200_000
 
+# The other input boundaries, each a refusal rather than a quiet cut: a
+# listing wider than this is not a listing; a workbook with this many tabs
+# would cost that many AI reads for one run.
+MAX_SHEET_COLUMNS = 60
+MAX_SHEETS = 40
+# Cell texts (invoice numbers, payees, notes) are capped on the flat rows so
+# a runaway cell never lands in a flag or an output. The grid the AI sees
+# is truncated separately (80 characters per cell).
+MAX_CELL_TEXT = 200
+
+# Cell text is sent to the model as DATA. The model answers only
+# coordinates, schema-checked (ColumnRoles / EntrySpan), so text hidden in a
+# cell cannot become an instruction the pipeline acts on: nothing it says
+# reaches anything but the Activity tab (observations) — and that is text.
+
 # Reconciliation tolerance: real sheets round at 2dp, so half a cent of
 # accumulated drift per comparison is noise, anything more is a misread.
 TOLERANCE = 0.02
@@ -199,7 +214,7 @@ def _text(ws, col: str | None, row: int) -> str:
     if not col:
         return ""
     v = ws[f"{col}{row}"].value
-    return str(v).strip() if v is not None and str(v).strip() else ""
+    return str(v).strip()[:MAX_CELL_TEXT] if v is not None and str(v).strip() else ""
 
 
 def _texts(ws, col: str | None, span: EntrySpan) -> list[str]:
@@ -243,8 +258,46 @@ def content_rows(ws) -> list[int]:
         raise ListingUnreadable(
             f"Sheet {ws.title} holds {len(cells)} cells (formatted or filled) "
             f"— more than the {MAX_SHEET_CELLS} this reader supports.")
-    return sorted({r for (r, _c), cell in cells.items()
-                   if cell.value is not None and str(cell.value).strip()})
+    filled = [(r, c) for (r, c), cell in cells.items()
+              if cell.value is not None and str(cell.value).strip()]
+    widest = max((c for _r, c in filled), default=0)
+    if widest > MAX_SHEET_COLUMNS:
+        raise ListingUnreadable(
+            f"Sheet {ws.title} has content in column {widest} — wider than "
+            f"the {MAX_SHEET_COLUMNS} columns this reader supports.")
+    return sorted({r for r, _c in filled})
+
+
+def stale_formula_cells(ws_values, ws_formulas) -> list[str]:
+    """Coordinates of formula cells that carry NO cached value.
+
+    ws_values is the sheet opened data_only (what the audit reads);
+    ws_formulas the same sheet opened normally. A workbook saved without
+    recalculating (or written by a tool that computes nothing) stores the
+    formula but no result, so data_only shows None where a balance should
+    be — indistinguishable from an empty cell unless we look at both.
+    """
+    if ws_formulas is None:
+        return []
+    stale = []
+    cells = getattr(ws_formulas, "_cells", None)
+    if cells is None:
+        cells = {(c.row, c.column): c for row in ws_formulas.iter_rows() for c in row}
+    for (row, col), cell in sorted(cells.items()):
+        v = cell.value
+        is_formula = (isinstance(v, str) and v.startswith("=")) or \
+            getattr(cell, "data_type", None) == "f"
+        if is_formula and ws_values.cell(row=row, column=col).value is None:
+            stale.append(cell.coordinate)
+    return stale
+
+
+def _tab_label(ws) -> str:
+    """'Tab X' — plus '(hidden tab)' when Excel would not show it. Hidden
+    tabs are read like any other (a hidden month is still a month), but a
+    reviewer opening the workbook needs to know why they cannot see it."""
+    state = getattr(ws, "sheet_state", "visible")
+    return f"Tab {ws.title}" + ("" if state == "visible" else " (hidden tab)")
 
 
 def grid_text(ws) -> str:
@@ -539,11 +592,27 @@ def _observation_notes(ws, reading: SheetReading) -> list[tuple[str, str]]:
     obs = [o.strip()[:200] for o in reading.observations if o.strip()]
     if not obs:
         return []
-    return [("INFO", f"Tab {ws.title}: AI observations — " + "; ".join(obs) + ".")]
+    return [("INFO", f"{_tab_label(ws)}: AI observations — " + "; ".join(obs) + ".")]
 
 
-async def read_sheet(ws) -> SheetResult:
+def _stale_notes(ws, ws_formulas) -> list[tuple[str, str]]:
+    stale = stale_formula_cells(ws, ws_formulas)
+    if not stale:
+        return []
+    shown = ", ".join(stale[:8]) + (f" … ({len(stale)} in all)" if len(stale) > 8 else "")
+    return [("WARNING",
+             f"{_tab_label(ws)}: {len(stale)} formula cell(s) have no saved value "
+             f"({shown}) — the workbook was saved without recalculating. Those "
+             "cells read as empty, so the audit could not use them. Open the "
+             "file in Excel, let it recalculate, and save it back.")]
+
+
+async def read_sheet(ws, ws_formulas=None) -> SheetResult:
     """The reason/act loop for one sheet.
+
+    ws is the sheet opened data_only (numbers where formulas were);
+    ws_formulas, when given, is the same sheet opened normally, used only
+    to name formula cells whose value was never computed.
 
     Returns the flat rows (none for a non-payment sheet) and the notes the
     Activity tab shows. Raises ListingUnreadable only when the STRUCTURE
@@ -551,6 +620,7 @@ async def read_sheet(ws) -> SheetResult:
     with a warning note.
     """
     grid = grid_text(ws)
+    stale_notes = _stale_notes(ws, ws_formulas)
     agent = create_agent("judge", SheetReading, _INSTRUCTIONS, temperature=0)
     feedback = ""
     problems: list[tuple[str, str]] = []
@@ -580,13 +650,13 @@ async def read_sheet(ws) -> SheetResult:
                 # WARNING for the reviewer, not a quiet note.
                 return SheetResult(notes=[(
                     "WARNING",
-                    f"Tab {ws.title}: SKIPPED although it carries payment-style "
+                    f"{_tab_label(ws)}: SKIPPED although it carries payment-style "
                     f"headers — the AI twice judged it holds no payment records "
                     f"({reading.why!r}). If this tab lists payments, no invoice "
                     "was checked against it: open it and confirm.")]
                     + _observation_notes(ws, reading))
             return SheetResult(notes=[(
-                "INFO", f"Tab {ws.title}: skipped, not a payment sheet — "
+                "INFO", f"{_tab_label(ws)}: skipped, not a payment sheet — "
                         f"AI: {reading.why!r}.")] + _observation_notes(ws, reading))
         try:
             problems = audit_reading(ws, reading)
@@ -601,7 +671,7 @@ async def read_sheet(ws) -> SheetResult:
             n_entries = sum(1 for s in reading.entries if s.kind == "payment")
             notes = [(
                 "INFO",
-                f"Tab {ws.title}: payment sheet — {_describe_columns(reading.columns)}; "
+                f"{_tab_label(ws)}: payment sheet — {_describe_columns(reading.columns)}; "
                 f"{n_entries} payment entr{'y' if n_entries == 1 else 'ies'} → "
                 f"{len(rows)} invoice row(s); confirmed on round {round_no}"
                 + (f" (round 1 was corrected: {first_objection})"
@@ -610,12 +680,12 @@ async def read_sheet(ws) -> SheetResult:
             if arithmetic:
                 notes.append((
                     "WARNING",
-                    f"Tab {ws.title}: the reading's structure verified but "
+                    f"{_tab_label(ws)}: the reading's structure verified but "
                     f"{len(arithmetic)} arithmetic step(s) in the file did not "
                     f"reconcile after {MAX_ROUNDS} rounds; accepted so the "
                     "duplicate-payment check still runs. Look at: "
                     + "; ".join(arithmetic)))
-            notes += _observation_notes(ws, reading)
+            notes += stale_notes + _observation_notes(ws, reading)
             return SheetResult(rows=rows, notes=notes)
         log.info("sheet %r round %d: %d problem(s): %s",
                  ws.title, round_no, len(problems),
@@ -636,11 +706,20 @@ async def read_sheet(ws) -> SheetResult:
     )
 
 
-async def ingest_workbook(wb) -> SheetResult:
-    """Every payment row from every sheet, plus the per-tab notes."""
+async def ingest_workbook(wb, wb_formulas=None) -> SheetResult:
+    """Every payment row from every sheet, plus the per-tab notes.
+
+    wb is opened data_only; wb_formulas (optional) is the same file opened
+    normally, so uncomputed formula cells can be named per tab.
+    """
+    if len(wb.worksheets) > MAX_SHEETS:
+        raise ListingUnreadable(
+            f"The payment listing has {len(wb.worksheets)} tabs — more than "
+            f"the {MAX_SHEETS} this reader supports.")
     total = SheetResult()
     for ws in wb.worksheets:
-        one = await read_sheet(ws)
+        twin = wb_formulas[ws.title] if wb_formulas is not None else None
+        one = await read_sheet(ws, twin)
         total.rows.extend(one.rows)
         total.notes.extend(one.notes)
     if not total.rows:

@@ -170,20 +170,35 @@ def _open(role: str, refs: Path):
 # a later run on an unchanged file can still say how it was read.
 _LISTING_CACHE: dict[str, dict] = {}
 
+# A payment listing larger than this is refused before it is opened. The
+# real client file is well under a megabyte; the same ceiling as a single
+# uploaded document keeps a wrong file from exhausting memory.
+MAX_LISTING_BYTES = config.MAX_FILE_MB * 1024 * 1024
+
 
 async def _listing_entry(refs: Path) -> dict:
-    data = _role_file(refs, "payment_listing").read_bytes()
+    path = _role_file(refs, "payment_listing")
+    size = path.stat().st_size
+    if size > MAX_LISTING_BYTES:
+        raise listing_agent.ListingUnreadable(
+            f"The payment listing is {size / 1024 / 1024:.1f} MB — larger than "
+            f"the {config.MAX_FILE_MB} MB this reader supports.")
+    data = path.read_bytes()
     key = hashlib.sha256(data).hexdigest()
     if key in _LISTING_CACHE:
         return _LISTING_CACHE[key]
 
     # data_only=True: balance columns are usually formulas, and the
-    # audit needs their cached values, not "=J5-K5" strings.
+    # audit needs their cached values, not "=J5-K5" strings. The second
+    # open keeps the formulas, so a formula whose value was never saved
+    # can be named instead of silently reading as an empty cell.
     wb = load_workbook(io.BytesIO(data), data_only=True)
+    wb_formulas = load_workbook(io.BytesIO(data))
     try:
-        result = await listing_agent.ingest_workbook(wb)
+        result = await listing_agent.ingest_workbook(wb, wb_formulas)
     finally:
         wb.close()
+        wb_formulas.close()
     entry = {"rows": result.rows, "notes": result.notes}
     _LISTING_CACHE[key] = entry
     return entry

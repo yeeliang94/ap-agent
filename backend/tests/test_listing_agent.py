@@ -350,6 +350,74 @@ def test_overlong_sheet_fails_loudly():
         listing_agent.grid_text(ws)
 
 
+def test_too_many_columns_fails_loudly():
+    wb = Workbook(); ws = wb.active
+    from openpyxl.utils import get_column_letter
+    ws[f"{get_column_letter(listing_agent.MAX_SHEET_COLUMNS + 1)}1"] = "x"
+    with pytest.raises(ListingUnreadable):
+        listing_agent.grid_text(ws)
+
+
+@pytest.mark.asyncio
+async def test_too_many_sheets_fails_before_any_ai_call(monkeypatch):
+    wb = Workbook()
+    for i in range(listing_agent.MAX_SHEETS):
+        wb.create_sheet(f"S{i}")
+    agent = _ScriptedAgent([])
+    monkeypatch.setattr(listing_agent, "create_agent", lambda *a, **k: agent)
+    with pytest.raises(ListingUnreadable):
+        await listing_agent.ingest_workbook(wb)
+    assert agent.prompts == []
+
+
+def test_long_cell_texts_are_capped_on_the_flat_rows():
+    """Grid text already truncates what the AI sees; the flattened rows must
+    not carry a 10,000-character 'invoice number' into flags and outputs."""
+    wb = Workbook(); ws = wb.active; ws.title = "T"
+    ws["A2"] = "2026-07-23"; ws["B2"] = "PV1"; ws["C2"] = "X" * 5000
+    ws["D2"] = "V" * 5000; ws["F2"] = 10.0
+    reading = SheetReading(
+        is_payment_sheet=True,
+        columns=ColumnRoles(date="A", voucher_no="B", invoice_no="C",
+                            payee="D", payment="F"),
+        entries=[EntrySpan(first_row=2, last_row=2, kind="payment")], why="t")
+    row = flatten_reading(ws, reading)[0]
+    assert len(row["invoice_number"]) == listing_agent.MAX_CELL_TEXT
+    assert len(row["vendor"]) == listing_agent.MAX_CELL_TEXT
+
+
+@pytest.mark.asyncio
+async def test_stale_formula_caches_are_named_not_silent(monkeypatch):
+    """A workbook saved without recalculating stores formulas with no
+    cached value; data_only reading gives None where the balance should
+    be, which silently weakens the balance walk. Name the cells."""
+    import io
+    from openpyxl import load_workbook
+    wb, ws = _icmr_sheet()
+    ws["H9"] = "=H6-G8"; ws["H10"] = "=H9-G10"      # formulas, never computed
+    buf = io.BytesIO(); wb.save(buf)
+    values = load_workbook(io.BytesIO(buf.getvalue()), data_only=True)
+    formulas = load_workbook(io.BytesIO(buf.getvalue()))
+    assert values["Jul'26"]["H9"].value is None      # the stale-cache shape
+    agent = _ScriptedAgent([GOOD_READING] * listing_agent.MAX_ROUNDS)
+    monkeypatch.setattr(listing_agent, "create_agent", lambda *a, **k: agent)
+    result = await listing_agent.read_sheet(values["Jul'26"], formulas["Jul'26"])
+    stale = [t for lvl, t in result.notes if lvl == "WARNING" and "no saved value" in t]
+    assert len(stale) == 1 and "H9" in stale[0] and "H10" in stale[0]
+    assert "recalculate" in stale[0]
+
+
+@pytest.mark.asyncio
+async def test_hidden_tab_is_read_and_said_to_be_hidden(monkeypatch):
+    wb, ws = _icmr_sheet()
+    ws.sheet_state = "hidden"
+    agent = _ScriptedAgent([GOOD_READING])
+    monkeypatch.setattr(listing_agent, "create_agent", lambda *a, **k: agent)
+    result = await listing_agent.read_sheet(ws)
+    assert result.rows                       # hidden is not skipped
+    assert "(hidden tab)" in result.notes[0][1]
+
+
 def test_formatted_but_empty_rows_do_not_count():
     """A grid formatted far below the data is not a long sheet. Excel's
     max_row says 500; the content says 1."""
