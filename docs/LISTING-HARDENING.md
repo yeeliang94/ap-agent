@@ -218,6 +218,20 @@ Known and accepted (say so, don't hide it):
   traceback in the server log) so a bug in the draft can never withhold the
   bank block.
 
+### Second peer review (same day) — nine findings, all confirmed, all fixed
+
+| # | Finding | Fix |
+|---|---------|-----|
+| 1 | Last flag decided, output rebuild fails → the gate opened on outputs built *before* the decision (a rejected invoice still in the bank rows and draft) | Outputs withdrawn before rebuilding; stay empty if it fails; regression test |
+| 2 | Sparse coordinates: a value in Excel's last row made `grid_text` create a million cell objects; AI spans were unbounded before `range()` | Nothing walks a rectangle any more (stored cells only); content below row 5,000 refused; spans past the last content row are a STRUCTURE problem before any range is built |
+| 3 | `"paid" in "Unpaid"` → ALREADY_PAID on an unpaid row | `is_paid_status`: negative words first, positive words required, unknown = not paid |
+| 4 | `payment=G, line_amount=G` passed and mis-paired amounts | Schema validator: every role a different column (model re-answers) |
+| 5 | Text dates like `23/07/2026` silently unread → wrong draft month / voucher code | Common day-first text formats parsed; dated entries with no readable date refuse the layout |
+| 6 | Draft signatures / bank charge read from live Settings on every rebuild | Snapshotted at run start; every rebuild uses the run's snapshot; older runs fall back to today's |
+| 7 | `_num("NaN")` → `nan` sailed through every comparison | Non-finite → not a number |
+| 8 | Tab-name uniqueness case-sensitive; openpyxl silently renamed and the summary named a tab that did not exist | Case-insensitive uniqueness; the summary reports the tab the workbook actually holds |
+| 9 | React key `payee` not unique when one entry per invoice | Key = voucher + invoice numbers |
+
 ## Next (as originally written, kept for the reasoning; all built above)
 
 ### N1. Write new entries in the client's own layout

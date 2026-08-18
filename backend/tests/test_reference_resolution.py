@@ -423,3 +423,25 @@ def test_each_run_keeps_its_own_copy_of_the_reference_files(monkeypatch, tmp_pat
     reference.ensure_snapshot(refs0, "https://x/AP")
     reference.ensure_snapshot(refs0, "https://x/AP")
     assert calls == {"list": 3, "get": 9}
+
+
+def test_status_words_are_read_as_paid_or_not():
+    from app.pipeline.checks import is_paid_status
+    assert is_paid_status("Paid") and is_paid_status("PAID 23/7") and is_paid_status("Settled")
+    for s in ("Unpaid", "Not paid", "Not yet paid", "Pending", "Planned — July",
+              "Outstanding", "Cancelled", "", None, "??"):
+        assert not is_paid_status(s), s
+
+
+@pytest.mark.asyncio
+async def test_unpaid_status_row_does_not_raise_already_paid(monkeypatch):
+    from app.pipeline import checks
+    listing = [{"sheet": "T", "row": 2, "no": "", "date": "2026-07-01", "vendor": "Acme",
+                "invoice_number": "INV-1", "amount": 10.0, "status": "Unpaid", "note": ""}]
+
+    async def fake_listing(*a, **k):
+        return listing
+    monkeypatch.setattr(reference, "load_payment_listing", fake_listing)
+    monkeypatch.setattr(reference, "load_policy_clauses", lambda *a, **k: [])
+    flags = await checks.run_checks([_Doc("a", "INV-1", 10.0)])
+    assert "ALREADY_PAID" not in {f["code"] for f in flags}

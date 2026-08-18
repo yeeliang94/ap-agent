@@ -20,7 +20,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from .checks import _norm, _vendor_matches
-from .listing_agent import ColumnRoles, SheetReading, _num, _text, _texts
+from .listing_agent import ColumnRoles, SheetReading, _num, _text, _texts, content_cells
 
 # What the writer cannot do without. Description, line amount, balance and
 # receipt columns are optional: their absence changes what is written, not
@@ -80,13 +80,27 @@ class ListingLayout:
         )
 
 
+# Text dates a client sheet may hold. Day-first where ambiguous (23/07/2026):
+# the client is Malaysian, and 07/23/2026 would fail to parse rather than
+# be misread. Real Excel date cells arrive as datetime and skip all this.
+_DATE_TEXT_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y",
+                      "%d.%m.%Y", "%d.%m.%y", "%d %b %Y", "%d-%b-%Y", "%d-%b-%y",
+                      "%d %B %Y", "%Y/%m/%d", "%Y.%m.%d", "%d %b %y")
+
+
 def _as_date(value) -> date | None:
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
+    text = str(value).strip()
+    for fmt in _DATE_TEXT_FORMATS:
+        try:
+            return datetime.strptime(text[:19] if "T" in text else text, fmt).date()
+        except ValueError:
+            continue
     try:
-        return date.fromisoformat(str(value).strip()[:10])
+        return datetime.fromisoformat(text).date()  # '2026-07-23 00:00:00' and friends
     except ValueError:
         return None
 
@@ -134,20 +148,31 @@ def learn_layout(ws, reading: SheetReading) -> ListingLayout:
             break
 
     last_date: date | None = None
+    unreadable_dates: list[str] = []
     payees: dict[str, str] = {}
     for span in payments:
         for row in range(span.first_row, span.last_row + 1):
-            d = _as_date(ws[f"{cols.date}{row}"].value) if _text(ws, cols.date, row) else None
-            if d and (last_date is None or d > last_date):
+            raw = _text(ws, cols.date, row)
+            if not raw:
+                continue
+            d = _as_date(ws[f"{cols.date}{row}"].value)
+            if d is None:
+                unreadable_dates.append(raw)
+            elif last_date is None or d > last_date:
                 last_date = d
         for spelling in _texts(ws, cols.payee, span):
             payees.setdefault(_norm(spelling), spelling)
+    if last_date is None and unreadable_dates:
+        # Dated entries whose dates cannot be read: the draft month and the
+        # voucher month code would silently come out wrong. Refuse.
+        shown = ", ".join(repr(t) for t in unreadable_dates[:3])
+        raise LayoutIncomplete(
+            f"tab {ws.title}: the payment dates could not be read ({shown}) — "
+            "the draft's month and voucher numbers depend on them")
 
-    title_cells: list[tuple[str, str]] = []
-    for row in ws.iter_rows(min_row=1, max_row=reading.header_row - 1):
-        for c in row:
-            if c.value is not None and str(c.value).strip():
-                title_cells.append((c.coordinate, str(c.value).strip()))
+    title_cells = [(cell.coordinate, str(cell.value).strip())
+                   for (r, _c), cell in sorted(content_cells(ws).items())
+                   if r < reading.header_row]
 
     widths = {letter: dim.width for letter, dim in ws.column_dimensions.items()
               if dim.width}

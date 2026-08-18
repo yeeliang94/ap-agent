@@ -159,8 +159,10 @@ async def process_run(run_id: str, workspace: Path) -> None:
         # ---- draft outputs (regenerated after review decisions) --------
         started = time.monotonic()
         try:
-            run.outputs = await output.build_outputs(docs, excluded_doc_ids=set(),
-                                                     refs=refs)
+            from ..settings_store import draft_settings
+            run.outputs = await output.build_outputs(
+                docs, excluded_doc_ids=set(), refs=refs,
+                draft_settings=draft_settings(run.snapshot))
         except Exception as exc:
             telemetry.record_failure(db, run_id, "output", "OUTPUT_FAILED",
                                      "Could not build the copy-ready output", exc)

@@ -32,16 +32,30 @@ DEFAULTS = {
 }
 
 
-def draft_settings() -> dict:
+DRAFT_KEYS = ("draft_prepared_by", "draft_reviewed_by", "draft_bank_charge")
+
+
+def draft_settings_raw() -> dict[str, str]:
+    """The three draft settings as stored — what a run snapshots at start."""
+    return {key: get_setting(key) for key in DRAFT_KEYS}
+
+
+def draft_settings(snapshot: dict | None = None) -> dict:
     """The listing writer's inputs, typed: names as text, the charge as a
-    Decimal per payment."""
+    Decimal per payment. Read from the run's snapshot when it has one, so
+    a later edit in Settings never changes an older run's draft; runs
+    created before the snapshot carried these fall back to today's values.
+    """
     from decimal import Decimal, InvalidOperation
+    raw = (snapshot or {}).get("draft_settings") or draft_settings_raw()
     try:
-        charge = Decimal(get_setting("draft_bank_charge") or "0")
+        charge = Decimal(raw.get("draft_bank_charge") or "0")
+        if not charge.is_finite():
+            raise InvalidOperation
     except InvalidOperation:
         charge = Decimal("0")
-    return {"prepared_by": get_setting("draft_prepared_by"),
-            "reviewed_by": get_setting("draft_reviewed_by"),
+    return {"prepared_by": raw.get("draft_prepared_by", ""),
+            "reviewed_by": raw.get("draft_reviewed_by", ""),
             "bank_charge": charge}
 
 

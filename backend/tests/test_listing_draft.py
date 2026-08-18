@@ -386,3 +386,45 @@ def test_draft_keeps_macros_for_xlsm():
     assert d.suffix == ".xlsm"
     back = load_workbook(io.BytesIO(d.data), keep_vba=True)
     assert back["Aug'26 (DRAFT)"]["C8"].value == "A-1"
+
+
+def test_text_dates_in_common_formats_are_read():
+    from datetime import date
+    for text in ("23/07/2026", "23-07-2026", "23.07.2026", "23 Jul 2026", "23-Jul-26",
+                 "2026-07-23", "2026-07-23 00:00:00"):
+        assert listing_layout._as_date(text) == date(2026, 7, 23), text
+    assert listing_layout._as_date("someday") is None
+
+
+def test_unreadable_payment_dates_refuse_the_layout():
+    """Dated entries whose dates cannot be read would give the draft the
+    wrong month and voucher code — refuse rather than fall back quietly."""
+    wb, ws, reading = _jul()
+    for r in (8, 11, 13):
+        ws[f"A{r}"] = "Q3 wk2"
+    with pytest.raises(listing_layout.LayoutIncomplete, match="dates could not be read"):
+        listing_layout.learn_layout(ws, reading)
+
+
+def test_draft_title_is_unique_case_insensitively_and_reports_the_real_tab():
+    from datetime import date
+    assert listing_draft.draft_title("Jul'26", date(2026, 8, 1), ["AUG'26 (DRAFT)"]) \
+        == "Aug'26 (DRAFT 2)"
+    wb, ws, reading = _jul()
+    wb.create_sheet("AUG'26 (DRAFT)")
+    layout = listing_layout.learn_layout(ws, reading)
+    buf = io.BytesIO(); wb.save(buf)
+    d = listing_draft.build_draft(buf.getvalue(), layout, [], [_Doc("a", "Acme", "A-1", 1.0)], SETTINGS)
+    assert d.tab == "Aug'26 (DRAFT 2)"
+    assert d.tab in load_workbook(io.BytesIO(d.data)).sheetnames
+
+
+def test_draft_settings_come_from_the_run_snapshot():
+    from decimal import Decimal
+    from app import settings_store as store
+    snap = {"draft_settings": {"draft_prepared_by": "Then", "draft_reviewed_by": "R",
+                               "draft_bank_charge": "0.50"}}
+    got = store.draft_settings(snap)
+    assert got == {"prepared_by": "Then", "reviewed_by": "R", "bank_charge": Decimal("0.50")}
+    # a run created before the snapshot carried these falls back to today's
+    assert "bank_charge" in store.draft_settings({"client_name": "x"})

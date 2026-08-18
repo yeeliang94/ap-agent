@@ -508,7 +508,7 @@ function ListingDraftCard({
       )}
       <ul className="muted">
         {draft.entries.map((e) => (
-          <li key={e.payee}>
+          <li key={`${e.voucher}|${e.invoices.map((i) => i.number).join(",")}`}>
             {e.voucher || "—"} · {e.payee} · RM {e.total}
             {e.invoices.length > 1 ? ` (${e.invoices.map((i) => i.number).join(", ")})` : ` (${e.invoices[0].number})`}
           </li>

@@ -83,7 +83,8 @@ def draft_dir(refs: Path) -> Path:
     return refs.parent / "draft"
 
 
-async def _draft_listing(approved: list, refs: Path | None) -> dict:
+async def _draft_listing(approved: list, refs: Path | None,
+                         draft_settings: dict | None) -> dict:
     """Next month's listing entries as a draft tab on a copy of the client
     workbook. Returns the JSON-ready summary (with the file name), or
     {"skipped": reason} — the draft is an extra deliverable, so a reason it
@@ -96,11 +97,13 @@ async def _draft_listing(approved: list, refs: Path | None) -> dict:
         if layout is None:
             return {"skipped": "the listing's layout could not be learned from its "
                                "latest tab (see the Activity tab)"}
-        from ..settings_store import draft_settings
+        if draft_settings is None:  # a caller with no run snapshot: today's values
+            from ..settings_store import draft_settings as current
+            draft_settings = current()
         source = reference.listing_file(refs)
         draft = listing_draft.build_draft(
             source.read_bytes(), layout, await reference.load_listing_vouchers(refs),
-            approved, draft_settings(), suffix=source.suffix.lower())
+            approved, draft_settings, suffix=source.suffix.lower())
     except listing_draft.DraftError as exc:
         return {"skipped": str(exc)}
     except Exception as exc:  # a bug here must not hide the bank block
@@ -115,8 +118,10 @@ async def _draft_listing(approved: list, refs: Path | None) -> dict:
 
 
 async def build_outputs(docs: list, excluded_doc_ids: set[str],
-                        refs=None) -> dict:
-    """refs: the run's private copy of the reference files (reference.run_refs)."""
+                        refs=None, draft_settings: dict | None = None) -> dict:
+    """refs: the run's private copy of the reference files (reference.run_refs).
+    draft_settings: the run's snapshot of the listing draft's signatures and
+    bank charge (settings_store.draft_settings(run.snapshot))."""
     listing = await reference.load_payment_listing(refs)
     headers = reference.load_maybank_headers(refs)
 
@@ -196,5 +201,5 @@ async def build_outputs(docs: list, excluded_doc_ids: set[str],
         },
         # Next month's listing entries, drafted on a copy of the workbook —
         # or {"skipped": why}.
-        "listing_draft": await _draft_listing(approved, refs),
+        "listing_draft": await _draft_listing(approved, refs, draft_settings),
     }

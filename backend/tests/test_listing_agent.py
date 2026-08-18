@@ -641,3 +641,39 @@ def test_grid_text_labels_cells_with_coordinates():
     assert "Sheet name: \"Jul'26\"" in grid
     assert "B8: PV0726/01" in grid
     assert "G8: 15616.8" in grid
+
+
+def test_a_stray_value_far_below_the_listing_is_refused_not_walked():
+    """A value typed into a far-away row (or Excel's last row) must not make
+    the reader build a cell for every row in between: nothing here walks a
+    rectangle, and content below MAX_SHEET_ROW_INDEX is refused outright."""
+    wb = Workbook(); ws = wb.active
+    ws["A1"] = "x"; ws["A4000"] = "y"          # sparse but within bounds
+    before = len(ws._cells)
+    grid = listing_agent.grid_text(ws)
+    assert "A4000: y" in grid and len(ws._cells) == before   # no cells created
+    ws["A1048576"] = "z"                        # Excel's last row
+    with pytest.raises(ListingUnreadable, match="row 1048576"):
+        listing_agent.grid_text(ws)
+
+
+def test_ai_spans_beyond_the_sheet_are_a_problem_not_a_range():
+    from app.pipeline.listing_agent import STRUCTURE, audit_reading
+    wb, ws = _icmr_sheet()
+    huge = GOOD_READING.model_copy(update={"entries": GOOD_READING.entries + [
+        EntrySpan(first_row=30, last_row=2_000_000_000, kind="other")]})
+    problems = audit_reading(ws, huge)     # returns promptly, no giant set
+    assert any(k == STRUCTURE and "runs past the sheet" in t for k, t in problems)
+
+
+def test_nan_and_inf_are_not_amounts():
+    assert listing_agent._num("NaN") is None
+    assert listing_agent._num("inf") is None
+    assert listing_agent._num(float("nan")) is None
+
+
+def test_two_roles_on_one_column_are_rejected_at_schema():
+    with pytest.raises(ValidationError, match="two roles"):
+        ColumnRoles(payment="G", line_amount="G")
+    with pytest.raises(ValidationError):
+        ColumnRoles(payment="g", balance="G")     # case-insensitively too

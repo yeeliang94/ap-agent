@@ -44,12 +44,13 @@ a number.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ..model_layer import USAGE_LIMITS, create_agent
 
@@ -73,6 +74,12 @@ MAX_SHEET_CELLS = 200_000
 # would cost that many AI reads for one run.
 MAX_SHEET_COLUMNS = 60
 MAX_SHEETS = 40
+# The highest ROW INDEX content may sit on. The 300-content-row limit alone
+# does not stop a stray value typed into Excel's last row (1,048,576): any
+# walk "from row 1 to that row" would then create a million cell objects.
+# Nothing here ever iterates a rectangle — but the AI's spans and the
+# per-column reads do walk row ranges, so those are bounded by this too.
+MAX_SHEET_ROW_INDEX = 5_000
 # Cell texts (invoice numbers, payees, notes) are capped on the flat rows so
 # a runaway cell never lands in a flag or an output. The grid the AI sees
 # is truncated separately (80 characters per cell).
@@ -101,7 +108,27 @@ _COL = r"^[A-Za-z]{1,3}$"
 
 
 class ColumnRoles(BaseModel):
-    """Which column letter plays which role on ONE sheet. None = absent."""
+    """Which column letter plays which role on ONE sheet. None = absent.
+
+    Every named role must be a DIFFERENT column: payment=G and
+    line_amount=G would make a grouped entry's total pass as its first
+    invoice's line amount. Rejected at the schema layer, so the model
+    re-answers rather than the audit having to reason about it."""
+
+    @model_validator(mode="after")
+    def _distinct_columns(self):
+        seen: dict[str, str] = {}
+        for role, letter in self.model_dump().items():
+            if letter is None:
+                continue
+            key = letter.upper()
+            if key in seen:
+                raise ValueError(
+                    f"column {letter} is given two roles ({seen[key]} and {role}) "
+                    "— each role must be a different column")
+            seen[key] = role
+        return self
+
     date: str | None = Field(default=None, pattern=_COL)
     voucher_no: str | None = Field(default=None, pattern=_COL,
                                    description="PV / cheque / journal number column")
@@ -219,14 +246,19 @@ def _num(value) -> float | None:
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
-    s = _CURRENCY_PREFIX.sub("", str(value).strip()).replace(",", "")
-    if s.startswith("(") and s.endswith(")"):
-        s = "-" + s[1:-1]
-    try:
-        return float(s)
-    except ValueError:
-        return None
+        f = float(value)
+    else:
+        s = _CURRENCY_PREFIX.sub("", str(value).strip()).replace(",", "")
+        if s.startswith("(") and s.endswith(")"):
+            s = "-" + s[1:-1]
+        try:
+            f = float(s)
+        except ValueError:
+            return None
+    # float() also accepts 'nan' and 'inf'. A NaN amount compares unequal
+    # to everything, so it would sail through every sum and mismatch check
+    # — treat it as "not a number", which is what it is.
+    return f if math.isfinite(f) else None
 
 
 def _text(ws, col: str | None, row: int) -> str:
@@ -261,14 +293,14 @@ def _iso_date(value) -> str:
     return str(value).strip()
 
 
-def content_rows(ws) -> list[int]:
-    """Row numbers that hold at least one non-empty value.
+def content_cells(ws) -> dict[tuple[int, int], object]:
+    """{(row, column): cell} for every cell holding a non-empty value —
+    and the place every size limit is enforced.
 
-    Excel's max_row counts rows that merely carry a fill or a border; a
-    client's green grid formatted to row 500 is not 500 rows of listing.
-    Walks only the cells the file actually stores (ws._cells) — iter_rows
-    would materialise every cell in the rectangle, which for a sheet styled
-    to Excel's last row is a million objects.
+    Walks only the cells the file actually stores (ws._cells). Nothing in
+    this module may iterate a rectangle (iter_rows / ws.cell over a range):
+    Excel's max_row counts rows that merely carry a fill, and one value in
+    Excel's last row would turn a rectangle walk into a million objects.
     """
     cells = getattr(ws, "_cells", None)
     if cells is None:  # read-only worksheets: fall back to iteration
@@ -277,14 +309,25 @@ def content_rows(ws) -> list[int]:
         raise ListingUnreadable(
             f"Sheet {ws.title} holds {len(cells)} cells (formatted or filled) "
             f"— more than the {MAX_SHEET_CELLS} this reader supports.")
-    filled = [(r, c) for (r, c), cell in cells.items()
-              if cell.value is not None and str(cell.value).strip()]
+    filled = {(r, c): cell for (r, c), cell in cells.items()
+              if cell.value is not None and str(cell.value).strip()}
     widest = max((c for _r, c in filled), default=0)
     if widest > MAX_SHEET_COLUMNS:
         raise ListingUnreadable(
             f"Sheet {ws.title} has content in column {widest} — wider than "
             f"the {MAX_SHEET_COLUMNS} columns this reader supports.")
-    return sorted({r for r, _c in filled})
+    lowest = max((r for r, _c in filled), default=0)
+    if lowest > MAX_SHEET_ROW_INDEX:
+        raise ListingUnreadable(
+            f"Sheet {ws.title} has content on row {lowest} — below row "
+            f"{MAX_SHEET_ROW_INDEX}, the lowest this reader supports. A stray "
+            "value far below the listing? Delete it and try again.")
+    return filled
+
+
+def content_rows(ws) -> list[int]:
+    """Row numbers that hold at least one non-empty value."""
+    return sorted({r for r, _c in content_cells(ws)})
 
 
 def stale_formula_cells(ws_values, ws_formulas) -> list[str]:
@@ -332,13 +375,11 @@ def grid_text(ws) -> str:
             f"the {MAX_SHEET_ROWS} this reader supports. Split the sheet, or "
             "raise MAX_SHEET_ROWS deliberately.")
     lines = [f"Sheet name: {ws.title!r}"]
-    for row in ws.iter_rows(min_row=1, max_row=ws.max_row or 1):
-        cells = [
-            f"{c.column_letter}{c.row}: {str(c.value)[:80]}"
-            for c in row if c.value is not None and str(c.value).strip()
-        ]
-        if cells:
-            lines.append(" | ".join(cells))
+    by_row: dict[int, list[str]] = {}
+    for (r, _c), cell in sorted(content_cells(ws).items()):
+        by_row.setdefault(r, []).append(f"{cell.coordinate}: {str(cell.value)[:80]}")
+    for r in sorted(by_row):
+        lines.append(" | ".join(by_row[r]))
     return "\n".join(lines)
 
 
@@ -371,7 +412,23 @@ def audit_reading(ws, reading: SheetReading) -> list[tuple[str, str]]:
     """
     problems: list[tuple[str, str]] = []
     cols = reading.columns or ColumnRoles()
-    spans = sorted(reading.entries, key=lambda s: s.first_row)
+    rows = content_rows(ws)
+    # Spans are the AI's numbers, unbounded above by the schema. Nothing
+    # below may expand a range until every span is known to lie within the
+    # sheet's content — a span "to row 2,000,000,000" is a wrong reading,
+    # not a reason to build a two-billion-row set.
+    limit = rows[-1] if rows else 1
+    spans = []
+    for s in sorted(reading.entries, key=lambda s: s.first_row):
+        if s.first_row > s.last_row:
+            problems.append((STRUCTURE,
+                f"span rows {s.first_row}-{s.last_row} is inverted"))
+        elif s.last_row > limit:
+            problems.append((STRUCTURE,
+                f"span rows {s.first_row}-{s.last_row} runs past the sheet's "
+                f"last content row ({limit})"))
+        else:
+            spans.append(s)
 
     if reading.is_payment_sheet:
         for role in ("payment", "invoice_no", "payee"):
@@ -405,7 +462,6 @@ def audit_reading(ws, reading: SheetReading) -> list[tuple[str, str]]:
     covered = set()
     for span in spans:
         covered.update(range(span.first_row, span.last_row + 1))
-    rows = content_rows(ws)
     for col in {cols.payment, cols.receipt, cols.balance} - {None}:
         for row in rows:
             if row in covered:
@@ -442,10 +498,6 @@ def audit_reading(ws, reading: SheetReading) -> list[tuple[str, str]]:
     prev_balance: float | None = None
     pending = 0.0  # net movement since the last span that showed a balance
     for span in spans:
-        if span.first_row > span.last_row:
-            problems.append((STRUCTURE,
-                f"span rows {span.first_row}-{span.last_row} is inverted"))
-            continue
         payments = _nums(ws, cols.payment, span)
         payment = sum(payments)
         receipt = sum(_nums(ws, cols.receipt, span))

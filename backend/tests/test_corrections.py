@@ -225,7 +225,7 @@ def test_recheck_and_rebuild_use_the_runs_own_reference_copy(db, monkeypatch):
         seen["checks"] = refs
         return []
 
-    async def spy_outputs(docs, excluded, refs=None):
+    async def spy_outputs(docs, excluded, refs=None, draft_settings=None):
         seen["outputs"] = refs
         return {"built": True}
 
@@ -240,3 +240,31 @@ def test_recheck_and_rebuild_use_the_runs_own_reference_copy(db, monkeypatch):
     refs = reference.run_refs("r1")
     assert seen["checks"] == refs and seen["outputs"] == refs
     assert seen["snapshot"] == (refs, "https://snap.example/AP")
+
+
+def test_failed_rebuild_on_the_last_decision_withholds_outputs(db, monkeypatch):
+    """The last open flag is decided, then rebuilding the outputs fails.
+    The decision stands, but the OLD outputs — built before it, still
+    holding the document just rejected — must not be what the now-open
+    gate hands out. They are withdrawn before the rebuild starts."""
+    from app.pipeline import output as output_builder
+    s = db()
+    run = s.get(Run, "r1")
+    run.outputs = {"bank_rows": ["stale row for docA"], "bank_header": "h"}
+    s.add(Flag(run_id="r1", document_id="docA", code="ALREADY_PAID",
+               reason="paid", basis="", status="open", resolution=""))
+    s.commit()
+    flag_id = s.query(Flag).filter(Flag.run_id == "r1").one().id
+    s.close()
+
+    async def boom(*a, **k):
+        raise RuntimeError("template unreadable")
+    monkeypatch.setattr(output_builder, "build_outputs", boom)
+    r = client.post(f"/api/runs/r1/flags/{flag_id}/decide",
+                    json={"decision": "rejected", "note": "duplicate"})
+    assert r.status_code == 500 and "rebuild failed" in r.json()["detail"]
+    s = db()
+    assert s.get(Flag, flag_id).status == "rejected"      # the decision stands
+    assert s.get(Run, "r1").outputs == {}                 # nothing stale to expose
+    s.close()
+    assert client.get("/api/runs/r1").json()["outputs"] == {}

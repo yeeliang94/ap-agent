@@ -110,6 +110,10 @@ async def create_run(client: str = Form(...), batch: UploadFile = File(...)) -> 
         run = Run(client=client, snapshot={
             "client_name": configured,
             "sharepoint_folder_url": settings_store.get_setting("sharepoint_folder_url"),
+            # The listing draft's signatures and bank charge, as they stood
+            # when this run started: editing them "for the next run" must
+            # not change an older run's fund request on its next rebuild.
+            "draft_settings": settings_store.draft_settings_raw(),
         })
         db.add(run)
         db.commit()
@@ -529,7 +533,8 @@ async def correct_fields(run_id: str, doc_id: str, body: dict) -> dict:
             for fl in db.query(Flag).filter(Flag.run_id == run_id, Flag.status == "rejected")
         } | {d.id for d in docs if d.kind == "unknown"}
         run.outputs = await output_builder.build_outputs(
-            docs, excluded, refs=_refs_for(run))
+            docs, excluded, refs=_refs_for(run),
+            draft_settings=settings_store.draft_settings(run.snapshot))
         db.commit()
         return {"ok": True}
     finally:
@@ -568,11 +573,17 @@ async def decide_flag(run_id: str, flag_id: str, body: dict) -> dict:
         # Documents the pipeline couldn't place are never in the output,
         # whatever the reviewer decided about their flag.
         excluded |= {d.id for d in docs if d.kind == "unknown"}
+        # Withdraw the old outputs BEFORE rebuilding. If this was the last
+        # open flag and the rebuild fails, the gate would otherwise open on
+        # outputs built before the decision — bank rows and a listing draft
+        # still holding a document the reviewer just rejected.
+        run.outputs = {}
         try:
             run.outputs = await output_builder.build_outputs(
-                docs, excluded, refs=_refs_for(run))
+                docs, excluded, refs=_refs_for(run),
+                draft_settings=settings_store.draft_settings(run.snapshot))
         except Exception as exc:
-            db.commit()  # the decision itself still stands
+            db.commit()  # the decision stands; the outputs stay withdrawn
             raise HTTPException(500, f"Decision recorded, but output rebuild failed: {exc}")
         db.commit()
         return {"ok": True}

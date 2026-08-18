@@ -81,6 +81,25 @@ def _vendor_matches(a: str, b: str) -> bool:
     return bool(na) and bool(nb) and (na in nb or nb in na)
 
 
+# A status column's words. Negative forms are checked FIRST: "Unpaid" and
+# "Not paid" both contain "paid". Anything unrecognised is NOT paid — the
+# duplicate-payment flag must rest on a positive statement, not a guess.
+_NOT_PAID = re.compile(
+    r"\b(un\s*paid|not\s+(yet\s+)?paid|pending|planned|outstanding|unsettled|"
+    r"scheduled|to\s+pay|on\s+hold|awaiting|cancel+ed|void(ed)?)\b",
+    re.IGNORECASE)
+_PAID = re.compile(r"\b(paid|settled|cleared|released|done|completed?|transferred)\b",
+                   re.IGNORECASE)
+
+
+def is_paid_status(status) -> bool:
+    """Does a listing row's status say the payment HAPPENED?"""
+    text = str(status or "")
+    if _NOT_PAID.search(text):
+        return False
+    return bool(_PAID.search(text))
+
+
 def where_in_listing(row: dict) -> str:
     """Point a reviewer at a listing row: tab, row, voucher, date, amount,
     payee — whatever the row knows. Rows read from a real workbook know
@@ -253,7 +272,7 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
             # A number match alone is not enough — the matched row must
             # actually be this invoice, and must not already be paid.
             where = where_in_listing(listed) + _loosely(number, listed)
-            if "paid" in str(listed["status"]).lower():
+            if is_paid_status(listed["status"]):
                 flags_out.append(_mk_flag(d.id, "ALREADY_PAID",
                     f"Invoice {number} was already paid: {where} (status "
                     f"'{listed['status']}'). Paying it again would be a "

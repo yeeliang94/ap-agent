@@ -141,8 +141,9 @@ def draft_title(latest_title: str, draft_month: date, existing: list[str]) -> st
     if base is None:
         base = f"{latest_title.strip()} {draft_month.strftime('%b')}'{draft_month.strftime('%y')}"
     base = base[:20]  # Excel's tab-name limit is 31; leave room for " (DRAFT 99)"
+    taken = {t.casefold() for t in existing}  # Excel tab names are case-insensitive
     title, n = f"{base} (DRAFT)", 2
-    while title in existing:
+    while title.casefold() in taken:
         title, n = f"{base} (DRAFT {n})", n + 1
     return title
 
@@ -389,6 +390,7 @@ def build_draft(workbook: bytes, layout: ListingLayout, used_vouchers: list[str]
     title = draft_title(layout.sheet, draft_month, wb.sheetnames)
     month_name = draft_month.strftime("%B")
     ws = wb.create_sheet(title)
+    title = ws.title  # what the workbook actually holds, should openpyxl have renamed it
     written = _write_tab(ws, layout, entries, month_name, figures, settings, formulas=True)
     # Header styles and the title block's merged cells, so the tab looks like
     # the client's. Body styles are not copied: the body is ours, and a
