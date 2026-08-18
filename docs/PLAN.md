@@ -2,7 +2,7 @@
 
 **Overall Progress:** `0%`
 **PRD Reference:** [docs/PRD.md](PRD.md) (flows 1–5, check catalogue in Flow 3, steering, decisions table)
-**Last Updated:** 2026-08-18
+**Last Updated:** 2026-08-18 (pre-implementation checklist complete — ready for Step 1)
 **Previous plan (invoice pipeline MVP, complete):** [docs/PLAN-MVP.md](PLAN-MVP.md)
 
 ## Summary
@@ -41,7 +41,7 @@ learning** so a new company needs no instructions at all.
 - **Company values are not hard-coded** — rates, receipt-optional items,
   category rule, mileage layout live in a per-client profile + playbook.
   LinkedIn's confirmed values are the *sample's* defaults, not the code's.
-- **v1 before v2 (recommended sequencing, awaiting explicit confirmation)** —
+- **v1 before v2 (confirmed by the owner 2026-08-18)** —
   Phases 1–5 ship the simple experience the owner liked in the Copilot test;
   Phase 6 (Discovery, learn-from-decisions, second client) starts only after
   v1 passes its verifier. Nothing from the PRD is dropped, only ordered.
@@ -74,10 +74,10 @@ a programmer either.
 
 ## Pre-Implementation Checklist
 - [x] 🟩 PRD written and updated with the owner's decisions (2026-08-18)
-- [ ] 🟨 Owner confirms the two open items in the PRD: Story 5 promoted to MUST; v1→v2 sequencing
-- [ ] 🟨 Owner confirms the four "still assumed" defaults (pause at map; received date typed; quotas; 5-minute target) — build proceeds with defaults meanwhile
+- [x] 🟩 Owner confirmed the two open items in the PRD (2026-08-18): Story 5 is MUST HAVE (built last within v1); v1→v2 sequencing
+- [x] 🟩 Owner confirmed the four defaults (2026-08-18): always pause at the map; received date typed at run start; quotas 30 / 60 files / 200 pages / 25 MB; under 5 minutes for 10 employees
 - [x] 🟩 No conflicting in-progress work (repo clean at start)
-- [ ] 🟥 Local `.env` OpenAI key still valid (`pytest backend/tests/test_model_layer.py` passes)
+- [x] 🟩 Local `.env` OpenAI key still valid (`AP_LIVE_TESTS=1 pytest backend/tests/test_model_layer.py` — 1 passed, 2026-08-18)
 
 ## Tasks
 
@@ -165,7 +165,7 @@ a programmer either.
   - [ ] 🟥 README: Claims section, .env notes; `docs/WINDOWS-AGENT-TASK.md`: add "nested folder read through the real MCP" and "listing header read on a real Summary of Invoices" to the checklist; PRD status line updated
   - **Verify:** `start.bat`/`start.sh` serve the Claims tab; docs read through once by the owner.
 
-### Phase 6: v2 — Discovery & learning (start after Phase 4's verifier passes; confirm sequencing first)
+### Phase 6: v2 — Discovery & learning (confirmed: starts only after Phase 4's verifier passes)
 - [ ] 🟥 **Step 17: Discovery (PRD Flow 2b)** — the app proposes the client's rules from its own files, with evidence.
   - [ ] 🟥 Evidence gathering: *Expense Types* tab → category list; *KM* tab → rates; how employees fill mileage (per trip vs summed); listing past tabs → how ER rows were categorised; policy doc if present; optional links to previous batches
   - [ ] 🟥 Proposals with evidence per line; *Rules* panel beside the map (accept / edit / reject / "no evidence — please set"); confirmed values → profile + playbook with evidence and date; light pass on later runs → `RULE_DRIFT` note

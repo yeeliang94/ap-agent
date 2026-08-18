@@ -1,12 +1,13 @@
 # Employee Claims Verification Module — PRD
 
-**Status:** Draft — 8 of 12 decisions confirmed 2026-08-18 (see *Decisions*) · **Written:** 2026-08-18 · **Owner:** William Chen
+**Status:** Confirmed 2026-08-18 — all decisions and defaults signed off by the owner (see *Decisions* and *Confirmed defaults*) · **Written:** 2026-08-18 · **Owner:** William Chen
 **Relationship to the rest of the app:** a *separate* run type inside the AP Agent.
 The invoice pipeline (design doc: [ap-agent-design.html](../ap-agent-design.html))
 is not changed by this work. Shared plumbing is reused; pipeline stages are not.
 
-Items marked **[assumed — confirm]** are choices made so the build can start;
-they are listed again under *Open Questions*.
+A few small operational details are still marked **[assumed]** in the flows;
+they are settled on the first real batch and listed at the end. Everything
+else below is confirmed.
 
 ---
 
@@ -41,8 +42,7 @@ the invoice pipeline today. Single user, no login, as today.
    confirmed map remembered, the second run's map needs no manual changes
    on the sample.
 4. A 10-employee batch **finishes in under 5 minutes** with 5 parallel
-   workers, and its AI cost is recorded in the run diary. **[assumed — confirm
-   the time target]**
+   workers, and its AI cost is recorded in the run diary. *(Confirmed.)*
 5. **Works for a second, differently-shaped company without code changes.**
    On a second synthetic client (flat folder, different report template,
    different category list and rates, different listing columns), the
@@ -86,7 +86,7 @@ company's confirmed value.
 | 2 | As a reviewer, I want to see — and correct — the agent's map of the folder **and the rules it has worked out for this client** before verification runs, so it looks in the right places and applies the right values, and I want my corrections remembered. | MUST HAVE |
 | 3 | As a reviewer, I want every claim row checked against its receipt, and every mileage row against its map and the fixed rate, with flags that cite exactly where to look, so I only spend time on problems. | MUST HAVE |
 | 4 | As a reviewer, I want — once the flags are cleared — one copy-ready listing row per employee with totals that reconcile, so I can paste into the month's Summary of Invoices. | MUST HAVE |
-| 5 | As a reviewer, I want the decisions I make on flags offered back to me as rules for this client, so the agent improves per client without anyone editing prompts. | MUST HAVE — *promoted 2026-08-18: this is how "no precedent" cases become precedent* **[confirm]** |
+| 5 | As a reviewer, I want the decisions I make on flags offered back to me as rules for this client, so the agent improves per client without anyone editing prompts. | MUST HAVE — *promoted and confirmed 2026-08-18: this is how "no precedent" cases become precedent; built last within v1* |
 
 ---
 
@@ -114,7 +114,7 @@ Terms used below:
   in the client's own column order — nothing about the columns is
   hard-coded. *(Decided.)*
 - The **received date** to write in every listing row (one date for the
-  batch). **[assumed — confirm]**
+  batch). *(Confirmed.)*
 - The client is the one set in Settings (single client at a time, as today).
 - For local development only: a `.zip` of the same folder tree instead of a
   link.
@@ -124,12 +124,12 @@ Terms used below:
    Create a *ClaimsRun* record, status `queued`. Start a background job.
 2. **Survey (code, no AI).** Resolve the link through the SharePoint reader,
    list the batch folder and every subfolder (up to 3 levels deep
-   **[assumed]**), download every file into the run's own workspace (a
+   *(confirmed)*), download every file into the run's own workspace (a
    private copy, like the reference files today — the run is judged against
    the files as they were when it started). Record for each file: path,
    size, type, page count (for PDFs), and the `ER(...)` code if the file
    name has one. Enforce quotas: max 30 employee folders, 60 files and 200
-   pages per employee, 25 MB per file **[assumed]**. Over quota → refuse
+   pages per employee, 25 MB per file *(confirmed)*. Over quota → refuse
    with the quota named.
 3. **Peek inside every file (code, cheap).** So the agent can find things
    *by itself* rather than being told where to look: for a workbook, the
@@ -175,7 +175,8 @@ Terms used below:
 ### Flow 2 — Confirm or correct the map (Story 2)
 
 **Trigger.** Run status is `map_ready`. **In v1 the run always pauses here
-[assumed — confirm]**; confirming is one click when nothing needs changing.
+confirmed 2026-08-18)**; confirming is one click when nothing needs changing.
+Auto-continuing on a clean map is a later option.
 
 **What the reviewer sees.** One table row per subfolder:
 folder · employee name · `ER(...)` code · report file + tab · mileage tab ·
@@ -268,7 +269,7 @@ bare folder.
 
 **Trigger.** Map confirmed.
 
-**System response — one worker per employee, up to 5 at once [assumed],
+**System response — one worker per employee, up to 5 at once,
 each within the app's per-agent request cap.** Every worker runs the same
 fixed sequence of *checks* (a check = a small procedure with its own prompt,
 code and test). The AI reads pictures and structure; code does every
@@ -566,17 +567,16 @@ any other client. Client values are never hard-coded.
 | 8 | Receipts but no report, no playbook rule | **Build the rows from the receipts and flag `NO_REPORT`.** | Universal |
 | 9 | Category list, GL codes, mileage rates (0.64 / 0.35), `ER(...)` naming, which tab is what | Discovered from the client's files (Expense Types tab, KM tab, file names, past listing tabs) and confirmed by the reviewer. | **This client's** |
 
-## Still assumed — confirm when convenient
+## Confirmed defaults (owner: "default", 2026-08-18)
 
-These were left unanswered; the build proceeds with the default in bold.
-
-1. **Pause at the map every run** — default **always pause in v1** (one
-   click). Auto-continue on a clean map can come later.
-2. **Received date** on the listing rows — default **typed by the reviewer
-   when starting the run**.
-3. **Quotas** — default **30 employees; 60 files / 200 pages per employee;
-   25 MB per file**.
-4. **Speed target** — default **under 5 minutes for 10 employees**.
+| Item | Confirmed value |
+|---|---|
+| Story 5 (learn from reviewer decisions) | MUST HAVE; built last within v1 |
+| Delivery order | **v1 first** — Flows 1–4, Story 5, profile + playbook + last-map memory (plan Phases 1–5); **v2 after** v1 passes its verifier — Discovery (Flow 2b), `RULE_DRIFT`, the second synthetic client (plan Phase 6). Nothing dropped, only ordered. |
+| Pause at the map | Always, in v1 (one click); auto-continue on a clean map is a later option |
+| Received date on listing rows | Typed by the reviewer when starting the run |
+| Quotas | 30 employee folders per batch; 60 files / 200 pages per employee; 25 MB per file; over a limit the run refuses and names it |
+| Speed target | Under 5 minutes for a 10-employee batch |
 
 Smaller details still marked **[assumed]** in the flows: map-trip date must
 equal the KM row's date; mileage lines are recognised by an item-name
