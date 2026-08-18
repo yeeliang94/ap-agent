@@ -138,8 +138,10 @@ app.include_router(router, prefix="/api")
 
 # The claims module: its own routes under /api/claims-runs, its own tables.
 from .claims.routes import router as claims_router  # noqa: E402
+from .claims.routes import settings_router as claims_settings_router  # noqa: E402
 
 app.include_router(claims_router, prefix="/api")
+app.include_router(claims_settings_router, prefix="/api")
 
 # On Windows the frontend is built once (start.bat) and served from here,
 # so one process serves the whole app. /api routes above take precedence.

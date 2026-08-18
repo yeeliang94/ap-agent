@@ -11,8 +11,10 @@ import {
   RunDetailData,
   Outputs,
   listingDraftUrl,
-  RunEvent,
 } from "../api";
+import ActivityLog from "../components/ActivityLog";
+import CopyBlock from "../components/CopyBlock";
+import TotalCard from "../components/TotalCard";
 
 // Screens B + C: review the flags, then copy the output blocks.
 export default function RunDetail({ runId }: { runId: string }) {
@@ -114,7 +116,9 @@ export default function RunDetail({ runId }: { runId: string }) {
         <Review run={run} onDecided={reload} cleanCount={cleanCount} />
       )}
       {tab === "output" && <Output run={run} />}
-      {tab === "activity" && <Activity runId={run.id} />}
+      {tab === "activity" && (
+        <ActivityLog runId={run.id} fetchEvents={getRunEvents} stageLabels={STAGE_LABEL} />
+      )}
     </section>
   );
 }
@@ -127,73 +131,6 @@ const STAGE_LABEL: Record<string, string> = {
   check: "Checking",
   output: "Building output",
 };
-
-// The run diary. Everything the pipeline recorded about itself: which
-// reference files it used, how long each stage took, and — the reason
-// this exists — every failure it absorbed and carried on from.
-function Activity({ runId }: { runId: string }) {
-  const [events, setEvents] = useState<RunEvent[] | null>(null);
-  const [onlyProblems, setOnlyProblems] = useState(false);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    let alive = true;
-    getRunEvents(runId, onlyProblems)
-      .then((e) => alive && setEvents(e))
-      .catch(() => alive && setError("Could not load the activity log"));
-    return () => {
-      alive = false;
-    };
-  }, [runId, onlyProblems]);
-
-  if (error) return <p className="error">{error}</p>;
-  if (!events) return <p className="sub">Loading…</p>;
-
-  return (
-    <div>
-      <p className="summary-line">
-        <b>What the system did with this batch</b>
-        <label className="filter">
-          <input
-            type="checkbox"
-            checked={onlyProblems}
-            onChange={(e) => setOnlyProblems(e.target.checked)}
-          />
-          Only show problems
-        </label>
-      </p>
-      {events.length === 0 && (
-        <p className="sub">
-          {onlyProblems
-            ? "Nothing went wrong — no warnings or errors were recorded."
-            : "Nothing recorded for this run."}
-        </p>
-      )}
-      {events.map((e) => (
-        <div key={e.id} className={`card event ${e.level}`}>
-          <div className="row" style={{ border: "none", padding: 0 }}>
-            <div className="grow">
-              <b>{STAGE_LABEL[e.stage] ?? e.stage}</b>
-              <span className="sub">{new Date(e.at).toLocaleTimeString()}</span>
-            </div>
-            <span className={`chip ${e.level === "error" ? "flag" : e.level === "warning" ? "review" : "ok"}`}>
-              {e.level}
-            </span>
-          </div>
-          <p className="reason">{e.message}</p>
-          {/* The engineer's version, folded away: a reviewer never needs
-              it, and whoever is debugging always asks for it. */}
-          {e.detail && (
-            <details>
-              <summary className="sub">Technical detail</summary>
-              <pre>{e.detail}</pre>
-            </details>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
 
 function Review({
   run,
@@ -544,48 +481,6 @@ function ListingDraftCard({
         working assumptions taken from two past tabs and are not yet confirmed by the
         client — check them before relying on the figures.
       </p>
-    </div>
-  );
-}
-
-function TotalCard({ label, value, good }: { label: string; value: string; good?: boolean }) {
-  return (
-    <div className={`card total ${good ? "good" : ""}`}>
-      <span className="sub">{label}</span>
-      <b>{value}</b>
-    </div>
-  );
-}
-
-function CopyBlock({
-  title,
-  hint,
-  text,
-  preview,
-}: {
-  title: string;
-  hint: string;
-  text: string;
-  preview: string[];
-}) {
-  const [copied, setCopied] = useState(false);
-  async function copy() {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }
-  return (
-    <div className="card copyblock">
-      <div className="row" style={{ border: "none", padding: 0 }}>
-        <div className="grow">
-          <b>{title}</b>
-          <span className="sub">{hint}</span>
-        </div>
-        <button className="btn primary" onClick={copy}>
-          {copied ? "Copied ✓" : "Copy"}
-        </button>
-      </div>
-      <pre>{preview.slice(0, 4).join("\n")}{preview.length > 4 ? `\n… ${preview.length - 4} more` : ""}</pre>
     </div>
   );
 }

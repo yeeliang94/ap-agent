@@ -1,8 +1,8 @@
 # Implementation Plan: Employee Claims Verification Module
 
-**Overall Progress:** `25%` (Steps 1–5 of 20)
+**Overall Progress:** `30%` (Steps 1–6 of 20)
 **PRD Reference:** [docs/PRD.md](PRD.md) (flows 1–5, check catalogue in Flow 3, steering, decisions table)
-**Last Updated:** 2026-08-18 (Steps 1–5 done; Step 6 UI next)
+**Last Updated:** 2026-08-19 (Phases 1–2 done; Phase 3 next)
 **Previous plan (invoice pipeline MVP, complete):** [docs/PLAN-MVP.md](PLAN-MVP.md)
 
 ## Summary
@@ -111,9 +111,9 @@ a programmer either.
   - [x] 🟩 Audit (code): every folder/file placed; one ER code per employee, none shared; the "report" tab yields dated rows with amounts that sum to a total; a "receipts" file yields ≥ 1 receipt on page 1; mismatches go back to the AI, ≤ 3 rounds; leftovers become map warnings; status → `map_ready`; the request cap is respected
   - **Verify:** on the sample with **no** playbook: 10/10 employees mapped correctly, the approval and report-print PDFs ignored with sensible reasons, the no-report employee marked "build rows from receipts", the planted stray file listed as unplaced; ≤ 2 rounds on every folder; a test playbook line ("maps are in folder `Maps/`") changes the map accordingly.
 
-- [ ] 🟥 **Step 6 (UI): Claims tab, New claims run form, runs list, Map & Rules view** — the reviewer can start a run and confirm the map in the browser.
-  - [ ] 🟥 App shell: *Runs* / *Claims* tabs; Claims list with status chips and empty state; New claims run card (links, date, optional instructions textarea prefilled from playbook, zip upload in local mode) with inline validation
-  - [ ] 🟥 Map & Rules view: table per subfolder, role dropdowns, reason on hover/expand, warnings above, *remember for <client>* per correction, **Confirm & verify** with disabled-state tooltip; `POST /api/claims-runs/{id}/confirm-map` saves the map + audit event + last confirmed map
+- [x] 🟩 **Step 6 (UI): Claims tab, New claims run form, runs list, Map & Rules view** — done 2026-08-19 — the reviewer can start a run and confirm the map in the browser.
+  - [x] 🟩 App shell: *Runs* / *Claims* tabs; Claims list with status chips and empty state; New claims run card (links, date, optional instructions textarea prefilled from playbook, zip upload in local mode) with inline validation
+  - [x] 🟩 Map & Rules view: table per subfolder, role dropdowns, reason on hover/expand, warnings above, *remember for <client>* per correction, **Confirm & verify** with disabled-state tooltip; `POST /api/claims-runs/{id}/confirm-map` saves the map + audit event + last confirmed map
   - **Verify:** in the browser: start a run from the zip → land on Map & Rules → hover a role and read its reason → change one role, tick remember → Confirm; the audit trail shows who confirmed and what changed; the client's last confirmed map is stored; screenshot kept as proof.
 
 ### Phase 3: Verify — one worker per employee
@@ -208,6 +208,19 @@ a programmer either.
   cannot judge receipt content without AI: it checks a receipts file is a
   readable PDF/image with ≥ 1 page; the worker's page inventory does the
   rest.
+- **Step 6.** Shared UI pieces moved to `frontend/src/components/`
+  (`TotalCard`, `CopyBlock`, `ActivityLog`); the invoice screen imports
+  them. The invoice screen's own flag card / field editor were left in
+  place (they are tied to invoice documents) — the claims Review view gets
+  its own generic ones in Step 11. Verified in the browser 2026-08-19: Runs
+  tab unchanged; Claims tab → New claims run form with inline validation
+  and disabled *Start* with the reason; run list with status chips; Map &
+  Rules table for the live run — reasons on hover and on expand, a role
+  change shows "set by the reviewer (the agent said: …)" and offers
+  *remember "*_Approval.pdf → …" for Client ABC*; Confirm & verify enabled
+  with its tooltip. Screenshots were inspected in-session (the browser pane
+  cannot save them to disk); the Confirm click is exercised in Step 11's
+  browser check once workers exist.
 
 ## Rollback Plan
 - Every step lands as its own commit — `git revert` any step cleanly.

@@ -360,8 +360,119 @@ def _summary(run: ClaimsRun, counts: dict) -> dict:
     n_map = sum(1 for e in (run.map or {}).get("employees", []) if e.get("is_employee"))
     return {"id": run.id, "client": run.client, "status": run.status, "error": run.error,
             "progress": run.progress, "folder": run.folder_url or "zip upload",
-            "employees": counts.get("employees") or n_map,
+            "employee_count": counts.get("employees") or n_map,
             "employees_done": counts.get("employees_done", 0),
             "open_flags": counts.get("open_flags", 0),
             "errors": counts.get("errors", 0), "warnings": counts.get("warnings", 0),
             "created_at": run.created_at.isoformat()}
+
+
+# ---- per-client steering: /api/claims-settings ------------------------------
+# The few values code needs (rates, receipt-optional items, tolerances), the
+# playbook paragraph, and the last confirmed map. Stored per client name.
+
+settings_router = APIRouter(prefix="/claims-settings")
+
+
+def _settings_payload(client: str) -> dict:
+    return {"client": client, "local_mode": _local_mode(),
+            "profile": profile_mod.get_profile(client),
+            "playbook": profile_mod.get_playbook(client),
+            "last_map": profile_mod.get_last_map(client)}
+
+
+@settings_router.get("")
+def get_claims_settings() -> dict:
+    return _settings_payload(settings_store.get_setting("client_name"))
+
+
+@settings_router.put("")
+def update_claims_settings(body: dict) -> dict:
+    """body = {profile?: {...fields...}, playbook?: str, forget_last_map?: bool}.
+    Every value is validated before any is saved; the change is audited."""
+    from decimal import Decimal, InvalidOperation
+
+    client = settings_store.get_setting("client_name")
+    profile_in = body.get("profile")
+    if profile_in is not None:
+        if not isinstance(profile_in, dict):
+            raise HTTPException(400, "profile must be an object.")
+        current = profile_mod.get_profile(client)
+        merged = {**current}
+        if "mileage_rates" in profile_in:
+            rates = profile_in["mileage_rates"]
+            if not isinstance(rates, dict):
+                raise HTTPException(400, "mileage_rates must map vehicle type to a rate.")
+            clean = {}
+            for vehicle, rate in rates.items():
+                vehicle = str(vehicle).strip()
+                try:
+                    value = Decimal(str(rate).strip())
+                    if not value.is_finite() or value <= 0 or value > 100:
+                        raise InvalidOperation
+                except InvalidOperation:
+                    raise HTTPException(400, f"Rate for {vehicle!r} must be a number per km, e.g. 0.64.")
+                if vehicle:
+                    clean[vehicle] = f"{value.normalize():f}"
+            merged["mileage_rates"] = clean
+        if "km_tolerance" in profile_in:
+            try:
+                tol = Decimal(str(profile_in["km_tolerance"]).strip() or "0")
+                if not tol.is_finite() or tol < 0 or tol > 100:
+                    raise InvalidOperation
+            except InvalidOperation:
+                raise HTTPException(400, "km tolerance must be a number of km, e.g. 0 or 0.5.")
+            merged["km_tolerance"] = f"{tol.normalize():f}"
+        if "receipt_date_window_days" in profile_in:
+            try:
+                days = int(profile_in["receipt_date_window_days"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "receipt date window must be a whole number of days.")
+            if days < 0 or days > 31:
+                raise HTTPException(400, "receipt date window must be between 0 and 31 days.")
+            merged["receipt_date_window_days"] = days
+        for key in ("receipt_optional_items",):
+            if key in profile_in:
+                items = profile_in[key]
+                if not isinstance(items, list) or not all(isinstance(i, str) for i in items):
+                    raise HTTPException(400, f"{key} must be a list of expense item names.")
+                merged[key] = [i.strip() for i in items if i.strip()][:200]
+        if "mileage_item_pattern" in profile_in:
+            pat = str(profile_in["mileage_item_pattern"]).strip()
+            if not pat or len(pat) > 60:
+                raise HTTPException(400, "mileage item pattern must be 1–60 characters.")
+            merged["mileage_item_pattern"] = pat
+        if "category_rule" in profile_in:
+            merged["category_rule"] = str(profile_in["category_rule"]).strip()[:1000]
+        if "categories" in profile_in:
+            cats = profile_in["categories"]
+            if not isinstance(cats, list):
+                raise HTTPException(400, "categories must be a list of {item, gl}.")
+            merged["categories"] = [{"item": str(c.get("item", "")).strip()[:80],
+                                     "gl": str(c.get("gl", "")).strip()[:20]}
+                                    for c in cats if isinstance(c, dict) and c.get("item")][:300]
+        if "file_role_patterns" in profile_in:
+            pats = profile_in["file_role_patterns"]
+            if not isinstance(pats, list):
+                raise HTTPException(400, "file_role_patterns must be a list of {pattern, role}.")
+            from . import mapping
+
+            merged["file_role_patterns"] = [
+                {"pattern": str(p.get("pattern", "")).strip()[:120], "role": str(p.get("role", ""))}
+                for p in pats if isinstance(p, dict) and p.get("pattern")
+                and p.get("role") in mapping.ROLES][:100]
+        if "checks" in profile_in:
+            checks = profile_in["checks"]
+            if not isinstance(checks, dict):
+                raise HTTPException(400, "checks must map a check code to on/off.")
+            merged["checks"] = {str(k): bool(v) for k, v in checks.items()
+                                if str(k) in profile_mod.CHECK_CODES}
+        profile_mod.save_profile(client, merged)
+    if "playbook" in body:
+        text = body["playbook"]
+        if not isinstance(text, str) or len(text) > MAX_INSTRUCTIONS:
+            raise HTTPException(400, f"The playbook must be text, at most {MAX_INSTRUCTIONS} characters.")
+        profile_mod.save_playbook(client, text.strip())
+    if body.get("forget_last_map"):
+        profile_mod.forget_last_map(client)
+    return _settings_payload(client)

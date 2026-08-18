@@ -115,3 +115,44 @@ body { margin: 0; }
   background: #edf2f4; border-radius: 6px; padding: 8px 10px; font-size: 12px;
   overflow-x: auto; margin: 6px 0 0; white-space: pre-wrap; word-break: break-word;
 }
+
+/* --- claims module ------------------------------------------------------ */
+.topbar nav.tabs { margin: 0; }
+.shell { max-width: 1180px; }
+.table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.table th, .table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.table th { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.table tr.bad td { background: var(--flag-soft); }
+.table tr.attention td { background: #fff9ec; }
+.table tr.detail td { background: #f6f8f9; }
+.table.inner td { border-bottom: 1px dashed var(--line); font-size: 13px; }
+.table .reason-cell { color: var(--muted); max-width: 380px; }
+.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; }
+.maptable input:not([type="checkbox"]), .maptable select {
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font-size: 12.5px; max-width: 170px;
+}
+.maptable { font-size: 12.5px; }
+.maptable th, .maptable td { padding: 6px 8px; }
+.maptable td:nth-child(8), .maptable td:nth-child(9), .maptable td:nth-child(10) { min-width: 150px; }
+.maptable select { margin: 2px 4px 2px 0; }
+.pill { display: block; width: fit-content; font-size: 12px; background: var(--accent-soft); color: var(--accent);
+  border-radius: 6px; padding: 2px 7px; margin: 1px 4px 1px 0; max-width: 220px; overflow-wrap: break-word; }
+.pill.muted { background: #edf2f4; color: var(--muted); }
+.pill.warn { background: var(--human-soft); color: var(--human); }
+.editrow textarea { flex: 1; border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; font: inherit; }
+.editrow input[type="date"] { flex: 0 0 auto; }
+input[aria-invalid="true"] { border-color: var(--flag) !important; }
+.skeleton { height: 10px; border-radius: 6px; margin-top: 10px;
+  background: linear-gradient(90deg, #edf2f4 25%, #f6f8f9 50%, #edf2f4 75%);
+  background-size: 200% 100%; animation: shimmer 1.4s infinite; }
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+.bar { height: 8px; background: #edf2f4; border-radius: 99px; overflow: hidden; margin: 8px 0 12px; }
+.bar-fill { height: 100%; background: var(--accent); transition: width 0.4s; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.card.emp { margin: 0; min-width: 190px; display: flex; flex-direction: column; gap: 4px; }
+.card.emp.failed { border-color: var(--flag); }
+.card.emp.verified { border-color: var(--accent); }
+.evidence { margin: 8px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.evidence img { width: 100%; max-height: 520px; object-fit: contain; display: block; }
+.grouphead { margin: 18px 0 6px; font-size: 15px; }
+.settings-claims .editrow span { width: 240px; }
