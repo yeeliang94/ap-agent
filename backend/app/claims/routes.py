@@ -138,11 +138,28 @@ def get_claims_run(run_id: str) -> dict:
             "evidence": [_evidence_dict(e) for e in evidence],
             "flags": [_flag_dict(f) for f in flags],
             # The human gate, enforced server-side: no output leaves while
-            # any flag is undecided.
-            "outputs": run.outputs if (run.status == "ready" and not open_flags) else {},
+            # any flag is undecided. Built fresh from the reviewed state
+            # (code only, Decimal) and kept on the run for the record.
+            "outputs": _outputs_if_unlocked(db, run, open_flags),
         }
     finally:
         db.close()
+
+
+def _outputs_if_unlocked(db, run: ClaimsRun, open_flags: list) -> dict:
+    from . import listing as listing_mod
+
+    if run.status != "ready" or open_flags:
+        return {}
+    outputs = listing_mod.build_outputs(db, run)
+    if outputs != run.outputs:
+        run.outputs = outputs
+        db.commit()
+        if not outputs["totals"]["match"]:
+            telemetry.record(db, run.id, "output", telemetry.WARNING, "RECONCILIATION_MISMATCH",
+                             f"Emitted total {outputs['totals']['total_myr']} differs from the source "
+                             f"total {outputs['totals']['source_total']} by {outputs['totals']['difference']}.")
+    return outputs
 
 
 @router.get("/{run_id}/events")
@@ -302,6 +319,206 @@ def get_claims_file(run_id: str, path: str, page: int = 1, highlight: str = "",
     except IndexError:
         raise HTTPException(404, "No such page.")
     return Response(content=png, media_type="image/png")
+
+
+# ---- review actions -----------------------------------------------------------
+
+@router.post("/{run_id}/employees/{employee_id}/retry")
+async def retry_employee(run_id: str, employee_id: str) -> dict:
+    """Re-run one worker: Retry on a failed employee, or Re-verify."""
+    from . import worker
+
+    db = SessionLocal()
+    try:
+        run = db.get(ClaimsRun, run_id)
+        emp = db.get(ClaimEmployee, employee_id)
+        if not run or not emp or emp.run_id != run_id:
+            raise HTTPException(404, "No such employee in this run.")
+        if run.status not in ("ready", "verifying"):
+            raise HTTPException(400, f"Employees can be re-verified once the run is verifying or ready (it is {run.status}).")
+        if emp.status == "verifying":
+            raise HTTPException(400, "This employee is being verified right now.")
+        emp.status, emp.error = "pending", ""
+        db.add(AuditEvent(run_id=run_id, actor="reviewer", action="employee_reverify",
+                          detail=f"{emp.name or emp.folder}: re-verify requested"))
+        db.commit()
+    finally:
+        db.close()
+    runner.start_background(worker.retry_employee(run_id, employee_id))
+    return {"ok": True}
+
+
+@router.post("/{run_id}/flags/{flag_id}/decide")
+async def decide_claim_flag(run_id: str, flag_id: str, body: dict) -> dict:
+    """Record a decision on one flag. body = {decision, note}.
+
+    accepted  — it is a real problem: the flag's ROW is excluded from the
+                batch (an employee-level or run-level flag is acknowledged)
+    dismissed — the flag is set aside with a note; the row stays
+    """
+    decision = body.get("decision")
+    if decision not in ("accepted", "dismissed"):
+        raise HTTPException(400, "decision must be 'accepted' or 'dismissed'.")
+    note = str(body.get("note", "")).strip()[:500]
+    if decision == "dismissed" and not note:
+        raise HTTPException(400, "A short note is required when dismissing a flag — it goes in the audit trail.")
+    db = SessionLocal()
+    try:
+        flag = db.get(ClaimFlag, flag_id)
+        if not flag or flag.run_id != run_id:
+            raise HTTPException(404, "No such flag.")
+        if flag.status not in ("open", "info"):
+            raise HTTPException(400, f"This flag is already {flag.status}.")
+        flag.status, flag.resolution = decision, note
+        run = db.get(ClaimsRun, run_id)
+        run.outputs = {}  # withdrawn; rebuilt from the reviewed state on next read
+        db.add(AuditEvent(run_id=run_id, actor="reviewer", action=f"flag_{decision}",
+                          detail=f"[{flag.code}] {flag.reason[:200]} — note: {note or 'none'}"))
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+CORRECTABLE_ROW_FIELDS = {"date", "item", "reason", "receipt_included", "amount", "currency", "rate",
+                          "total", "km"}
+
+
+def _validate_row_value(field: str, value):
+    from decimal import Decimal, InvalidOperation
+
+    from ..schemas_ai import CURRENCY_PATTERN, DATE_PATTERN
+    from .report_reader import gl_of, item_name
+
+    text = str(value).strip()
+    if field in ("amount", "total", "rate", "km"):
+        try:
+            d = Decimal(text)
+            if not d.is_finite() or d < 0:
+                raise InvalidOperation
+        except InvalidOperation:
+            raise HTTPException(400, f"{field} must be a number.")
+        return str(d.quantize(Decimal("0.01"))) if field in ("amount", "total") else str(d)
+    if field == "date":
+        if not re.match(DATE_PATTERN, text):
+            raise HTTPException(400, "Date must be YYYY-MM-DD.")
+        return text
+    if field == "currency":
+        if not re.match(CURRENCY_PATTERN, text.upper()):
+            raise HTTPException(400, "Currency must be a 3-letter code, e.g. MYR.")
+        return text.upper()
+    if field == "receipt_included":
+        if text.upper()[:1] not in ("Y", "N", ""):
+            raise HTTPException(400, "Receipt included must be Y or N.")
+        return text.upper()[:1]
+    return text[:300]
+
+
+@router.post("/{run_id}/rows/{row_id}/correct")
+async def correct_claim_row(run_id: str, row_id: str, body: dict) -> dict:
+    """Fix a value on one row (audited), then re-check that employee at once:
+    flags that no longer apply resolve themselves, new ones are raised,
+    decided ones stay decided. body = {fields: {name: value}, reason}."""
+    from . import worker
+    from .report_reader import gl_of, item_name
+
+    reason = str(body.get("reason", "")).strip()
+    if not reason:
+        raise HTTPException(400, "A short reason is required — it goes in the audit trail.")
+    submitted = body.get("fields")
+    if not isinstance(submitted, dict) or not submitted:
+        raise HTTPException(400, "fields must map field names to corrected values.")
+    db = SessionLocal()
+    try:
+        row = db.get(ClaimRow, row_id)
+        run = db.get(ClaimsRun, run_id)
+        if not row or not run or row.run_id != run_id:
+            raise HTTPException(404, "No such row.")
+        if run.status != "ready":
+            raise HTTPException(400, "Corrections are possible once the run is ready.")
+        emp = db.get(ClaimEmployee, row.employee_id)
+        validated = {}
+        for field, raw in submitted.items():
+            if field not in CORRECTABLE_ROW_FIELDS:
+                raise HTTPException(400, f"Field {field!r} cannot be corrected.")
+            validated[field] = _validate_row_value(field, raw)
+        changed = {f: v for f, v in validated.items() if str(row.values.get(f) or "") != v}
+        if changed:
+            values = {**row.values, **changed}
+            if "item" in changed:
+                values["item_name"], values["gl"] = item_name(changed["item"]), gl_of(changed["item"])
+            if "amount" in changed and (values.get("currency") or "MYR") == "MYR" and "total" not in changed:
+                values["total"] = changed["amount"]
+            corrections = dict(row.corrections or {})
+            for f, v in changed.items():
+                corrections[f] = {"from": row.values.get(f), "to": v, "reason": reason}
+                db.add(AuditEvent(run_id=run_id, actor="reviewer", action="row_corrected",
+                                  detail=f"{emp.name or emp.folder} {row.sheet} row {row.row}.{f}: "
+                                         f"{row.values.get(f)!r} -> {v!r} — {reason}"))
+            row.values, row.corrections = values, corrections
+            run.outputs = {}
+            db.commit()
+        # Instant re-check for this employee — code only over stored
+        # evidence (plus, at most, an AI tie-break).
+        profile = profile_mod.profile_of(run.snapshot)
+        summary = emp.summary or {}
+        result = await worker.run_checks_for(db, run, emp, profile,
+                                             searched=(int(summary.get("pages", 0)), len(emp.roles.get("receipt_files") or [])))
+        existing = db.query(ClaimFlag).filter(ClaimFlag.employee_id == emp.id).all()
+        new_keys = {(f["code"], f["row_id"], f["evidence_id"]): f for f in result["flags"]}
+        open_now = {}
+        for fl in existing:
+            key = (fl.code, fl.row_id, fl.evidence_id)
+            if fl.status in ("open", "info") and key not in new_keys:
+                fl.status = "resolved_by_correction"
+                fl.resolution = f"No longer applies after correcting {', '.join(sorted(changed)) or 'values'} — {reason}"
+            elif fl.status in ("open", "info"):
+                open_now[key] = fl
+        decided = {(fl.code, fl.row_id, fl.evidence_id) for fl in existing
+                   if fl.status in ("accepted", "dismissed") and fl.row_id != row_id}
+        for key, fd in new_keys.items():
+            if key in open_now:
+                open_now[key].reason, open_now[key].basis, open_now[key].cite = fd["reason"], fd["basis"], fd["cite"]
+            elif key not in decided:
+                db.add(ClaimFlag(run_id=run_id, employee_id=emp.id, **fd))
+        db.add(AuditEvent(run_id=run_id, actor="system", action="employee_rechecked",
+                          detail=f"{emp.name or emp.folder} after correcting "
+                                 f"{', '.join(sorted(changed)) or 'nothing (retry)'}: "
+                                 f"{len(result['flags'])} rule(s) now apply"))
+        db.commit()
+        return {"ok": True, "flags_now": len(result["flags"])}
+    finally:
+        db.close()
+
+
+@router.put("/{run_id}/employees/{employee_id}/category")
+def set_employee_category(run_id: str, employee_id: str, body: dict) -> dict:
+    """The reviewer sets the listing category (CATEGORY_UNCLEAR, or a
+    correction). Audited; the open CATEGORY_UNCLEAR flag is resolved."""
+    category = str(body.get("category", "")).strip()[:80]
+    gl = str(body.get("gl", "")).strip()[:20]
+    reason = str(body.get("reason", "")).strip()[:300]
+    if not category:
+        raise HTTPException(400, "Choose a category.")
+    db = SessionLocal()
+    try:
+        emp = db.get(ClaimEmployee, employee_id)
+        run = db.get(ClaimsRun, run_id)
+        if not emp or not run or emp.run_id != run_id:
+            raise HTTPException(404, "No such employee in this run.")
+        old = (emp.category, emp.gl)
+        emp.category, emp.gl = category, gl
+        emp.category_basis = f"set by the reviewer: {reason or 'no reason given'}"
+        for fl in db.query(ClaimFlag).filter(ClaimFlag.employee_id == emp.id, ClaimFlag.code == "CATEGORY_UNCLEAR",
+                                              ClaimFlag.status == "open"):
+            fl.status, fl.resolution = "resolved_by_correction", f"category set to {category} — {reason}"
+        db.add(AuditEvent(run_id=run_id, actor="reviewer", action="category_set",
+                          detail=f"{emp.name or emp.folder}: {old!r} -> {(category, gl)!r} — {reason}"))
+        run.outputs = {}
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
 
 
 # ---- serialisation -------------------------------------------------------

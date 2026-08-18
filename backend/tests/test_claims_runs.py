@@ -71,7 +71,10 @@ def _good_map(survey: dict) -> ClaimMap:
             files.append(FileRole(path=path, role=role, reason=why))
         report = t["files"]["report"]
         employees.append(FolderMap(
-            folder=fo["path"], is_employee=True, name=t["name"], er_code=t["er_code"],
+            # An employee with no report has no file carrying the ER code;
+            # a truthful map leaves it empty (the reviewer may type it).
+            folder=fo["path"], is_employee=True, name=t["name"],
+            er_code=t["er_code"] if report else "",
             report_file=f"{fo['path']}/{report}" if report else None,
             report_tab="Expense Report" if report else None,
             mileage_tab="KM" if t["mileage_tab"] else None,

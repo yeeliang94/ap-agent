@@ -350,10 +350,12 @@ export interface ClaimsOutputs {
   rows: string[][];
   tsv: string;
   totals: { total_myr: string; source_total: string; match: boolean; difference: string };
-  included: { name: string; er_code: string; amount: string }[];
+  included: { name: string; er_code: string; amount: string; category: string; gl: string }[];
   not_included: { name: string; why: string }[];
+  exclusions: { name: string; row: number; amount: string; why: string }[];
   header_fallback: boolean;
   header_note: string;
+  received_date: string;
 }
 
 export interface ClaimsRunDetail extends ClaimsRunSummary {
@@ -509,4 +511,47 @@ export async function saveClaimsSettings(body: {
 export async function retryClaimEmployee(runId: string, employeeId: string): Promise<void> {
   const r = await fetch(`/api/claims-runs/${runId}/employees/${employeeId}/retry`, { method: "POST" });
   if (!r.ok) return fail(r, "Could not retry this employee");
+}
+
+export async function decideClaimFlag(
+  runId: string,
+  flagId: string,
+  decision: "accepted" | "dismissed",
+  note: string
+): Promise<void> {
+  const r = await fetch(`/api/claims-runs/${runId}/flags/${flagId}/decide`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision, note }),
+  });
+  if (!r.ok) return fail(r, "Could not record the decision");
+}
+
+export async function correctClaimRow(
+  runId: string,
+  rowId: string,
+  fields: Record<string, string>,
+  reason: string
+): Promise<void> {
+  const r = await fetch(`/api/claims-runs/${runId}/rows/${rowId}/correct`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fields, reason }),
+  });
+  if (!r.ok) return fail(r, "Correction failed");
+}
+
+export async function setEmployeeCategory(
+  runId: string,
+  employeeId: string,
+  category: string,
+  gl: string,
+  reason: string
+): Promise<void> {
+  const r = await fetch(`/api/claims-runs/${runId}/employees/${employeeId}/category`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ category, gl, reason }),
+  });
+  if (!r.ok) return fail(r, "Could not set the category");
 }

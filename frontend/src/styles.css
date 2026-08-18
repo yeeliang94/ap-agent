@@ -156,3 +156,4 @@ input[aria-invalid="true"] { border-color: var(--flag) !important; }
 .evidence img { width: 100%; max-height: 520px; object-fit: contain; display: block; }
 .grouphead { margin: 18px 0 6px; font-size: 15px; }
 .settings-claims .editrow span { width: 240px; }
+.flagcard.info { border-left-color: var(--line); }

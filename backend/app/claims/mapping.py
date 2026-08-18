@@ -34,6 +34,7 @@ from pydantic_ai import BinaryContent
 from ..model_layer import USAGE_LIMITS, create_agent
 from . import profile as profile_mod
 from . import survey as survey_mod
+from .evidence import ai_call
 
 log = logging.getLogger("claims.mapping")
 
@@ -130,7 +131,7 @@ async def propose_map(survey: dict, files_dir: Path, snapshot: dict | None = Non
     claim_map: ClaimMap | None = None
     for round_no in range(1, MAX_ROUNDS + 1):
         parts = [prompt_parts[0] + feedback, *prompt_parts[1:]]
-        result = await agent.run(parts, usage_limits=USAGE_LIMITS)
+        result = await ai_call(agent.run(parts, usage_limits=USAGE_LIMITS), "the map agent")
         claim_map = result.output
         _apply_role_patterns(claim_map, profile)
         try:
@@ -257,6 +258,17 @@ def audit_map(claim_map: ClaimMap, survey: dict, files_dir: Path) -> list[str]:
         if not e.name.strip():
             problems.append(f"{e.folder!r}: employee name is empty")
         if e.er_code:
+            # The code must be SEEN somewhere — a file name or the peek of
+            # a workbook in that folder — never inferred from the pattern
+            # of the other folders.
+            seen_in = " ".join(files_by_folder.get(e.folder, set()))
+            for path in files_by_folder.get(e.folder, set()):
+                for rows in ((by_path.get(path, {}).get("peek") or {}).get("tabs") or {}).values():
+                    seen_in += " " + " ".join(rows)
+            if e.er_code.replace(" ", "").upper() not in seen_in.replace(" ", "").upper():
+                problems.append(f"{e.folder!r}: ER code {e.er_code!r} does not appear in any file name "
+                                "or workbook of that folder — copy it exactly from where you saw it, "
+                                "or leave er_code empty")
             if e.er_code in codes and codes[e.er_code] != e.folder:
                 problems.append(f"ER code {e.er_code!r} is used by both {codes[e.er_code]!r} "
                                 f"and {e.folder!r} — one code per employee")
