@@ -368,3 +368,26 @@ A review of this plan raised eleven points. Outcome:
 | 9 | Loose reference matching needs collision semantics | Agree (N4 not built yet) | Semantics written into N4 |
 | 10 | Absence from history ≠ unregistered vendor; exact string compare | Agree | Wording changed to "verify beneficiary registration"; tolerant vendor matching reused |
 | 11 | README / UI wording stale | Agree | Fixed |
+
+---
+
+## Listing-draft business rules — sign-off table (added 2026-08-18)
+
+A later review pointed out, fairly, that the draft tab applies bookkeeping
+rules that are still assumptions. They are gathered here in one place so
+each can be confirmed against a real workbook and signed off by name; until
+a row says *confirmed*, the draft card in the app carries a "working
+assumptions — check before relying on the figures" note. This table is
+the record; when a rule changes, change it here first, then the code.
+
+| # | Rule the draft applies today | Where it came from | Status | Confirmed by / date |
+|---|---|---|---|---|
+| R1 | One payment entry per vendor per month; vendor identity = the listing's own spelling when tolerant matching finds it, else the invoice's text | Two ICMR tabs (Apr'26, Jul'26) | **assumed — confirm** | |
+| R2 | Voucher numbers continue the latest tab: month code rolls, sequence restarts (`PV0726/03` → `PV0826/01`); no month code → trailing integer increments; a collision with an existing number is a refusal | Two ICMR tabs | **assumed — confirm** | |
+| R3 | Balance b/f = the latest tab's closing balance | Two ICMR tabs | **assumed — confirm** | |
+| R4 | Net payment = sum of the new payments; estimated bank charges = per-payment charge (Settings) × entries | Design doc + sample arithmetic | **assumed — confirm** (charge amount and whether it is per payment) | |
+| R5 | Fund received = Total fund to request = net + charges, so the balance returns to the same residual | The sample's own arithmetic (the doc's literal words said "= total of the new payments") | **assumed — confirm** | |
+| R6 | Payment dates left blank; DRAFT note in the title block; the draft month is the month after the latest tab's last payment date | Lifecycle rule (drafts only) | **assumed — confirm** the month choice | |
+| R7 | All money in `Decimal`, 2 dp, half-up; balances/totals written as formulas | Engineering choice | confirmed (engineering) | — |
+| R8 | Signatures block ("Prepared by / Reviewed by") from Settings | Design doc | **assumed — confirm** wording | |
+| R9 | Non-MYR invoices left out of the draft and named | 2026-08-12 fix pass | **assumed — confirm** | |

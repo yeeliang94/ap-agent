@@ -8,7 +8,7 @@ a **draft** of next month's payment-listing tab on a copy of the client's own
 workbook. The agent never writes to SharePoint or any working file — a
 person pastes, and finalises the draft after the bank run.
 
-Design doc: [ap-agent-design.html](ap-agent-design.html) · Plan & status: [docs/PLAN.md](docs/PLAN.md)
+Design doc: [ap-agent-design.html](ap-agent-design.html) · MVP plan (done): [docs/PLAN-MVP.md](docs/PLAN-MVP.md) · Claims module: [docs/PRD.md](docs/PRD.md) → [docs/PLAN.md](docs/PLAN.md)
 
 ## Layout
 
@@ -35,6 +35,13 @@ backend/.venv/bin/python backend/scripts/verify_run.py
 ```
 
 Then open http://localhost:5173, upload `samples/generated/demo_batch.zip`.
+
+Tests: `cd backend && .venv/bin/python -m pytest` runs the whole suite with the
+AI faked — it makes **no paid calls**. Two tests are opt-in because they call
+the real model: `AP_LIVE_TESTS=1` for the model-layer smoke test, and
+`AP_LISTING_EVAL=<workbook>` for the real-listing evaluation. Exact dependency
+versions used for verification are recorded in `backend/requirements.lock`
+(`requirements.txt` stays the readable list of direct dependencies).
 
 ## Windows enterprise setup
 
@@ -82,7 +89,17 @@ Rules inherited from the enterprise repo, already honored in code:
 
 ## Honest limitations (MVP)
 
-- Single user, no login; "reviewer" is hardcoded in the audit trail.
+- Single user, no login; "reviewer" is hardcoded as the actor, so what the
+  code calls the audit trail is really a **decision log** (what was decided,
+  when, with what note) — not yet *who*. Follow-up for the Windows pilot:
+  record the delegated Entra sign-in's account name as the actor.
+- If the server restarts mid-run, that run is marked failed at startup with
+  a plain reason ("interrupted by a server restart — start a new run");
+  runs do not resume.
+- A batch that needs a reference file the folder lacks (staff claims with no
+  expense policy; any batch with no bank upload template) gets a run-level
+  `MISSING_REFERENCE` flag the reviewer must acknowledge before output —
+  never a silent skip.
 - One client at a time, enforced: the API rejects any client other than the
   one set in Settings on the main screen (client name + SharePoint folder;
   .env values are the first-start defaults). Per-client config files —
@@ -101,3 +118,13 @@ Rules inherited from the enterprise repo, already honored in code:
   misread degraded scans *confidently*. This doubles extraction cost
   (~US$0.10 per demo batch) and is worth every cent.
 - Claim receipts pair by filename convention; unmatched receipts are flagged, not guessed.
+  **"Claims" here means the MVP's simplified single-form claim.** The real
+  employee-claims workflow (per-employee SharePoint folders, expense-report
+  workbooks, receipt bundles, mileage against maps, one listing row per
+  employee) is a separate module, specified in [docs/PRD.md](docs/PRD.md) and
+  planned in [docs/PLAN.md](docs/PLAN.md) — not built yet.
+- The Maybank rows are template-aligned **draft** rows: every account cell is
+  `[ACCOUNT UNKNOWN]` until a vendor master exists (see above), so they are
+  not paste-and-upload ready. The listing draft's bookkeeping rules are
+  working assumptions awaiting client sign-off — see the sign-off table at
+  the end of [docs/LISTING-HARDENING.md](docs/LISTING-HARDENING.md).
