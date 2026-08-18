@@ -48,6 +48,44 @@ class LocalFolderSource:
             raise SourceUnavailable(f"Reference document {name!r} not found in {self.folder}")
         return path.read_bytes()
 
+    # -- folder walking (claims batches) ---------------------------------
+    # In local development a "folder link" is a folder on this machine,
+    # so a whole batch tree can be read without SharePoint or a zip.
+
+    def list_folder(self, folder_url: str, rel: str = "") -> list[dict]:
+        root = Path(folder_url).expanduser()
+        if not root.is_dir():
+            raise SourceUnavailable(
+                f"{folder_url!r} is not a folder on this machine. In local mode "
+                "the folder link must be a folder path (or upload a zip).")
+        target = (root / rel) if rel else root
+        # Containment: rel comes from our own walk, but be strict anyway.
+        if root.resolve() not in target.resolve().parents and target.resolve() != root.resolve():
+            raise SourceUnavailable(f"folder {rel!r} is outside the batch folder")
+        entries = []
+        for p in sorted(target.iterdir()):
+            if p.name.startswith("."):
+                continue
+            entries.append(folder_entry(
+                name=p.name, kind="folder" if p.is_dir() else "file",
+                size=None if p.is_dir() else p.stat().st_size,
+                item_id=str(p.relative_to(root)), rel=rel))
+        return entries
+
+    def download(self, folder_url: str, entry: dict) -> bytes:
+        path = Path(folder_url).expanduser() / entry["path"]
+        if not path.is_file():
+            raise SourceUnavailable(f"{entry['path']!r} not found under {folder_url}")
+        return path.read_bytes()
+
+
+def folder_entry(name: str, kind: str, size, item_id: str, rel: str) -> dict:
+    """One line of a folder listing, in the shape the claims walker uses,
+    whichever source produced it. `path` is relative to the batch folder;
+    `id` is whatever the source needs to fetch the entry again."""
+    return {"name": name, "kind": kind, "size": size, "id": item_id,
+            "path": f"{rel}/{name}" if rel else name}
+
 
 # Statuses where retrying cannot possibly help: the request itself is the
 # problem (wrong credentials, no permission, wrong path), not the connection.
@@ -185,6 +223,42 @@ class McpSource:
             f"Download of {name!r} failed after {self.RETRIES} attempts "
             f"({last_error}). Details are in the server log."
         )
+
+    # -- folder walking (claims batches) ---------------------------------
+
+    def list_folder(self, folder_url: str, rel: str = "") -> list[dict]:
+        resolved = self._call("resolve_folder_url", {"url": folder_url})
+        base = str(resolved.get("folder_path", "")).rstrip("/")
+        items = self._call("list_library_items", {
+            "site_id": resolved["site_id"], "library": resolved["library"],
+            "folder_path": f"{base}/{rel}" if rel else base,
+        }).get("items", [])
+        return [folder_entry(name=str(i.get("name", "")),
+                             kind="folder" if i.get("kind") == "folder" else "file",
+                             size=i.get("size"), item_id=str(i.get("item_id", i.get("name"))),
+                             rel=rel)
+                for i in items if i.get("name")]
+
+    def download(self, folder_url: str, entry: dict) -> bytes:
+        resolved = self._call("resolve_folder_url", {"url": folder_url})
+        last_error = ""
+        for attempt in range(1, self.RETRIES + 1):
+            meta = self._call("get_document_metadata", {
+                "site_id": resolved["site_id"], "library": resolved["library"],
+                "item_id": entry["id"],
+            })
+            try:
+                r = httpx.get(meta["download_url"], timeout=30)
+                r.raise_for_status()
+                return r.content
+            except httpx.HTTPError as exc:
+                last_error = _describe(exc)
+                log.warning("download of %s attempt %d failed: %s",
+                            entry["path"], attempt, exc, exc_info=True)
+                time.sleep(0.2 * attempt)
+        raise SourceUnavailable(
+            f"Download of {entry['path']!r} failed after {self.RETRIES} attempts "
+            f"({last_error}). Details are in the server log.")
 
 
 class RealMcpSource:
@@ -467,6 +541,74 @@ class RealMcpSource:
 
     def get_reference(self, name: str) -> bytes:
         return self._guarded(self._aget_reference(name), f"get_reference {name!r}")
+
+    # -- folder walking (claims batches) ---------------------------------
+    # A batch is a folder of employee subfolders. Listing a SUBfolder is
+    # the same list-items call with the subfolder's path (and, when the
+    # listing published one, its id) in place of the batch folder's.
+
+    def _subfolder(self, resolved: dict, rel: str) -> dict:
+        if not rel:
+            return resolved
+        sub = dict(resolved)
+        base = str(resolved.get("folder_path") or resolved.get("path") or "").strip("/")
+        path = f"{base}/{rel}" if base else rel
+        sub["folder_path"] = path
+        sub["path"] = path
+        return sub
+
+    async def _alist_folder(self, folder_url: str, rel: str) -> list[dict]:
+        from .mcp_client import McpSession
+
+        async with McpSession(self.url, self.headers, auth=self._auth()) as session:
+            resolved = await self._resolve(session)
+            payload = await self._alisting(session, self._subfolder(resolved, rel))
+        entries = []
+        for item in _unwrap_items(payload):
+            if not isinstance(item, dict):
+                continue
+            name = _item_name(item)
+            if not name:
+                continue
+            is_folder = (item.get("kind") == "folder" or bool(item.get("folder"))
+                         or item.get("type") == "folder")
+            entries.append(folder_entry(
+                name=name, kind="folder" if is_folder else "file",
+                size=item.get("size"), item_id=_item_id_for({"items": [item]}, name) or name,
+                rel=rel))
+        return entries
+
+    async def _adownload(self, folder_url: str, entry: dict) -> bytes:
+        from .mcp_client import McpSession
+
+        parent, _, name = entry["path"].rpartition("/")
+        async with McpSession(self.url, self.headers, auth=self._auth()) as session:
+            resolved = self._subfolder(await self._resolve(session), parent)
+            tool = self._tool(session, "MCP_TOOL_GET_DOCUMENT", self.DOCUMENT_KEYWORDS)
+            accepted = session.accepted_arguments(tool)
+            id_args = [k for k in _ID_KEYS if accepted and k in accepted] or ["item_id"]
+            args = {**_folder_args(resolved, folder_url), "name": name}
+            args.update(dict.fromkeys(id_args, entry["id"]))
+            payload = await session.call(tool, args)
+            data = _inline_bytes(payload)
+            if data is not None:
+                return data
+            link = _download_link(payload)
+            if not link:
+                raise SourceUnavailable(_no_document_reason(entry["path"], payload))
+            link_headers = self.headers if _same_host(link, self.url) else {}
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.get(link, headers=link_headers)
+                r.raise_for_status()
+                return r.content
+
+    def list_folder(self, folder_url: str, rel: str = "") -> list[dict]:
+        self.folder_url = folder_url
+        return self._guarded(self._alist_folder(folder_url, rel), f"list_folder {rel!r}")
+
+    def download(self, folder_url: str, entry: dict) -> bytes:
+        self.folder_url = folder_url
+        return self._guarded(self._adownload(folder_url, entry), f"download {entry['path']!r}")
 
 
 # --- reading a SharePoint address the way a person copies it ----------------

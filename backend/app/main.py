@@ -121,6 +121,9 @@ def _startup() -> None:
     # by the previous process and must be shown as failed, not "extracting".
     from .pipeline.runner import fail_interrupted_runs
     fail_interrupted_runs()
+    # Same for claims runs: they are their own tables and their own tasks.
+    from .claims.runner import fail_interrupted_runs as fail_interrupted_claims_runs
+    fail_interrupted_claims_runs()
 
 
 @app.get("/api/health")
@@ -132,6 +135,11 @@ def health() -> dict:
 from .routes import router  # noqa: E402
 
 app.include_router(router, prefix="/api")
+
+# The claims module: its own routes under /api/claims-runs, its own tables.
+from .claims.routes import router as claims_router  # noqa: E402
+
+app.include_router(claims_router, prefix="/api")
 
 # On Windows the frontend is built once (start.bat) and served from here,
 # so one process serves the whole app. /api routes above take precedence.

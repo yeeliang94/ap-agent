@@ -25,6 +25,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 def init_db() -> None:
     """Create tables that don't exist yet. Safe to call on every startup."""
     from . import models  # imported here so table classes are registered
+    from .claims import models as _claims_models  # noqa: F401 — claims_* tables
 
     config.ensure_dirs()
     Base.metadata.create_all(engine)

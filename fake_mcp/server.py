@@ -23,6 +23,9 @@ from fastapi import FastAPI, HTTPException
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_DIR = REPO_ROOT / "samples" / "generated" / "reference"
+# The nested claims batch (one subfolder per employee), at "/Claims/JUL26".
+CLAIMS_DIR = REPO_ROOT / "samples" / "generated" / "claims" / "batch"
+CLAIMS_PATH = "/Claims/JUL26"
 
 app = FastAPI(title="Fake SharePoint MCP")
 
@@ -56,8 +59,11 @@ def resolve_folder_url(body: dict) -> dict:
     # The real MCP reports the browser's "Shared Documents" library as
     # "Documents" — reproduce that alias so callers must handle it.
     if "Shared%20Documents" in url or "Shared Documents" in url:
+        from urllib.parse import unquote
+
+        tail = unquote(url).split("Shared Documents", 1)[1].strip("/")
         return {"site_id": SITE["site_id"], "library": "Documents",
-                "folder_path": "/AP Reference"}
+                "folder_path": "/" + tail if tail else "/AP Reference"}
     raise HTTPException(404, "Folder URL not recognised")
 
 
@@ -66,6 +72,18 @@ def list_items(body: dict) -> dict:
     _maybe_readerror()
     if body.get("site_id") != SITE["site_id"] or body.get("library") != "Documents":
         raise HTTPException(404, "Unknown site or library")
+    folder_path = "/" + str(body.get("folder_path", "")).strip("/")
+    if folder_path.startswith(CLAIMS_PATH):
+        rel = folder_path[len(CLAIMS_PATH):].strip("/")
+        target = (CLAIMS_DIR / rel) if rel else CLAIMS_DIR
+        if not target.is_dir():
+            raise HTTPException(404, "No such folder")
+        return {"items": [
+            {"item_id": "claims:" + str(f.relative_to(CLAIMS_DIR)), "name": f.name,
+             "size": None if f.is_dir() else f.stat().st_size,
+             "kind": "folder" if f.is_dir() else "file"}
+            for f in sorted(target.iterdir()) if not f.name.startswith(".")
+        ]}
     items = [
         {"item_id": f.name, "name": f.name, "size": f.stat().st_size,
          "kind": "file"}
@@ -77,9 +95,15 @@ def list_items(body: dict) -> dict:
 @app.post("/tools/get_document_metadata")
 def get_metadata(body: dict) -> dict:
     _maybe_readerror()
-    path = REFERENCE_DIR / str(body.get("item_id", ""))
-    if not path.is_file() or path.parent != REFERENCE_DIR:
-        raise HTTPException(404, "No such document")
+    item_id = str(body.get("item_id", ""))
+    if item_id.startswith("claims:"):
+        path = (CLAIMS_DIR / item_id[len("claims:"):]).resolve()
+        if not path.is_file() or CLAIMS_DIR.resolve() not in path.parents:
+            raise HTTPException(404, "No such document")
+    else:
+        path = REFERENCE_DIR / item_id
+        if not path.is_file() or path.parent != REFERENCE_DIR:
+            raise HTTPException(404, "No such document")
     token = uuid.uuid4().hex
     _download_tokens[token] = path
     return {
