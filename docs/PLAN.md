@@ -1,8 +1,8 @@
 # Implementation Plan: Employee Claims Verification Module
 
-**Overall Progress:** `0%`
+**Overall Progress:** `25%` (Steps 1–5 of 20)
 **PRD Reference:** [docs/PRD.md](PRD.md) (flows 1–5, check catalogue in Flow 3, steering, decisions table)
-**Last Updated:** 2026-08-18 (pre-implementation checklist complete — ready for Step 1)
+**Last Updated:** 2026-08-18 (Steps 1–5 done; Step 6 UI next)
 **Previous plan (invoice pipeline MVP, complete):** [docs/PLAN-MVP.md](PLAN-MVP.md)
 
 ## Summary
@@ -82,33 +82,33 @@ a programmer either.
 ## Tasks
 
 ### Phase 1: Foundation — sample data, tables, reader
-- [ ] 🟥 **Step 1: Synthetic claims sample (Client A, LinkedIn-shaped)** — the test bed for everything else; no real employee data is ever used.
-  - [ ] 🟥 `samples/generate_claims_sample.py`: 10 employee folders `Name_n/`, each with `Name_ER(<period>).xlsx` (tabs *Instructions*, *Expense Types* with GL codes, *Expense Report*, *KM*), a PDF print of the report, `_Approval.pdf`, and 1–2 receipt bundles (receipts drawn 3-per-page in random order; map pages at the back with a narrative line + a fake route image with the km in small text)
-  - [ ] 🟥 A "Summary of Invoices" listing workbook with the header row from the screenshot and two past tabs holding earlier ER rows
-  - [ ] 🟥 Planted errors, one per kind: overstated row (RM 10, as in the owner's Copilot test); missing receipt; same receipt used twice; km ≠ map; wrong rate; a genuine return trip (must *not* flag); "receipt = N" on Mobile Allowance (must not flag) and on Taxi (must flag); a foreign-currency row; an employee with no report; an unplaced file; a mixed-category report whose stated purpose is an offsite
-  - [ ] 🟥 `ground_truth_claims.json` (every row, every receipt with page + position, every trip, expected flags, expected listing rows) + `demo_claims_batch.zip`
+- [x] 🟩 **Step 1: Synthetic claims sample (Client A, LinkedIn-shaped)** — done 2026-08-18 — the test bed for everything else; no real employee data is ever used.
+  - [x] 🟩 `samples/generate_claims_sample.py`: 10 employee folders `Name_n/`, each with `Name_ER(<period>).xlsx` (tabs *Instructions*, *Expense Types* with GL codes, *Expense Report*, *KM*), a PDF print of the report, `_Approval.pdf`, and 1–2 receipt bundles (receipts drawn 3-per-page in random order; map pages at the back with a narrative line + a fake route image with the km in small text)
+  - [x] 🟩 A "Summary of Invoices" listing workbook with the header row from the screenshot and two past tabs holding earlier ER rows
+  - [x] 🟩 Planted errors, one per kind: overstated row (RM 10, as in the owner's Copilot test); missing receipt; same receipt used twice; km ≠ map; wrong rate; a genuine return trip (must *not* flag); "receipt = N" on Mobile Allowance (must not flag) and on Taxi (must flag); a foreign-currency row; an employee with no report; an unplaced file; a mixed-category report whose stated purpose is an offsite
+  - [x] 🟩 `ground_truth_claims.json` (every row, every receipt with page + position, every trip, expected flags, expected listing rows) + `demo_claims_batch.zip`
   - **Verify:** run the generator; open two workbooks and one receipt PDF by eye; a small script asserts 10 folders, tab names, page counts, that receipts are legible at 150 dpi, and that the km text on map pages is readable at full resolution.
 
-- [ ] 🟥 **Step 2: Claims tables + run skeleton** — a run can be created and watched before any AI exists.
-  - [ ] 🟥 `backend/app/claims/models.py`: `claims_runs`, `claim_employees`, `claim_rows`, `claim_evidence`, `claim_flags`; created alongside existing tables (no change to existing ones)
-  - [ ] 🟥 `POST /api/claims-runs` (folder link + listing link + received date + optional instructions; zip alternative for local), `GET /api/claims-runs`, `GET /api/claims-runs/{id}`; per-run workspace `runs/<id>/claims/`; background job with status transitions `queued → surveying → mapping → map_ready → verifying → ready / failed`; run diary events via telemetry
-  - [ ] 🟥 Restart-safe from day one (lesson from the MVP peer review): claims runs in an in-progress status at server start are marked failed with a plain reason via the same startup reconciliation the invoice runs now use; `map_ready` is *not* in-progress (a run waiting for a click survives a restart)
+- [x] 🟩 **Step 2: Claims tables + run skeleton** — done 2026-08-18 — a run can be created and watched before any AI exists.
+  - [x] 🟩 `backend/app/claims/models.py`: `claims_runs`, `claim_employees`, `claim_rows`, `claim_evidence`, `claim_flags`; created alongside existing tables (no change to existing ones)
+  - [x] 🟩 `POST /api/claims-runs` (folder link + listing link + received date + optional instructions; zip alternative for local), `GET /api/claims-runs`, `GET /api/claims-runs/{id}`; per-run workspace `runs/<id>/claims/`; background job with status transitions `queued → surveying → mapping → map_ready → verifying → ready / failed`; run diary events via telemetry
+  - [x] 🟩 Restart-safe from day one (lesson from the MVP peer review): claims runs in an in-progress status at server start are marked failed with a plain reason via the same startup reconciliation the invoice runs now use; `map_ready` is *not* in-progress (a run waiting for a click survives a restart)
   - **Verify:** `curl` creates a run from the zip; status advances to `surveying` and (for now) stops with a diary event; a run left at `surveying` in the DB is marked failed on the next startup while a `map_ready` run is untouched; the invoice pipeline's existing tests still pass unchanged.
 
-- [ ] 🟥 **Step 3: SharePoint reader walks subfolders** — the real batches live in nested folders.
-  - [ ] 🟥 `docsource.py`: list a folder *and its subfolders* (depth ≤ 3) and download any file under it, with the existing 3× retry; same for the fake MCP (`fake_mcp/`) with a nested test folder and the every‑7th‑call ReadError
-  - [ ] 🟥 Quotas enforced before download: 30 employee folders; 60 files / 200 pages per employee; 25 MB per file — refusal names the quota
+- [x] 🟩 **Step 3: SharePoint reader walks subfolders** — done 2026-08-18 — the real batches live in nested folders.
+  - [x] 🟩 `docsource.py`: list a folder *and its subfolders* (depth ≤ 3) and download any file under it, with the existing 3× retry; same for the fake MCP (`fake_mcp/`) with a nested test folder and the every‑7th‑call ReadError
+  - [x] 🟩 Quotas enforced before download: 30 employee folders; 60 files / 200 pages per employee; 25 MB per file — refusal names the quota
   - **Verify:** `pytest` against the fake MCP: nested folder → all files listed and downloaded, a transient error retried; stub down → structured "source unavailable"; a 31-folder tree → refused with the quota named.
 
 ### Phase 2: The map — the agent finds things itself
-- [ ] 🟥 **Step 4: Survey + peek (code only)** — everything the map AI is allowed to see, gathered without a model call.
-  - [ ] 🟥 Survey: path, type, size, page count, `ER(...)` code from the name, per subfolder
-  - [ ] 🟥 Peek: workbook → tab names + first ~15 rows of each tab as text; PDF/image → page‑1 thumbnail + page count; stored with the run
+- [x] 🟩 **Step 4: Survey + peek (code only)** — done 2026-08-18 — everything the map AI is allowed to see, gathered without a model call.
+  - [x] 🟩 Survey: path, type, size, page count, `ER(...)` code from the name, per subfolder
+  - [x] 🟩 Peek: workbook → tab names + first ~15 rows of each tab as text; PDF/image → page‑1 thumbnail + page count; stored with the run
   - **Verify:** survey JSON for the sample lists 10 folders / all files; every workbook peek shows the four tab names; every receipt bundle has a thumbnail; runtime under 10 s for the sample.
 
-- [ ] 🟥 **Step 5: Map agent + audit loop** — propose roles with reasons; code checks the guess; look again if it doesn't fit.
-  - [ ] 🟥 Map agent ("judge" role): input = survey + peeks (+ playbook + last confirmed map if any); output = per subfolder: employee?, name, ER code, report file+tab, mileage tab, receipt files, ignored files, unplaced files — **each with a one-line reason**
-  - [ ] 🟥 Audit (code): every folder/file placed; one ER code per employee, none shared; the "report" tab yields dated rows with amounts that sum to a total; a "receipts" file yields ≥ 1 receipt on page 1; mismatches go back to the AI, ≤ 3 rounds; leftovers become map warnings; status → `map_ready`; the request cap is respected
+- [x] 🟩 **Step 5: Map agent + audit loop** — done 2026-08-18 — propose roles with reasons; code checks the guess; look again if it doesn't fit.
+  - [x] 🟩 Map agent ("judge" role): input = survey + peeks (+ playbook + last confirmed map if any); output = per subfolder: employee?, name, ER code, report file+tab, mileage tab, receipt files, ignored files, unplaced files — **each with a one-line reason**
+  - [x] 🟩 Audit (code): every folder/file placed; one ER code per employee, none shared; the "report" tab yields dated rows with amounts that sum to a total; a "receipts" file yields ≥ 1 receipt on page 1; mismatches go back to the AI, ≤ 3 rounds; leftovers become map warnings; status → `map_ready`; the request cap is respected
   - **Verify:** on the sample with **no** playbook: 10/10 employees mapped correctly, the approval and report-print PDFs ignored with sensible reasons, the no-report employee marked "build rows from receipts", the planted stray file listed as unplaced; ≤ 2 rounds on every folder; a test playbook line ("maps are in folder `Maps/`") changes the map accordingly.
 
 - [ ] 🟥 **Step 6 (UI): Claims tab, New claims run form, runs list, Map & Rules view** — the reviewer can start a run and confirm the map in the browser.
@@ -181,6 +181,33 @@ a programmer either.
 
 - [ ] 🟥 **Step 20: Peer review + simplification pass** — as after the MVP.
   - **Verify:** review findings fixed and re-verified with two clean end-to-end runs on both clients.
+
+## Implementation notes (what was found on the way)
+
+- **Step 1.** The sample is smaller than a real batch on purpose (3–8 rows
+  per employee, 44 files) to keep live-AI verification cheap; the shapes
+  (three receipts per page, maps at the back, ER naming, four tabs) are the
+  real ones. Two extra planted cases beyond the plan's list, because the
+  check catalogue has them: `MILEAGE_NO_MAP` and `MILEAGE_LINE_MISMATCH`
+  (Daniel Wong). Legibility is asserted by construction (font sizes at the
+  app's render scale) — there is no OCR engine to assert with. Pillow's
+  built-in font has no glyph for typographic dashes, so drawn text uses "-".
+- **Step 2.** Zip uploads keep the folder tree (unlike the invoice zip,
+  which flattens); the listing workbook can be uploaded beside the zip in
+  local mode. Confirming the map sets `verifying` in the same commit as the
+  confirmation, so a restart before the workers start is reconciled.
+- **Step 3.** "Depth ≤ 3" means folders up to three levels below the batch
+  folder are opened. The retry lives in the walker (3×, all sources); the
+  fake MCP fails every 7th claims listing to prove it. In local mode the
+  folder link may be a folder path on the machine.
+- **Step 5.** Live check 2026-08-18 (gpt-4o, no playbook): 10/10 employees
+  mapped on round 1 in 40 s, approvals and report prints ignored with
+  quoted reasons, the no-report employee marked `no_report`. The AI called
+  the stray `notes.txt` *ignore* rather than *unplaced*; the instruction now
+  says a file it could not look inside must be *unplaced*. The audit
+  cannot judge receipt content without AI: it checks a receipts file is a
+  readable PDF/image with ≥ 1 page; the worker's page inventory does the
+  rest.
 
 ## Rollback Plan
 - Every step lands as its own commit — `git revert` any step cleanly.
