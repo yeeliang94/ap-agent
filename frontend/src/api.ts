@@ -18,6 +18,11 @@ export interface RunSummary {
 export interface AppSettings {
   client_name: string;
   sharepoint_folder_url: string;
+  /** Names on the drafted listing tab's Prepared by / Reviewed by line. */
+  draft_prepared_by: string;
+  draft_reviewed_by: string;
+  /** Estimated bank charge per payment (RM), used in the draft's fund figures. */
+  draft_bank_charge: string;
 }
 
 export async function getSettings(): Promise<AppSettings> {
@@ -111,6 +116,37 @@ export interface Outputs {
   /** Vendors the payment listing has never paid — likely not yet Maybank beneficiaries. */
   new_vendors: string[];
   totals: { bank: number; match: boolean };
+  /** Next month's listing entries, drafted as a new tab on a copy of the
+   *  client's workbook — or {skipped: why} when it could not be written. */
+  listing_draft: ListingDraft | { skipped: string };
+}
+
+export interface ListingDraft {
+  tab: string;
+  source_tab: string;
+  month: string;
+  file: string;
+  entries: {
+    voucher: string;
+    payee: string;
+    total: string;
+    invoices: { number: string; description: string; amount: string }[];
+    cells: { row: number; total: string };
+  }[];
+  invoice_count: number;
+  excluded_non_myr: number;
+  opening_balance: string;
+  net_payment: string;
+  bank_charges: string;
+  fund_to_request: string;
+  closing_balance: string;
+  prepared_by: string;
+  reviewed_by: string;
+  has_bank_block: boolean;
+}
+
+export function listingDraftUrl(runId: string): string {
+  return `/api/runs/${runId}/draft`;
 }
 
 export interface RunDetailData extends RunSummary {

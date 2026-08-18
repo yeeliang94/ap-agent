@@ -139,6 +139,12 @@ class SheetReading(BaseModel):
         description="False for cover pages, summaries, notes — they are skipped")
     columns: ColumnRoles | None = None
     entries: list[EntrySpan] = Field(default_factory=list)
+    # Two more coordinates, for writing next month's tab in the same
+    # layout: the row holding the column headers, and the first row of the
+    # summary block under the entries (totals, opening balance, fund to
+    # request). None when the sheet has none. See listing_layout.
+    header_row: int | None = Field(default=None, ge=1)
+    summary_first_row: int | None = Field(default=None, ge=1)
     why: str = Field(max_length=300)
     # Quirks worth a human's eye, in the AI's words: "column F has no
     # header", "rows 26/28 are recurring payments with no reference".
@@ -149,9 +155,15 @@ class SheetReading(BaseModel):
 @dataclass
 class SheetResult:
     """What reading one sheet produced: the flat rows, plus the plain
-    sentences the run's Activity tab shows about how it went."""
+    sentences the run's Activity tab shows about how it went. For one
+    sheet, `reading` is the accepted structural answer (None if skipped);
+    for a whole workbook, `layout` is the writer's contract learned from
+    the latest payment tab (None, with a note saying why, if it could not
+    be)."""
     rows: list[dict] = field(default_factory=list)
     notes: list[tuple[str, str]] = field(default_factory=list)  # (level, text)
+    reading: SheetReading | None = None
+    layout: object | None = None  # listing_layout.ListingLayout
 
 
 _INSTRUCTIONS = (
@@ -173,6 +185,10 @@ _INSTRUCTIONS = (
     "payment, total fund to request) are kind='other' spans, so every "
     "value on the sheet is accounted for. Signature lines with no figures "
     "need no span.\n"
+    "- header_row: the row that holds the column headings (Date, Payee, "
+    "Payment ...). summary_first_row: the first row of the summary block "
+    "under the entries (the totals row, or 'Opening balance ...'). Leave "
+    "either null if the sheet has none.\n"
     "- If the sheet holds no payment records at all, answer "
     "is_payment_sheet=false and nothing else.\n"
     "- In observations, list (briefly) anything a reviewer should know "
@@ -367,6 +383,19 @@ def audit_reading(ws, reading: SheetReading) -> list[tuple[str, str]]:
                 f"spans rows {a.first_row}-{a.last_row} and "
                 f"{b.first_row}-{b.last_row} overlap — each row belongs to at "
                 "most one span"))
+
+    # The two layout coordinates only matter for writing next month's tab,
+    # but an impossible value is still a wrong reading: feed it back.
+    if spans and reading.header_row is not None and reading.header_row >= spans[0].first_row:
+        problems.append((STRUCTURE,
+            f"header_row {reading.header_row} is not above the first span "
+            f"(row {spans[0].first_row}) — the headings sit above every entry"))
+    payment_spans = [s for s in spans if s.kind == "payment"]
+    if payment_spans and reading.summary_first_row is not None \
+            and reading.summary_first_row <= payment_spans[-1].last_row:
+        problems.append((STRUCTURE,
+            f"summary_first_row {reading.summary_first_row} is not below the "
+            f"last payment entry (ends row {payment_spans[-1].last_row})"))
 
     # Coverage: money that moved but sits outside every span means the
     # reading skipped part of the sheet.
@@ -691,7 +720,7 @@ async def read_sheet(ws, ws_formulas=None) -> SheetResult:
                     "duplicate-payment check still runs. Look at: "
                     + "; ".join(arithmetic)))
             notes += stale_notes + _observation_notes(ws, reading)
-            return SheetResult(rows=rows, notes=notes)
+            return SheetResult(rows=rows, notes=notes, reading=reading)
         log.info("sheet %r round %d: %d problem(s): %s",
                  ws.title, round_no, len(problems),
                  "; ".join(t for _, t in problems)[:500])
@@ -722,11 +751,14 @@ async def ingest_workbook(wb, wb_formulas=None) -> SheetResult:
             f"The payment listing has {len(wb.worksheets)} tabs — more than "
             f"the {MAX_SHEETS} this reader supports.")
     total = SheetResult()
+    read: list[tuple[object, SheetReading, list[dict]]] = []  # (ws, reading, rows)
     for ws in wb.worksheets:
         twin = wb_formulas[ws.title] if wb_formulas is not None else None
         one = await read_sheet(ws, twin)
         total.rows.extend(one.rows)
         total.notes.extend(one.notes)
+        if one.reading is not None:
+            read.append((ws, one.reading, one.rows))
     if not total.rows:
         raise ListingUnreadable(
             "No sheet in the payment listing produced any payment entries."
@@ -737,4 +769,29 @@ async def ingest_workbook(wb, wb_formulas=None) -> SheetResult:
         f"Payment listing read: {len(wb.worksheets)} tab(s) examined, "
         f"{len(tabs)} with payments, {len(total.rows)} invoice row(s) in total. "
         "The AI mapped each tab's structure; code extracted and verified the numbers."))
+    total.layout, note = _latest_layout(read)
+    total.notes.append(note)
     return total
+
+
+def _latest_layout(read: list[tuple[object, SheetReading, list[dict]]]):
+    """The writer's layout contract, from the payment tab whose payments
+    carry the latest date (ties and undated tabs: the last one in the
+    workbook). Returns (layout or None, an Activity note)."""
+    from .listing_layout import LayoutIncomplete, learn_layout
+
+    def latest_date(rows: list[dict]) -> str:
+        return max((r["date"] for r in rows if str(r.get("date", ""))[:4].isdigit()), default="")
+
+    if not read:
+        return None, ("INFO", "No tab yielded a layout for drafting next month's entries.")
+    ws, reading, _rows = max(enumerate(read), key=lambda ir: (latest_date(ir[1][2]), ir[0]))[1]
+    try:
+        layout = learn_layout(ws, reading)
+    except LayoutIncomplete as exc:
+        return None, ("WARNING",
+                      f"Next month's entries cannot be drafted in this workbook's layout: {exc}.")
+    return layout, ("INFO",
+                    f"Layout for drafting learned from tab {ws.title}: headers on row "
+                    f"{layout.header_row}, last voucher {layout.last_voucher or 'none'}, "
+                    f"closing balance {layout.closing_balance if layout.closing_balance is not None else 'n/a'}.")

@@ -249,12 +249,19 @@ function SettingsCard({
 }) {
   const [clientName, setClientName] = useState(current.client_name);
   const [folderUrl, setFolderUrl] = useState(current.sharepoint_folder_url);
+  const [preparedBy, setPreparedBy] = useState(current.draft_prepared_by ?? "");
+  const [reviewedBy, setReviewedBy] = useState(current.draft_reviewed_by ?? "");
+  const [bankCharge, setBankCharge] = useState(current.draft_bank_charge ?? "0.10");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
 
   const dirty =
-    clientName !== current.client_name || folderUrl !== current.sharepoint_folder_url;
+    clientName !== current.client_name ||
+    folderUrl !== current.sharepoint_folder_url ||
+    preparedBy !== (current.draft_prepared_by ?? "") ||
+    reviewedBy !== (current.draft_reviewed_by ?? "") ||
+    bankCharge !== (current.draft_bank_charge ?? "0.10");
 
   async function save() {
     setBusy(true);
@@ -262,7 +269,13 @@ function SettingsCard({
     setSaved(false);
     try {
       onSaved(
-        await saveSettings({ client_name: clientName, sharepoint_folder_url: folderUrl })
+        await saveSettings({
+          client_name: clientName,
+          sharepoint_folder_url: folderUrl,
+          draft_prepared_by: preparedBy,
+          draft_reviewed_by: reviewedBy,
+          draft_bank_charge: bankCharge,
+        })
       );
       setSaved(true);
     } catch (e) {
@@ -290,6 +303,22 @@ function SettingsCard({
           placeholder="https://…sharepoint.com/sites/…  (copy from the browser)"
           onChange={(e) => setFolderUrl(e.target.value)}
         />
+      </label>
+      <span className="sub">
+        For the drafted payment-listing tab: who signs it, and the bank charge per
+        payment used in its fund figures.
+      </span>
+      <label className="editrow">
+        <span>Prepared by (draft)</span>
+        <input value={preparedBy} onChange={(e) => setPreparedBy(e.target.value)} />
+      </label>
+      <label className="editrow">
+        <span>Reviewed by (draft)</span>
+        <input value={reviewedBy} onChange={(e) => setReviewedBy(e.target.value)} />
+      </label>
+      <label className="editrow">
+        <span>Bank charge per payment (RM)</span>
+        <input value={bankCharge} inputMode="decimal" onChange={(e) => setBankCharge(e.target.value)} />
       </label>
       <div className="actions">
         <button className="btn primary" disabled={busy || !dirty} onClick={save}>

@@ -6,6 +6,18 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
       "port": 5173
+    },
+    {
+      "name": "frontend-8003",
+      "runtimeExecutable": "env",
+      "runtimeArgs": ["AP_API_PORT=8003", "npm", "run", "dev", "--prefix", "frontend", "--", "--port", "5174"],
+      "port": 5174
+    },
+    {
+      "name": "backend",
+      "runtimeExecutable": "backend/.venv/bin/uvicorn",
+      "runtimeArgs": ["app.main:app", "--port", "8002", "--app-dir", "backend"],
+      "port": 8002
     }
   ]
 }

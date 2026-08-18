@@ -10,11 +10,13 @@ Uploads demo_batch.zip, waits for the pipeline, then asserts:
      recomputed independently from ground truth, no fabricated account
      numbers
 
-Usage: python scripts/verify_run.py   (server must be running on :8002)
+Usage: python scripts/verify_run.py   (server must be running on :8002;
+       set AP_API=http://127.0.0.1:<port>/api for another port)
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from decimal import Decimal
@@ -22,7 +24,7 @@ from pathlib import Path
 
 import httpx
 
-BASE = "http://127.0.0.1:8002/api"
+BASE = os.environ.get("AP_API", "http://127.0.0.1:8002/api")
 GEN = Path(__file__).resolve().parents[2] / "samples" / "generated"
 
 
@@ -117,17 +119,14 @@ def main() -> int:
             print("gate: outputs correctly withheld while flags are open")
 
     # ---- 5. resolve flags like a competent reviewer would -----------------
-    # Policy: a document that is BOTH hard to read (LOW_CONFIDENCE) and
-    # inconsistent with the listing (any other flag) gets its misread
-    # values CORRECTED from the source (we use ground truth as the
-    # reviewer's eyes). Everything else is accepted.
-    flags_by_doc: dict[str, list] = {}
-    for f in run["flags"]:
-        flags_by_doc.setdefault(f["document_id"], []).append(f)
-    suspect_docs = {
-        doc_id for doc_id, fl in flags_by_doc.items()
-        if len(fl) > 1 and any(x["code"] == "LOW_CONFIDENCE" for x in fl)
-    }
+    # Policy: every document the system said it was unsure about
+    # (LOW_CONFIDENCE) is checked against its source and any misread value
+    # is CORRECTED (we use ground truth as the reviewer's eyes). The listing
+    # is past payments, so a NEW invoice has no listing row to disagree
+    # with: the low-confidence note is the only signal for a misread
+    # number, and a reviewer who accepts it unread lets that number into
+    # the bank rows and the listing draft. Everything else is accepted.
+    suspect_docs = {f["document_id"] for f in run["flags"] if f["code"] == "LOW_CONFIDENCE"}
     corrected_files = []
     for d in run["documents"]:
         if d["id"] not in suspect_docs:

@@ -199,7 +199,8 @@ async def _listing_entry(refs: Path) -> dict:
     finally:
         wb.close()
         wb_formulas.close()
-    entry = {"rows": result.rows, "notes": result.notes}
+    entry = {"rows": result.rows, "notes": result.notes,
+             "layout": result.layout.to_dict() if result.layout is not None else None}
     _LISTING_CACHE[key] = entry
     return entry
 
@@ -222,6 +223,20 @@ async def load_listing_notes(refs: Path) -> list[tuple[str, str]]:
     the run's Activity tab. Reading it (and paying for it) happens on the
     first call; later calls replay from the cache."""
     return (await _listing_entry(refs))["notes"]
+
+
+async def load_listing_layout(refs: Path):
+    """The writer's layout contract learned from the latest tab (see
+    listing_layout), or None when the workbook did not yield one — the
+    Activity tab says why."""
+    from .listing_layout import ListingLayout
+    layout = (await _listing_entry(refs)).get("layout")
+    return ListingLayout.from_dict(layout) if layout else None
+
+
+def listing_file(refs: Path) -> Path:
+    """The run's own copy of the listing workbook — what the draft copies."""
+    return _role_file(refs, "payment_listing")
 
 
 def load_policy_clauses(refs: Path) -> list[dict]:

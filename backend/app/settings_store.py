@@ -23,7 +23,26 @@ DEFAULTS = {
         "SHAREPOINT_FOLDER_URL",
         "https://example.sharepoint.com/sites/clientabc/Shared%20Documents/AP%20Reference",
     ),
+    # What the payment-listing draft signs and estimates (listing_draft):
+    # the names on the Prepared by / Reviewed by line, and the bank charge
+    # per payment the client budgets (RM 0.10 is Maybank's IBG fee).
+    "draft_prepared_by": "",
+    "draft_reviewed_by": "",
+    "draft_bank_charge": "0.10",
 }
+
+
+def draft_settings() -> dict:
+    """The listing writer's inputs, typed: names as text, the charge as a
+    Decimal per payment."""
+    from decimal import Decimal, InvalidOperation
+    try:
+        charge = Decimal(get_setting("draft_bank_charge") or "0")
+    except InvalidOperation:
+        charge = Decimal("0")
+    return {"prepared_by": get_setting("draft_prepared_by"),
+            "reviewed_by": get_setting("draft_reviewed_by"),
+            "bank_charge": charge}
 
 
 def get_setting(key: str) -> str:

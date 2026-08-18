@@ -8,8 +8,11 @@ hardened after peer review:
   in a bank row is the worst thing this app could emit.
 - No paste-ready listing rows. The client's listing has its own layout
   (monthly tabs, grouped entries); emitting six-column rows labelled "paste
-  this" would be confidently wrong. Writing new entries in the client's own
-  layout is planned work (docs/LISTING-HARDENING.md), not this module yet.
+  this" would be confidently wrong. Instead, next month's entries are
+  DRAFTED as a new tab on a copy of the client's workbook, in the client's
+  own layout, by listing_draft — offered for download, never written to
+  the live listing. If the layout could not be learned, the draft is
+  skipped and the output says why.
 - Bank rows are built by mapping the template's actual headers, and only
   MYR invoices qualify (the checks stage flags the rest).
 - Reconciliation is real: totals are recomputed independently by re-parsing
@@ -20,11 +23,16 @@ hardened after peer review:
 """
 from __future__ import annotations
 
+import logging
 import re
+import shutil
 from decimal import Decimal
+from pathlib import Path
 
-from . import reference
+from . import listing_draft, reference
 from .checks import _vendor_matches
+
+log = logging.getLogger("output")
 
 ACCOUNT_UNKNOWN = "[ACCOUNT UNKNOWN - fill from vendor master]"
 
@@ -68,6 +76,42 @@ def _tsv_total(rows: list[str], amount_index: int) -> Decimal:
     for row in rows:
         total += Decimal(row.split("\t")[amount_index])
     return total
+
+
+def draft_dir(refs: Path) -> Path:
+    """Where a run keeps its listing draft: beside its reference copy."""
+    return refs.parent / "draft"
+
+
+async def _draft_listing(approved: list, refs: Path | None) -> dict:
+    """Next month's listing entries as a draft tab on a copy of the client
+    workbook. Returns the JSON-ready summary (with the file name), or
+    {"skipped": reason} — the draft is an extra deliverable, so a reason it
+    could not be written is reported, never allowed to sink the bank block.
+    """
+    if refs is None:
+        return {"skipped": "no reference copy for this run"}
+    try:
+        layout = await reference.load_listing_layout(refs)
+        if layout is None:
+            return {"skipped": "the listing's layout could not be learned from its "
+                               "latest tab (see the Activity tab)"}
+        from ..settings_store import draft_settings
+        source = reference.listing_file(refs)
+        draft = listing_draft.build_draft(
+            source.read_bytes(), layout, await reference.load_payment_listing(refs),
+            approved, draft_settings(), suffix=source.suffix.lower())
+    except listing_draft.DraftError as exc:
+        return {"skipped": str(exc)}
+    except Exception as exc:  # a bug here must not hide the bank block
+        log.exception("listing draft failed: %s", exc)
+        return {"skipped": f"could not build the draft: {exc}"}
+    folder = draft_dir(refs)
+    shutil.rmtree(folder, ignore_errors=True)   # one draft per run, always current
+    folder.mkdir(parents=True, exist_ok=True)
+    name = _safe_filename(f"{source.stem} - {draft.tab}") + draft.suffix
+    (folder / name).write_bytes(draft.data)
+    return {**draft.summary, "file": name, "source_file": source.name}
 
 
 async def build_outputs(docs: list, excluded_doc_ids: set[str],
@@ -150,4 +194,7 @@ async def build_outputs(docs: list, excluded_doc_ids: set[str],
             "bank": float(bank_total),
             "match": match,
         },
+        # Next month's listing entries, drafted on a copy of the workbook —
+        # or {"skipped": why}.
+        "listing_draft": await _draft_listing(approved, refs),
     }

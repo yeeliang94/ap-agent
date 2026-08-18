@@ -32,6 +32,11 @@ class InvoiceFields(BaseModel):
     # never a real reading — force the model to re-answer.
     amount: float = Field(gt=0, allow_inf_nan=False)
     currency: str = Field(pattern=CURRENCY_PATTERN, description="3-letter code; RM means MYR")
+    # One short line saying what the invoice is for, as the payment listing
+    # would describe it ("Mobile lines - Jun 2026"). Prose, not a number:
+    # it is the only AI-drafted text in the listing draft. Empty if unclear.
+    description: str = Field(default="", max_length=120,
+                             description="what the invoice is for, in one short line")
     # Field name -> note, ONLY for fields the model wasn't sure about,
     # e.g. {"amount": "low - digits partially blurred"}
     low_confidence: dict[str, str] = Field(default_factory=dict)

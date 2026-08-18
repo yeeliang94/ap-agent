@@ -18,7 +18,9 @@ from .images import document_to_pngs
 
 _INVOICE_INSTRUCTIONS = (
     "Read this vendor invoice exactly as printed. Dates in YYYY-MM-DD. "
-    "Currency as a 3-letter code (RM means MYR). "
+    "Currency as a 3-letter code (RM means MYR). In description, say in one "
+    "short line what the invoice is for, the way a payment listing would "
+    "('Mobile lines - Jun 2026', 'Office cleaning - May 2026'); no amounts. "
     "CRITICAL: if the image is blurry, damaged, or ANY character could "
     "plausibly be misread, you MUST list each affected field in "
     "low_confidence with a short note — a wrong value presented confidently "

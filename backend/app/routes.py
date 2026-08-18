@@ -38,12 +38,19 @@ def get_settings() -> dict:
     return {
         "client_name": settings_store.get_setting("client_name"),
         "sharepoint_folder_url": settings_store.get_setting("sharepoint_folder_url"),
+        "draft_prepared_by": settings_store.get_setting("draft_prepared_by"),
+        "draft_reviewed_by": settings_store.get_setting("draft_reviewed_by"),
+        "draft_bank_charge": settings_store.get_setting("draft_bank_charge"),
     }
 
 
 @router.put("/settings")
 def update_settings(body: dict) -> dict:
-    """Save the on-screen settings. body = {client_name, sharepoint_folder_url}."""
+    """Save the on-screen settings. body = {client_name, sharepoint_folder_url,
+    draft_prepared_by, draft_reviewed_by, draft_bank_charge}; the draft
+    fields are optional and keep their current value when absent."""
+    from decimal import Decimal, InvalidOperation
+
     client_name = body.get("client_name")
     folder_url = body.get("sharepoint_folder_url")
     if not isinstance(client_name, str) or not client_name.strip():
@@ -55,10 +62,24 @@ def update_settings(body: dict) -> dict:
                                  "copy it from the browser's address bar.")
     if len(folder_url.strip()) > 500:
         raise HTTPException(400, "SharePoint folder URL is too long (max 500 characters).")
-    settings_store.set_settings({
+    values = {
         "client_name": client_name.strip(),
         "sharepoint_folder_url": folder_url.strip(),
-    })
+    }
+    for key in ("draft_prepared_by", "draft_reviewed_by"):
+        if key in body:
+            if not isinstance(body[key], str) or len(body[key].strip()) > 80:
+                raise HTTPException(400, f"{key.replace('_', ' ')} must be text, at most 80 characters.")
+            values[key] = body[key].strip()
+    if "draft_bank_charge" in body:
+        try:
+            charge = Decimal(str(body["draft_bank_charge"]).strip() or "0")
+        except InvalidOperation:
+            raise HTTPException(400, "Bank charge per payment must be a number, e.g. 0.10.")
+        if charge < 0 or charge > 1000:
+            raise HTTPException(400, "Bank charge per payment must be between 0 and 1000.")
+        values["draft_bank_charge"] = f"{charge:.2f}"
+    settings_store.set_settings(values)
     return get_settings()
 
 # Only these file types may come out of an uploaded zip. Anything else is
@@ -272,6 +293,32 @@ def get_document_file(run_id: str, doc_id: str):
         if not path.exists():
             raise HTTPException(404, "File missing from workspace.")
         return FileResponse(path)
+    finally:
+        db.close()
+
+
+@router.get("/runs/{run_id}/draft")
+def get_listing_draft(run_id: str):
+    """The drafted payment-listing workbook (a copy of the client's file with
+    one new tab). Gated like every other output: nothing leaves while a
+    flag is still open."""
+    db = SessionLocal()
+    try:
+        run = db.get(Run, run_id)
+        if not run:
+            raise HTTPException(404, "No such run.")
+        open_flags = db.query(Flag).filter(Flag.run_id == run_id, Flag.status == "open").count()
+        if run.status != "ready" or open_flags:
+            raise HTTPException(409, "The draft is available once every flag is decided.")
+        draft = (run.outputs or {}).get("listing_draft") or {}
+        name = draft.get("file")
+        if not name:
+            raise HTTPException(404, draft.get("skipped") or "No listing draft for this run.")
+        path = output_builder.draft_dir(reference.run_refs(run_id)) / name
+        if not path.is_file():
+            raise HTTPException(404, "Draft file missing from workspace — rebuild by deciding any flag again.")
+        return FileResponse(path, filename=name,
+                            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     finally:
         db.close()
 

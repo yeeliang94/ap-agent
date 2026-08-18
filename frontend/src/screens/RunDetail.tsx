@@ -9,6 +9,8 @@ import {
   Doc,
   FlagItem,
   RunDetailData,
+  Outputs,
+  listingDraftUrl,
   RunEvent,
 } from "../api";
 
@@ -440,13 +442,7 @@ function Output({ run }: { run: RunDetailData }) {
           registered Maybank beneficiaries before uploading: {out.new_vendors.join(", ")}
         </p>
       )}
-      <p className="muted">
-        This output covers the bank upload and file names only. Drafting the
-        new payment-listing entries in the client's own workbook layout is
-        planned but not built yet — add them in the listing workbook by hand
-        for now. Every invoice was already checked against the existing
-        listing (see flags).
-      </p>
+      <ListingDraftCard runId={run.id} draft={out.listing_draft} />
       {/* No template in the reference folder means no column layout to
           follow, so the block is omitted rather than shown empty. */}
       {!out.bank_skipped && (
@@ -466,6 +462,67 @@ function Output({ run }: { run: RunDetailData }) {
       <p className="sub">
         Nothing is written to your files — you paste each block into the real working
         document yourself. Uploading to the bank remains a human action, always.
+      </p>
+    </div>
+  );
+}
+
+// Next month's payment-listing entries, drafted as ONE new tab on a copy
+// of the client's workbook. A draft: it is downloaded, checked and pasted
+// by a person after the bank run — never written into the live listing,
+// because the listing is the record of payments that have happened.
+function ListingDraftCard({
+  runId,
+  draft,
+}: {
+  runId: string;
+  draft: Outputs["listing_draft"] | undefined;
+}) {
+  if (!draft || "skipped" in draft) {
+    return (
+      <div className="card">
+        <b>Payment-listing draft</b>
+        <p className="muted">
+          No draft was written for this run: {draft?.skipped ?? "not built"}. Add the
+          new entries in the listing workbook by hand.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="card">
+      <b>Payment-listing draft — tab “{draft.tab}”</b>
+      <span className="sub">
+        {draft.entries.length} payment {draft.entries.length === 1 ? "entry" : "entries"} ·{" "}
+        {draft.invoice_count} invoice{draft.invoice_count === 1 ? "" : "s"}, laid out like
+        tab “{draft.source_tab}”; voucher numbers {draft.entries[0]?.voucher || "blank"}
+        {draft.entries.length > 1 ? ` … ${draft.entries[draft.entries.length - 1].voucher}` : ""}
+        {draft.excluded_non_myr > 0 ? ` · ${draft.excluded_non_myr} non-MYR invoice(s) left out` : ""}
+      </span>
+      {draft.has_bank_block && (
+        <p className="muted">
+          Balance b/f RM {draft.opening_balance} · net payment RM {draft.net_payment} · estimated
+          bank charges RM {draft.bank_charges} · total fund to request RM {draft.fund_to_request}{" "}
+          (balance returns to RM {draft.closing_balance}).
+        </p>
+      )}
+      <ul className="muted">
+        {draft.entries.map((e) => (
+          <li key={e.payee}>
+            {e.voucher || "—"} · {e.payee} · RM {e.total}
+            {e.invoices.length > 1 ? ` (${e.invoices.map((i) => i.number).join(", ")})` : ` (${e.invoices[0].number})`}
+          </li>
+        ))}
+      </ul>
+      <div className="actions">
+        <a className="btn primary" href={listingDraftUrl(runId)} download={draft.file}>
+          Download draft workbook
+        </a>
+      </div>
+      <p className="basis">
+        This is a DRAFT on a copy of the client's workbook. Payment dates are left blank
+        and the voucher numbers and fund figures are to be confirmed after the bank run —
+        a person finalises it; nothing is written into the live listing.
       </p>
     </div>
   );
