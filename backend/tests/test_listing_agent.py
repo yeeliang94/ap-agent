@@ -402,6 +402,25 @@ async def test_loop_feeds_problems_back_and_accepts_correction(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ai_observations_reach_the_activity_tab(monkeypatch):
+    """Quirks the AI noticed while mapping the sheet ('column F has no
+    header') are printed, so a silent oddity becomes a visible one."""
+    wb, ws = _icmr_sheet()
+    seen = GOOD_READING.model_copy(update={"observations": [
+        "column F has no header", "rows 26/28 are recurring payments"]})
+    agent = _ScriptedAgent([seen])
+    monkeypatch.setattr(listing_agent, "create_agent", lambda *a, **k: agent)
+    result = await listing_agent.read_sheet(ws)
+    obs = [t for lvl, t in result.notes if "AI observations" in t]
+    assert len(obs) == 1 and lvl_ok(result.notes)
+    assert "column F has no header" in obs[0] and "recurring payments" in obs[0]
+
+
+def lvl_ok(notes) -> bool:
+    return all(lvl in ("INFO", "WARNING") for lvl, _ in notes)
+
+
+@pytest.mark.asyncio
 async def test_arithmetic_only_leftover_is_accepted_with_a_warning(monkeypatch):
     """The listing exists to answer 'was this invoice paid before?'. Once
     the reading's STRUCTURE verifies (columns named, every payment covered,

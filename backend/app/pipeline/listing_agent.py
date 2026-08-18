@@ -125,6 +125,10 @@ class SheetReading(BaseModel):
     columns: ColumnRoles | None = None
     entries: list[EntrySpan] = Field(default_factory=list)
     why: str = Field(max_length=300)
+    # Quirks worth a human's eye, in the AI's words: "column F has no
+    # header", "rows 26/28 are recurring payments with no reference".
+    # Printed in the Activity tab, never acted on by code.
+    observations: list[str] = Field(default_factory=list, max_length=10)
 
 
 @dataclass
@@ -155,7 +159,10 @@ _INSTRUCTIONS = (
     "value on the sheet is accounted for. Signature lines with no figures "
     "need no span.\n"
     "- If the sheet holds no payment records at all, answer "
-    "is_payment_sheet=false and nothing else."
+    "is_payment_sheet=false and nothing else.\n"
+    "- In observations, list (briefly) anything a reviewer should know "
+    "about this sheet: an unlabelled column, entries with no reference "
+    "number, hidden or odd rows, notes in the margins. Up to 10 short lines."
 )
 
 
@@ -527,6 +534,14 @@ def _describe_columns(cols: ColumnRoles | None) -> str:
                      for role, letter in cols.model_dump().items() if letter)
 
 
+def _observation_notes(ws, reading: SheetReading) -> list[tuple[str, str]]:
+    """The AI's own remarks about the sheet, as one Activity line."""
+    obs = [o.strip()[:200] for o in reading.observations if o.strip()]
+    if not obs:
+        return []
+    return [("INFO", f"Tab {ws.title}: AI observations — " + "; ".join(obs) + ".")]
+
+
 async def read_sheet(ws) -> SheetResult:
     """The reason/act loop for one sheet.
 
@@ -568,10 +583,11 @@ async def read_sheet(ws) -> SheetResult:
                     f"Tab {ws.title}: SKIPPED although it carries payment-style "
                     f"headers — the AI twice judged it holds no payment records "
                     f"({reading.why!r}). If this tab lists payments, no invoice "
-                    "was checked against it: open it and confirm.")])
+                    "was checked against it: open it and confirm.")]
+                    + _observation_notes(ws, reading))
             return SheetResult(notes=[(
                 "INFO", f"Tab {ws.title}: skipped, not a payment sheet — "
-                        f"AI: {reading.why!r}.")])
+                        f"AI: {reading.why!r}.")] + _observation_notes(ws, reading))
         try:
             problems = audit_reading(ws, reading)
         except Exception as exc:
@@ -599,6 +615,7 @@ async def read_sheet(ws) -> SheetResult:
                     f"reconcile after {MAX_ROUNDS} rounds; accepted so the "
                     "duplicate-payment check still runs. Look at: "
                     + "; ".join(arithmetic)))
+            notes += _observation_notes(ws, reading)
             return SheetResult(rows=rows, notes=notes)
         log.info("sheet %r round %d: %d problem(s): %s",
                  ws.title, round_no, len(problems),

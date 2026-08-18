@@ -98,19 +98,83 @@ async def test_outputs_omit_bank_block_when_template_missing(monkeypatch):
 
 
 def test_match_listing_row_is_vendor_scoped():
-    from app.pipeline.checks import match_listing_row
-    by_number = {"13561": [
+    from app.pipeline.checks import ListingIndex
+    index = ListingIndex([
         {"invoice_number": "13561", "vendor": "Good News Resources Sdn Bhd"},
         {"invoice_number": "13561", "vendor": "Maxis Bhd"},
-    ]}
+    ])
     # the vendor breaks the tie
-    row, cands = match_listing_row(by_number, "13561", "Maxis")
-    assert row is not None and row["vendor"] == "Maxis Bhd" and len(cands) == 2
+    m = index.match("13561", "Maxis")
+    assert m.row is not None and m.row["vendor"] == "Maxis Bhd" and len(m.candidates) == 2
+    assert m.loose is False
     # no vendor singles one out -> ambiguous, never a guess
-    row, cands = match_listing_row(by_number, "13561", "Unrelated Trading")
-    assert row is None and len(cands) == 2
+    m = index.match("13561", "Unrelated Trading")
+    assert m.row is None and len(m.candidates) == 2
     # unknown number -> no candidates at all
-    assert match_listing_row(by_number, "99999", "Maxis") == (None, [])
+    m = index.match("99999", "Maxis")
+    assert (m.row, m.candidates) == (None, [])
+
+
+def test_loose_reference_match_needs_a_unique_vendor_supported_candidate():
+    """'INV 1023' on the invoice and 'INV-1023' in the listing are the same
+    reference re-typed. Matching on a normalised key finds it — but the key
+    can also collapse genuinely different references, so a loose hit is a
+    match only when it is the ONLY candidate and the vendor agrees; anything
+    else is ambiguous, never a pick. Raw values are kept for display."""
+    from app.pipeline.checks import ListingIndex, reference_key
+    assert reference_key("inv 1023") == reference_key("INV-1023") == reference_key("Inv_10 23")
+
+    index = ListingIndex([
+        {"invoice_number": "INV-1023", "vendor": "Maxis Bhd"},
+        {"invoice_number": "AB 77", "vendor": "Alpha"},
+        {"invoice_number": "AB-77", "vendor": "Beta"},
+        {"invoice_number": "CD-1", "vendor": "Gamma"},
+    ])
+    # unique + vendor agrees -> a loose match, said to be loose
+    m = index.match("INV 1023", "Maxis")
+    assert m.row is not None and m.row["invoice_number"] == "INV-1023" and m.loose is True
+    # unique but the vendor does not support it -> ambiguous, not a pick
+    m = index.match("INV 1023", "Unrelated Trading")
+    assert m.row is None and len(m.candidates) == 1 and m.loose is True
+    # two loose candidates -> ambiguous even though the vendor fits one
+    m = index.match("AB77", "Alpha")
+    assert m.row is None and len(m.candidates) == 2 and m.loose is True
+    # an exact raw hit is preferred over loose neighbours and is not "loose"
+    m = index.match("AB-77", "Beta")
+    assert m.row is not None and m.row["vendor"] == "Beta" and m.loose is False
+    # exact-vs-loose: the exact hit wins even when the vendor differs
+    m = index.match("CD-1", "Nobody")
+    assert m.row is not None and m.loose is False
+
+
+@pytest.mark.asyncio
+async def test_loose_match_is_named_in_the_flag(monkeypatch):
+    from app.pipeline import checks
+
+    listing = [{"sheet": "Jul'26", "row": 8, "no": "PV1", "date": "2026-07-23",
+                "vendor": "Maxis Bhd", "invoice_number": "INV-1023",
+                "amount": 50.0, "status": "Paid", "note": ""},
+               {"sheet": "Jun'26", "row": 8, "no": "PV0", "date": "2026-06-23",
+                "vendor": "Alpha", "invoice_number": "AB 77",
+                "amount": 5.0, "status": "Paid", "note": ""},
+               {"sheet": "Jul'26", "row": 9, "no": "PV2", "date": "2026-07-23",
+                "vendor": "Beta", "invoice_number": "AB-77",
+                "amount": 5.0, "status": "Paid", "note": ""}]
+
+    async def fake_listing(*a, **k):
+        return listing
+    monkeypatch.setattr(reference, "load_payment_listing", fake_listing)
+    monkeypatch.setattr(reference, "load_policy_clauses", lambda *a, **k: [])
+    docs = [_Doc("a", "INV 1023", 50.0), _Doc("b", "AB77", 5.0)]
+    docs[0].fields["vendor"] = "Maxis Bhd"
+    docs[1].fields["vendor"] = "Alpha"
+    flags = await checks.run_checks(docs)
+    by_code = {}
+    for fl in flags:
+        by_code.setdefault(fl["code"], []).append(fl["reason"])
+    assert "matched loosely: 'INV 1023' ↔ 'INV-1023'" in by_code["ALREADY_PAID"][0]
+    ambiguous = by_code["LISTING_AMBIGUOUS"][0]
+    assert "AB77" in ambiguous and "'AB 77'" in ambiguous and "'AB-77'" in ambiguous
 
 
 @pytest.mark.asyncio

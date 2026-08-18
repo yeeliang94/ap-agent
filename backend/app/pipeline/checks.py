@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import date, datetime
 
 from ..model_layer import USAGE_LIMITS, create_agent
@@ -106,23 +107,70 @@ def where_in_listing(row: dict) -> str:
     return ", ".join(bits) if bits else "the payment listing"
 
 
-def match_listing_row(by_number: dict[str, list[dict]], number: str,
-                      vendor: str) -> tuple[dict | None, list[dict]]:
-    """(matched row, all candidates) for an invoice number + vendor.
+def reference_key(number: str) -> str:
+    """A reference number as a tolerant lookup key: case, spaces and the
+    usual separators (- _ / .) ignored, so 'INV 1023' finds 'INV-1023'.
+    Display always uses the raw values — the key is for finding, not
+    showing."""
+    return re.sub(r"[\s\-_/.]+", "", str(number)).upper()
+
+
+@dataclass
+class ListingMatch:
+    row: dict | None          # the one row this invoice matches, if any
+    candidates: list[dict]    # every row considered (for the ambiguous flag)
+    loose: bool = False       # found by normalised key, not the raw string
+
+
+class ListingIndex:
+    """Past-payment rows indexed for lookup by invoice number.
 
     Invoice numbers are vendor-scoped in the real world: a year of monthly
     tabs can hold the same number twice for different vendors. So a number
     hit alone is only a match when it is unambiguous; several candidates
-    need the vendor to break the tie, and (None, many) = genuinely
+    need the vendor to break the tie; anything else is genuinely
     ambiguous, which callers must surface, never guess through.
+
+    Two tiers, exact first:
+      - EXACT: the raw strings are equal. One candidate matches outright
+        (a vendor mismatch is then its own flag); several need the vendor.
+      - LOOSE: equal only after normalisation (see reference_key). This
+        catches a re-typed number — but the key can also collapse two
+        genuinely different references, so a loose hit is a match ONLY
+        when it is the sole candidate AND the vendor agrees. Anything else
+        is ambiguous.
     """
-    candidates = by_number.get(number, [])
-    if len(candidates) == 1:
-        return candidates[0], candidates
-    matched = [r for r in candidates if _vendor_matches(vendor, r["vendor"])]
-    if len(matched) == 1:
-        return matched[0], candidates
-    return None, candidates
+
+    def __init__(self, rows: list[dict]) -> None:
+        # A plain dict keyed by number would keep only the last row and
+        # silently discard same-numbered rows from other vendors or tabs.
+        self._exact: dict[str, list[dict]] = {}
+        self._loose: dict[str, list[dict]] = {}
+        for r in rows:
+            raw = str(r["invoice_number"]).strip()
+            self._exact.setdefault(raw, []).append(r)
+            self._loose.setdefault(reference_key(raw), []).append(r)
+
+    def match(self, number: str, vendor: str) -> ListingMatch:
+        number = str(number).strip()
+        exact = self._exact.get(number, [])
+        if exact:
+            if len(exact) == 1:
+                return ListingMatch(exact[0], exact)
+            supported = [r for r in exact if _vendor_matches(vendor, r["vendor"])]
+            return ListingMatch(supported[0] if len(supported) == 1 else None, exact)
+        loose = self._loose.get(reference_key(number), [])
+        if not loose:
+            return ListingMatch(None, [])
+        if len(loose) == 1 and _vendor_matches(vendor, loose[0]["vendor"]):
+            return ListingMatch(loose[0], loose, loose=True)
+        return ListingMatch(None, loose, loose=True)
+
+
+def _loosely(number: str, row: dict) -> str:
+    """The 'matched loosely' remark for a row found by key, else ''."""
+    raw = str(row.get("invoice_number", "")).strip()
+    return f" (matched loosely: {number!r} ↔ {raw!r})" if raw != str(number).strip() else ""
 
 
 async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
@@ -147,12 +195,7 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
     def want(d) -> bool:
         return only_doc_ids is None or d.id in only_doc_ids
     listing = await reference.load_payment_listing(refs)
-    # Number -> ALL rows with that number. A plain dict would keep only the
-    # last row, silently discarding same-numbered rows from other vendors
-    # or other monthly tabs.
-    listing_by_number: dict[str, list[dict]] = {}
-    for r in listing:
-        listing_by_number.setdefault(r["invoice_number"], []).append(r)
+    index = ListingIndex(listing)
     # What "not found" was measured against, so the flag can say so.
     listing_tabs = sorted({r["sheet"] for r in listing if r.get("sheet")})
     searched = (f"{len(listing)} invoice row(s)"
@@ -179,8 +222,8 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
                 "Rule: one invoice number may appear only once per batch."))
         seen_numbers.setdefault(number, d.filename)
 
-        listed, candidates = match_listing_row(
-            listing_by_number, number, str(f.get("vendor", "")))
+        m = index.match(number, str(f.get("vendor", "")))
+        listed, candidates = m.row, m.candidates
         if not candidates:
             # The listing is PAST payments, so "not found" is the normal,
             # healthy case for a new invoice: no flag. The batch-level
@@ -190,16 +233,17 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
         elif listed is None:
             tally["ambiguous"] += 1
             flags_out.append(_mk_flag(d.id, "LISTING_AMBIGUOUS",
-                f"Invoice {number} matches {len(candidates)} listing rows and "
-                f"the document vendor '{f.get('vendor')}' does not single one "
-                "out. Candidates: "
-                + "; ".join(where_in_listing(r) for r in candidates) + ".",
+                f"Invoice {number} {'loosely ' if m.loose else ''}matches "
+                f"{len(candidates)} listing row(s) and the document vendor "
+                f"'{f.get('vendor')}' does not single one out. Candidates: "
+                + "; ".join(where_in_listing(r) + _loosely(number, r)
+                            for r in candidates) + ".",
                 "Rule: a listing match must be unambiguous — a human picks."))
         else:
             tally["matched"] += 1
             # A number match alone is not enough — the matched row must
             # actually be this invoice, and must not already be paid.
-            where = where_in_listing(listed)
+            where = where_in_listing(listed) + _loosely(number, listed)
             if "paid" in str(listed["status"]).lower():
                 flags_out.append(_mk_flag(d.id, "ALREADY_PAID",
                     f"Invoice {number} was already paid: {where} (status "
