@@ -48,7 +48,6 @@ def _mk_flag(doc_id: str, code: str, reason: str, basis: str = "") -> dict:
 # every corrected field (conservative — re-raise rather than hide).
 RULE_FIELDS: dict[str, set[str]] = {
     "DUPLICATE": {"invoice_number"},
-    "NOT_IN_LISTING": {"invoice_number"},
     "LISTING_AMBIGUOUS": {"invoice_number", "vendor"},
     "ALREADY_PAID": {"invoice_number"},
     "AMOUNT_MISMATCH": {"invoice_number", "amount"},
@@ -127,7 +126,8 @@ def match_listing_row(by_number: dict[str, list[dict]], number: str,
 
 
 async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
-                     refs=None) -> list[dict]:
+                     refs=None, notes: list[tuple[str, str]] | None = None
+                     ) -> list[dict]:
     """Return flag dicts for everything a human must decide.
 
     only_doc_ids narrows WHICH documents get flags (used when re-checking a
@@ -135,8 +135,14 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
     is still built from the whole batch. refs is the run's private copy of
     the reference files (reference.run_refs), so a run is always judged
     against the files it started with — not whatever the folder holds now.
+
+    notes, if given, receives (level, sentence) pairs for the run's Activity
+    tab — batch-level facts that are not anyone's flag, such as how many
+    invoices are new. Only written for a whole-batch check.
     """
     flags: list[dict] = []
+    # How the batch fared against the listing: new / matched / ambiguous.
+    tally = {"new": 0, "matched": 0, "ambiguous": 0}
 
     def want(d) -> bool:
         return only_doc_ids is None or d.id in only_doc_ids
@@ -176,11 +182,13 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
         listed, candidates = match_listing_row(
             listing_by_number, number, str(f.get("vendor", "")))
         if not candidates:
-            flags_out.append(_mk_flag(d.id, "NOT_IN_LISTING",
-                f"Invoice {number} ({f.get('vendor')}) is not in the payment "
-                f"listing — searched {searched}.",
-                "Rule: every invoice must match a planned-payment row in the listing."))
+            # The listing is PAST payments, so "not found" is the normal,
+            # healthy case for a new invoice: no flag. The batch-level
+            # count is written to the Activity tab below, so a reviewer
+            # can still see how many were new and what was searched.
+            tally["new"] += 1
         elif listed is None:
+            tally["ambiguous"] += 1
             flags_out.append(_mk_flag(d.id, "LISTING_AMBIGUOUS",
                 f"Invoice {number} matches {len(candidates)} listing rows and "
                 f"the document vendor '{f.get('vendor')}' does not single one "
@@ -188,6 +196,7 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
                 + "; ".join(where_in_listing(r) for r in candidates) + ".",
                 "Rule: a listing match must be unambiguous — a human picks."))
         else:
+            tally["matched"] += 1
             # A number match alone is not enough — the matched row must
             # actually be this invoice, and must not already be paid.
             where = where_in_listing(listed)
@@ -233,6 +242,19 @@ async def run_checks(docs: list, only_doc_ids: set[str] | None = None,
             flags_out.append(_mk_flag(d.id, "BAD_DATE",
                 f"Could not read a valid date on invoice {number} "
                 f"(got: {f.get('date')!r})."))
+
+    # The batch against the listing, in one line for the Activity tab. Only
+    # for a whole-batch check: a one-document re-check would say "0 of 1".
+    total = sum(tally.values())
+    if notes is not None and only_doc_ids is None and total:
+        parts = [f"{tally['new']} of {total} invoice(s) are new — not in any "
+                 f"past listing tab (searched {searched})"]
+        if tally["matched"]:
+            parts.append(f"{tally['matched']} matched a past payment (see the "
+                         "ALREADY_PAID / mismatch flags)")
+        if tally["ambiguous"]:
+            parts.append(f"{tally['ambiguous']} ambiguous (LISTING_AMBIGUOUS)")
+        notes.append(("INFO", "; ".join(parts) + "."))
 
     # ---- claims: AI picks the clause, code verifies and does the math --
     policy_text = "\n".join(

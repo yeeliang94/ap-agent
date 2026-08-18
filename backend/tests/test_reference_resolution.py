@@ -180,7 +180,8 @@ async def test_listing_flags_point_at_the_workbook_row(monkeypatch):
             _Doc("c", "NEW-1", 10.0)]
     docs[0].fields["vendor"] = "Genspark"
     docs[1].fields["vendor"] = "Unrelated Trading"
-    flags = await checks.run_checks(docs)
+    notes: list[tuple[str, str]] = []
+    flags = await checks.run_checks(docs, notes=notes)
     by_code = {}
     for fl in flags:
         by_code.setdefault(fl["code"], []).append(fl["reason"])
@@ -193,8 +194,30 @@ async def test_listing_flags_point_at_the_workbook_row(monkeypatch):
     assert "tab Jul'26 row 12" in by_code["VENDOR_MISMATCH"][0]
     ambiguous = by_code["LISTING_AMBIGUOUS"][0]
     assert "tab Apr'26 row 9" in ambiguous and "tab Jul'26 row 16" in ambiguous
-    not_found = by_code["NOT_IN_LISTING"][0]
-    assert "3 invoice row(s) across 2 tab(s): Apr'26, Jul'26" in not_found
+    # A new invoice — one no past tab has paid — is the normal, healthy case,
+    # so it raises NO flag; the batch-level count goes to the Activity tab.
+    assert "NOT_IN_LISTING" not in by_code
+    assert [fl["code"] for fl in flags if fl["document_id"] == "c"] == ["OLD_DATED"]
+    assert len(notes) == 1 and notes[0][0] == "INFO"
+    assert "1 of 3 invoice(s) are new" in notes[0][1]
+    assert "3 invoice row(s) across 2 tab(s): Apr'26, Jul'26" in notes[0][1]
+    assert "1 matched a past payment" in notes[0][1]
+    assert "1 ambiguous" in notes[0][1]
+
+
+@pytest.mark.asyncio
+async def test_single_document_recheck_writes_no_batch_count(monkeypatch):
+    """The count line describes the whole batch; a re-check of one corrected
+    document must not write a misleading '0 of 1' line."""
+    from app.pipeline import checks
+
+    async def fake_listing(*a, **k):
+        return []
+    monkeypatch.setattr(reference, "load_payment_listing", fake_listing)
+    monkeypatch.setattr(reference, "load_policy_clauses", lambda *a, **k: [])
+    notes: list[tuple[str, str]] = []
+    await checks.run_checks([_Doc("a", "X-1", 1.0)], only_doc_ids={"a"}, notes=notes)
+    assert notes == []
 
 
 def test_each_run_keeps_its_own_copy_of_the_reference_files(monkeypatch, tmp_path):

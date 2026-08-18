@@ -141,12 +141,17 @@ async def process_run(run_id: str, workspace: Path) -> None:
         # ---- check ------------------------------------------------------
         _set(db, run, status="checking", progress={})
         started = time.monotonic()
+        check_notes: list[tuple[str, str]] = []
         try:
-            flag_dicts = await run_checks(docs, refs=refs)
+            flag_dicts = await run_checks(docs, refs=refs, notes=check_notes)
         except Exception as exc:
             telemetry.record_failure(db, run_id, "check", "CHECKS_FAILED",
                                      "The checking stage could not complete", exc)
             raise
+        for level, text in check_notes:
+            telemetry.record(db, run_id, "check",
+                             telemetry.WARNING if level == "WARNING" else telemetry.INFO,
+                             "LISTING_MATCHES", text)
         for fd in flag_dicts:
             db.add(Flag(run_id=run_id, **fd))
         for d in docs:

@@ -83,7 +83,7 @@ class Flag(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
     document_id: Mapped[str] = mapped_column(String, default="")
-    # Machine code, e.g. NOT_IN_LISTING / OVER_CAP / OLD_DATED / LOW_CONFIDENCE
+    # Machine code, e.g. ALREADY_PAID / OVER_CAP / OLD_DATED / LOW_CONFIDENCE
     code: Mapped[str] = mapped_column(String)
     # Human sentence: why this was flagged.
     reason: Mapped[str] = mapped_column(Text)
