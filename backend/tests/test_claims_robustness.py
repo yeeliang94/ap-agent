@@ -218,3 +218,68 @@ def test_subtotal_row_inside_the_span_can_be_skipped(monkeypatch):
     with pytest.raises(report_reader.ReportUnreadable) as exc:
         asyncio.run(report_reader.read_report(ws, "Aegene Ong", "ER(01JUL26-21JUL26)"))
     assert "row 10 is in skip_rows" in str(exc.value)
+
+
+# ---- R4: the same receipt on two pages -----------------------------------------------
+
+from app.claims import checks  # noqa: E402
+
+PROFILE = {"mileage_rates": {"Car": "0.64"}, "km_tolerance": "0", "receipt_date_window_days": 0,
+           "receipt_optional_items": [], "mileage_item_pattern": "mileage", "categories": [],
+           "category_rule": "", "file_role_patterns": [], "checks": {}, "set_by": {}}
+
+
+def _row(rid, date_, amount, item="Taxi"):
+    return {"id": rid, "kind": "expense", "sheet": "S", "row": int(rid[1:]) + 6,
+            "values": {"date": date_, "item": item, "item_name": item, "reason": "x", "receipt_included": "Y",
+                       "amount": amount, "currency": "MYR", "rate": "1", "total": amount}}
+
+
+def _receipt(eid, date_, amount, page=1, vendor="Grab", position="left"):
+    return {"id": eid, "kind": "receipt", "file": "r.pdf", "page": page, "position": position,
+            "values": {"vendor": vendor, "date": date_, "amount": amount, "currency": "MYR"}, "confidence": {}}
+
+
+def _checks(rows, ev, profile=PROFILE):
+    calls = {"n": 0}
+
+    async def tie(row, cs):
+        calls["n"] += 1
+        return ""
+    res = asyncio.run(checks.run_checks(rows, ev, profile, {}, (1, 1), tie_break=tie))
+    res["tie_calls"] = calls["n"]
+    return res
+
+
+def test_double_claim_on_a_twice_scanned_receipt_is_flagged():
+    rows = [_row("r1", "2026-07-01", "45.00"), _row("r2", "2026-07-01", "45.00")]
+    ev = [_receipt("e1", "2026-07-01", "45.00", page=2), _receipt("e2", "2026-07-01", "45.00", page=5)]
+    res = _checks(rows, ev)
+    assert res["tie_calls"] == 0  # identical candidates never go to the AI
+    assert res["verdicts"]["r1"][0] == "matched" and res["verdicts"]["r2"][0] == "matched"
+    dup = [f for f in res["flags"] if f["code"] == "DUPLICATE_SCAN"]
+    assert {f["row_id"] for f in dup} == {"r1", "r2"}
+    assert all(f["status"] == "open" and "page 2" in f["reason"] and "page 5" in f["reason"] for f in dup)
+
+
+def test_one_row_and_a_duplicate_page_is_just_a_note():
+    rows = [_row("r1", "2026-07-01", "45.00")]
+    ev = [_receipt("e1", "2026-07-01", "45.00", page=2), _receipt("e2", "2026-07-01", "45.00", page=5)]
+    res = _checks(rows, ev)
+    assert res["verdicts"]["r1"][0] == "matched"
+    assert not [f for f in res["flags"] if f["code"] == "DUPLICATE_SCAN"]
+    assert len([f for f in res["flags"] if f["code"] == "UNCLAIMED_RECEIPT"]) == 1
+
+
+def test_two_real_receipts_with_different_vendors_are_untouched():
+    rows = [_row("r1", "2026-07-01", "10.00"), _row("r2", "2026-07-01", "10.00")]
+    ev = [_receipt("e1", "2026-07-01", "10.00", page=1, vendor="PLUS toll"),
+          _receipt("e2", "2026-07-01", "10.00", page=1, vendor="LDP toll", position="right")]
+    res = _checks(rows, ev)
+    assert res["tie_calls"] >= 1  # different vendors: the AI is asked
+    assert not [f for f in res["flags"] if f["code"] == "DUPLICATE_SCAN"]
+    # the check can be switched off per client
+    rows2 = [_row("r1", "2026-07-01", "45.00"), _row("r2", "2026-07-01", "45.00")]
+    ev2 = [_receipt("e1", "2026-07-01", "45.00", page=2), _receipt("e2", "2026-07-01", "45.00", page=5)]
+    res = _checks(rows2, ev2, {**PROFILE, "checks": {"DUPLICATE_SCAN": False}})
+    assert not [f for f in res["flags"] if f["code"] == "DUPLICATE_SCAN"]

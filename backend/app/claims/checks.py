@@ -102,6 +102,16 @@ def _conf_note(ev: dict) -> str:
 _CRITICAL = ("date", "amount", "currency", "receipt", "page")
 
 
+def _receipt_key(ev: dict) -> tuple:
+    """What makes two receipts 'the same' by value: vendor (case and spaces
+    folded), date, amount to the cent, currency."""
+    v = ev.get("values") or {}
+    vendor = " ".join(str(v.get("vendor") or "").lower().split())
+    amount = _dec(v.get("amount"))
+    return (vendor, str(v.get("date") or ""), str(amount.quantize(Decimal("0.01"))) if amount is not None else "",
+            (v.get("currency") or "MYR").upper())
+
+
 def _receipt_doubts(ev: dict, row: dict, window: int) -> list[str]:
     """Why a matched receipt is not to be trusted without a look: no date,
     a date that only fits after swapping day and month or taking the
@@ -305,9 +315,16 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
             matches[cs[0]["id"]] = row["id"]
             verdicts[row["id"]] = ("matched", cs[0]["id"])
             continue
-        # Several candidates: ask the AI to break the tie among THESE only.
+        # Several candidates: ask the AI to break the tie among THESE only —
+        # unless they are the same receipt by every value the reader gives
+        # (vendor, date, amount, currency): nothing to tell apart, so the
+        # first is taken and DUPLICATE_SCAN below says the rest.
         picked = ""
-        if tie_break is not None:
+        if len({_receipt_key(c) for c in cs}) == 1:
+            picked = cs[0]["id"]
+            notes.append(f"row {row['row']}: {len(cs)} value-identical receipts; the first was taken "
+                         "without the AI (see DUPLICATE_SCAN if another row takes the other)")
+        elif tie_break is not None:
             try:
                 picked = await tie_break(row, cs) or ""
             except Exception:
@@ -347,6 +364,28 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
                                    "universal rule: evidence with a missing or doubtful date, amount or currency "
                                    "is confirmed by a person, never accepted silently",
                                    _ev_cite(e), row_id=row["id"], evidence_id=e["id"]))
+    # The same receipt on two pages, each supporting a different row: one
+    # receipt scanned twice (a double claim) or two real receipts that
+    # happen to agree on every value — a person tells which.
+    if on("DUPLICATE_SCAN"):
+        twins: dict[tuple, list[dict]] = {}
+        for e in receipts:
+            twins.setdefault(_receipt_key(e), []).append(e)
+        for group in twins.values():
+            claimed = [(e, matches[e["id"]]) for e in group if e["id"] in matches]
+            if len({rid for _, rid in claimed}) < 2:
+                continue
+            for e, rid in claimed:
+                others = [x for x, r in claimed if r != rid]
+                flags.append(_flag("DUPLICATE_SCAN",
+                                   f"The receipt from {e['values'].get('vendor', '?')} ({e['values'].get('date') or 'no date'}, "
+                                   f"{e['values'].get('currency', 'MYR')} {e['values'].get('amount')}) at {_where(e)} "
+                                   f"also appears at {'; '.join(_where(x) for x in others)}, and each copy supports a "
+                                   "different row. If it is one receipt scanned twice, one of those rows is a "
+                                   "double claim; if they are two real receipts, dismiss with a note.",
+                                   "universal rule: one receipt supports one row; two pages with the same vendor, "
+                                   "date, amount and currency are shown to a person",
+                                   _ev_cite(e), row_id=rid, evidence_id=e["id"]))
     for e in receipts:
         if e["id"] not in matches and on("UNCLAIMED_RECEIPT"):
             ev = e["values"]
