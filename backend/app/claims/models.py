@@ -59,8 +59,8 @@ class ClaimsRun(Base):
     # The received date written on every listing row, YYYY-MM-DD.
     received_date: Mapped[str] = mapped_column(String, default="")
     # The optional paragraph of instructions for this client, as typed
-    # (prefilled from the playbook; the AI is shown it at the map step and
-    # in every worker).
+    # (prefilled from the playbook; today the AI is shown it at the map step
+    # only — hardening H1 passes it to case verification as well).
     instructions: Mapped[str] = mapped_column(Text, default="")
     # Live counters the frontend polls, e.g. {"done": 3, "total": 10}.
     progress: Mapped[dict] = mapped_column(JSON, default=dict)

@@ -36,6 +36,16 @@ One amount being considered for payment, read from a claim summary or derived
 from an Evidence Item.
 _Avoid_: Receipt, spreadsheet row
 
+**Reported Total**:
+The independent total stated by a submitted claim summary. It may be absent and
+is never inferred from the Claim Lines.
+_Avoid_: Calculated Lines Total, `report_total` when speaking to reviewers
+
+**Calculated Lines Total**:
+The `Decimal` sum of the Claim Lines. It is shown separately from the Reported
+Total and never substitutes for it in reconciliation.
+_Avoid_: Reported Total, reconciled total
+
 **Evidence Assignment**:
 A proposed, confirmed, or rejected relationship from an Evidence Item to a
 Claim Case and optionally to a Claim Line.

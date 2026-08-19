@@ -1,11 +1,18 @@
 # Claims Agent Hardening Plan — Tool-Using Investigation and Full-Folder Dumps
 
-**Status:** Proposed for implementation  
-**Written:** 2026-08-19  
+**Status:** Rebaselined after delivered R1–R10 and review fixes; H1–H12
+remain proposed
+
+**Written:** 2026-08-19
+
+**Baseline reviewed:** `330b972`
+
 **Owner decision:** Do not build a company-recipe feature. No automatic rule
-learning, recipe promotion, or cross-run recipe drift workflow.  
+learning, recipe promotion, or cross-run recipe drift workflow.
+
 **Extends:** [Employee Claims Verification plan](PLAN.md) and
-[PRD](PRD.md)  
+[PRD](PRD.md)
+
 **Invoice pipeline:** Out of scope; `backend/app/pipeline/` remains untouched.
 
 ## Outcome
@@ -67,10 +74,15 @@ too early:
 - Run instructions currently reach the folder mapper; they do not form the
   objective of the per-case worker.
 
-The current correctness work remains valuable. R1–R6 from `docs/PLAN.md` — the
-flag catalogue, report-total handling, skipped subtotal rows, duplicate scans,
-cross-case duplicate evidence, and material unclaimed evidence — becomes part of
-the universal control layer. It must not be replaced with AI judgment.
+The delivered R1–R10 work in `docs/PLAN.md`, including the review fixes through
+`330b972`, is now the protected baseline. R1–R6 — the flag catalogue,
+report-total handling, skipped subtotal rows, duplicate scans, cross-case
+duplicate evidence, and material unclaimed evidence — becomes part of the
+universal control layer. R7–R10's cards, filters, all-lines table (PLAN's
+*All rows* table; relabelled to lines in H10), unused evidence, progress, and
+output reconciliation are the presentation baseline.
+They must be adapted from employee ids to case ids, not rebuilt as a parallel
+review surface and not replaced with AI judgment.
 
 ## Design principles
 
@@ -126,15 +138,22 @@ The module hides prompting, tool selection, retries, sandbox mechanics, file
 formats, and model-provider details. Callers and end-to-end tests should not
 need to know which internal adapter produced the result.
 
-The real adapters behind the seam are:
+Behind the seam there are exactly two implementations plus one test double:
 
-- **Structured-folder adapter:** the current employee-folder path, retained as
-  the fast path for familiar batches.
-- **Full-dump adapter:** global inventory and proposed grouping when folder
-  structure carries no ownership.
-- **Evidence-only adapter:** derives proposed Claim Lines when no summary exists.
-- **In-memory test adapter:** scripted artifacts and tool results for deterministic
-  tests.
+- **Legacy structured-folder adapter:** the current mapper + per-employee
+  worker path, wrapped unchanged. It is the H1 conformance baseline and the
+  rollback path while `CLAIMS_AGENTIC_INVESTIGATION` is off.
+- **The investigator:** one production implementation. It inventories first
+  and only then chooses an internal *strategy* — structured (folder structure
+  carries ownership), full-dump (global inventory and proposed grouping), or
+  evidence-only (no summary found, so Claim Lines are derived). The caller
+  never selects a strategy; a structured folder is a full dump that arrives
+  with strong folder-based grouping signals, and evidence-only is a fact
+  discovered after inventory, not an input type.
+- **In-memory `InvestigationTools` fake:** scripted artifacts and tool results
+  for deterministic tests. This is the seam H1 tests through. If an
+  end-to-end test needs a whole scripted investigator, name that separately;
+  do not blur the two.
 
 The current readers remain internal implementations where they fit. They no
 longer define what input shapes the external interface accepts.
@@ -155,11 +174,14 @@ Required fields:
 - source path, content hash, media type, and size;
 - inspection state and failure reason;
 - proposed role and the reason/citations for it;
-- disposition: `used`, `duplicate`, `irrelevant`, `unreadable`, or `unresolved`;
+- disposition: `used`, `duplicate`, `irrelevant`, or `unreadable` (terminal),
+  or `unresolved` (non-terminal);
 - reviewer confirmation where required.
 
-`ignored` is not a terminal state. A file may be irrelevant, but the reason
-must be recorded.
+`unresolved` always blocks output until a reviewer sets a terminal disposition.
+"Material" is not a judgment the agent makes about a file it could not
+understand. `ignored` is not a terminal state. A file may be irrelevant, but the
+reason must be recorded.
 
 ### Evidence Item
 
@@ -176,10 +198,14 @@ One proposed payment-listing decision. Required fields:
 - claimant state: `confirmed`, `proposed`, or `unknown`;
 - case state: `proposed`, `confirmed`, `blocked`, or `excluded`;
 - grouping basis and Citations;
-- Claim Lines, assigned Evidence Items, totals, category, and GL where known.
+- Claim Lines, assigned Evidence Items, category, and GL where known;
+- optional Reported Total with its Citation;
+- Calculated Lines Total derived independently from Claim Lines.
 
 A Claim Case is allowed to exist without a Claimant so that the system can show
-useful work without inventing who should be paid.
+useful work without inventing who should be paid. A missing Reported Total stays
+missing; the Calculated Lines Total must never be copied into that field to make
+reconciliation appear complete.
 
 ### Evidence Assignment
 
@@ -241,7 +267,10 @@ for assigning everything.
 
 ### 5. Map & Group review gate
 
-Replace the employee-only map screen with a case-oriented screen:
+Replace the employee-only map screen with a case-oriented screen. There is one
+map screen for every input shape: a structured folder arrives with its grouping
+pre-proposed on a folder basis at high confidence. `MapView.tsx` is migrated
+into it, not kept beside it (the same rule as for the review surface).
 
 - proposed cases with Claimant, identifiers, totals, confidence, and reasons;
 - Source Artifacts and Evidence Items inside each case;
@@ -335,8 +364,9 @@ These controls are outside the agent and cannot be disabled by instructions:
 
 1. **Snapshot integrity:** every Citation resolves to the hash captured at run
    start.
-2. **Artifact completeness:** every Source Artifact has a terminal disposition;
-   unresolved material artifacts block output.
+2. **Artifact completeness:** every Source Artifact must reach a terminal
+   disposition before output; any `unresolved` artifact blocks output until a
+   reviewer dispositions it.
 3. **Ownership:** every payable Claim Case has a reviewer-confirmed Claimant and
    required identifier.
 4. **Assignment exclusivity:** one Evidence Item cannot silently support two
@@ -356,6 +386,42 @@ These controls are outside the agent and cannot be disabled by instructions:
 11. **Human gate:** no Payment Listing Row while a blocking Flag, proposed
     Claimant, unconfirmed derived amount, or unresolved material artifact exists.
 12. **No external write:** SharePoint and client files remain read-only.
+
+### Baseline invariants carried into the investigator
+
+The newer structured-path fixes are contract tests for every adapter:
+
+- **Independent totals stay independent.** Reported Total is the figure stated
+  by the source, or absent. Calculated Lines Total is stored separately. Output
+  names a mismatch or the lack of an independent total; it never reconciles a
+  line sum against itself.
+- **Materiality keeps its exact settings semantics.** For unassigned receipts,
+  a missing/unparseable profile threshold uses RM 100; `0` is a valid threshold
+  that makes every receipt with a readable amount at or above zero require a
+  decision. Ownership conflicts, uncertain payable identities, and evidence
+  reuse block regardless of amount.
+- **A value fingerprint needs identity.** The deterministic duplicate key is a
+  tuple of normalized vendor, date, amount, and currency, and it requires a
+  non-empty vendor. Missing vendor does not prove two receipts are duplicates;
+  use another cited signal or leave the relationship unresolved.
+- **Readable workbooks get read first.** Formula cells with no saved values
+  explain a report only after normal reading fails; their presence alone must
+  not reject an otherwise readable report. A dated row with an amount cannot be
+  hidden in `skip_rows`.
+- **Repair convergence is structural.** "Same proposal twice" compares
+  normalized coordinates, spans, roles, and other decision fields, excluding
+  free-text reasons and observations.
+- **Settings cannot hide the accounting story.** A reviewer may explicitly
+  toggle `REPORT_TOTAL_MISMATCH` through the Client Profile, but run instructions
+  cannot do so, and Output still shows Reported Total, Calculated Lines Total,
+  emitted total, missing comparisons, and named differences.
+- **Every retry is bounded.** Initial verification, correction re-checks, and
+  tie-break calls share explicit request/tool budgets; a correction cannot open
+  an uncapped secondary agent loop.
+- **Missing required controls stay visible.** `MISSING_REFERENCE` remains a
+  non-toggleable, run-level Flag when verification lacks a required explicit
+  input such as mileage rates or the current listing. The agent cannot treat an
+  unavailable control as a successful check.
 
 New catalogue entries expected:
 
@@ -435,7 +501,8 @@ The orchestration loop is bounded:
 - Add actions to create/merge/split cases, move evidence, set/confirm a Claimant,
   and set a Source Artifact disposition.
 - Every mutation takes an expected run revision to prevent two browser actions
-  overwriting each other.
+  overwriting each other — including the existing correction, decision,
+  category, retry, and confirm-map routes, which gain it in H9.
 - Corrections re-run only the affected case plus global duplicate/ownership
   controls.
 
@@ -454,6 +521,10 @@ The orchestration loop is bounded:
 - Expose tool failures and incomplete artifacts without raw stack traces.
 - Keep R7–R10's plain-language flag cards, summary filters, all-lines table,
   unused evidence section, and output reconciliation, but key them by case.
+- Reuse the delivered `FlagCard`, field editor, totals, filters, evidence preview,
+  and empty states. Migrate selectors and mutations through the case-oriented
+  HTTP contract; do not create a second case-only component tree beside the
+  employee UI.
 
 ### Output
 
@@ -489,7 +560,8 @@ The orchestration loop is bounded:
 
 Test through the `ClaimsInvestigator` interface with in-memory tools:
 
-- Every Source Artifact receives exactly one terminal disposition.
+- Every Source Artifact holds exactly one disposition; output is refused while
+  any artifact is still `unresolved`.
 - A cited cell/page outside the manifest is rejected.
 - Conflicting identity signals create `OWNERSHIP_CONFLICT`.
 - Weak signals never confirm a Claimant.
@@ -497,6 +569,14 @@ Test through the `ClaimsInvestigator` interface with in-memory tools:
 - Evidence-derived lines remain blocked until amount confirmation.
 - One Evidence Item assigned to two payable lines is rejected or flagged.
 - Decimal calculations and emitted listing totals round-trip exactly.
+- Reported Total and Calculated Lines Total remain distinct when the source total
+  is missing or wrong; missing never becomes a synthetic match.
+- Unassigned-receipt thresholds cover missing, positive, and `0` values.
+- Duplicate checks do not merge two no-vendor receipts by value alone.
+- Formula-without-cache diagnostics occur only after a failed normal read.
+- Repair convergence ignores prose changes but detects structural changes.
+- Correction and tie-break paths stop at the same configured budget as initial
+  verification.
 - Tool budgets, truncation, timeout, and cancellation fail closed.
 - Prompt-injection text in a workbook cannot call a forbidden tool or change the
   objective.
@@ -523,7 +603,8 @@ Test through the `ClaimsInvestigator` interface with in-memory tools:
 - 100% of submitted Source Artifacts dispositioned or visibly blocking.
 - 100% of payable Claimants reviewer-confirmed.
 - 100% of material values cited.
-- 100% money reconciliation to the cent.
+- 100% of internal arithmetic and emitted totals reconcile to the cent; every
+  missing independent Reported Total is named rather than counted as a match.
 - Zero silent evidence reuse across payable cases.
 - Zero automatic owner confirmation based solely on weak/fuzzy signals.
 - Every planted error found; false blocking Flags average no more than one per
@@ -541,14 +622,20 @@ and rollback switch.
 
 ### H0 — Rebaseline and protect current correctness
 
-- [ ] Finish current backend R6 and record the R1–R6 baseline.
+- [x] Record delivered R1–R10 plus the review-fix baseline through `330b972`
+  (documented 2026-08-19).
 - [x] Update PRD scope: no company recipe, automatic learning, or recipe drift
   (documented 2026-08-19).
-- [ ] Reframe pending R7–R10 UI work around Claim Cases to avoid building a
-  second employee-only review surface.
-- [ ] Pin the current structured-folder end-to-end result and RM10 example.
-- **Exit:** existing tests green twice; working tree clean; baseline metrics
-  recorded.
+- [x] Inventory the delivered R7–R10 review surface for reuse: shared flag card,
+  filters, all rows, unused evidence, progress, and reconciliation are retained;
+  employee-keyed selectors/routes are the migration seam.
+- [x] Verify the automated baseline: backend `254 passed, 2 skipped`; frontend
+  production build green (2026-08-19).
+- [x] Pin the current structured-folder end-to-end result and RM10 example
+  (`backend/tests/test_claims_baseline.py`, scripted AI from the ground truth,
+  2026-08-19).
+- **Exit:** automated tests and frontend build green; one owner-triggered live
+  structured run reproduces the RM10 example; baseline time/cost recorded.
 
 ### H1 — Deep interface and normalized contracts
 
@@ -557,8 +644,10 @@ and rollback switch.
 - [ ] Put the existing structured-folder pipeline behind the new interface.
 - [ ] Add in-memory InvestigationTools and contract tests.
 - [ ] Pass current-run instructions into investigation and case verification.
-- **Exit:** current Client A passes through the new interface without changing
-  observable results.
+- [ ] Freeze the baseline invariants above as adapter-neutral contract tests.
+- **Exit:** current Client A passes through the new interface with empty
+  instructions without changing observable results; with instructions supplied,
+  every difference is logged and reviewed, not assumed harmless.
 
 ### H2 — Additive storage migration
 
@@ -635,15 +724,19 @@ and rollback switch.
   order.
 - [ ] Generalize listing field mappings beyond the current fixed roles while
   keeping required universal roles explicit.
-- [ ] Recompute case, batch, and emitted totals independently.
+- [ ] Recompute Calculated Lines Total, case, batch, and emitted totals
+  independently while preserving an optional, source-cited Reported Total.
 - [ ] Update corrections/exclusions to case ids and rerun affected controls.
+- [ ] Add expected-revision checks to the existing correction, decision,
+  category, retry, and confirm-map routes.
 - **Exit:** structured and full-dump outputs round-trip; every blocking state is
   enforced server-side.
 
 ### H10 — Case-oriented review surface
 
-- [ ] Complete R7–R10 against cases: plain-language cards, summary filters, all
-  lines, unused evidence, verification progress, and output reconciliation.
+- [ ] Adapt the delivered R7–R10 surface from employee ids to case ids:
+  plain-language cards, summary filters, all lines, unused evidence,
+  verification progress, and output reconciliation.
 - [ ] Add claimant/assignment confidence and evidence-derived badges.
 - [ ] Ensure keyboard, empty, loading, stale-revision, and failure states.
 - **Exit:** a reviewer can complete scenarios A–E without inspecting server logs
@@ -705,7 +798,7 @@ H0 → H1 → H2 → H3 → H4 → H5 → H6 → H7 → H9 → H10 → H11 → H
 | Generic attributes weaken validation | Important values bypass typed controls | Stable typed core money/identity/Citation fields; extensions cannot drive payment until normalized |
 | Additive migration splits old/new identities | Flags or corrections attach to wrong case | Backfill, dual-write period, idempotent migration and old-run equivalence tests |
 | Prompt injection inside client files | Objective or tool policy is altered | Untrusted-data framing, manifest-id tools, no side effects, hostile-document fixtures |
-| Case-oriented UI is built after employee-only R7–R10 | Duplicate work and inconsistent review | Reframe R7–R10 at H0; one case-keyed review state and compatibility aliases |
+| Delivered employee UI is replaced instead of migrated | Duplicate work and inconsistent review | Reuse R7–R10 components and behavior; move selectors/routes to case ids behind compatibility aliases |
 | Evidence-derived receipt total is not the amount claimed | Overpayment | `CLAIM_AMOUNT_UNCONFIRMED`; visible per-line origin; reviewer confirmation and reconciliation |
 | Agent result looks plausible but is incomplete | Reviewer over-trusts presentation | Coverage, Citations, unresolved questions, replay record, and server-side output gate |
 
@@ -714,14 +807,22 @@ an accepted risk.
 
 ## Feature switches and rollback
 
-- `CLAIMS_CASE_MODEL`: case storage and HTTP fields.
-- `CLAIMS_AGENTIC_INVESTIGATION`: tool-using investigator versus current mapper.
-- `CLAIMS_FULL_DUMP_GROUPING`: Map & Group flow.
-- `CLAIMS_PYTHON_SANDBOX`: isolated Python tool, independently disabled.
+Schema migrations run unconditionally and are additive; no switch skips or
+reverses one. Once H2 lands, cases are always written (dual-write with the
+employee ids) regardless of switch state — the switches gate what is *read,
+routed, and shown*, never what is stored.
 
-All migrations are additive. Disabling the new investigator routes new runs
-through the existing structured-folder adapter; it does not reinterpret old
-runs. No rollback deletes user data or writes to SharePoint.
+- `CLAIMS_CASE_MODEL` (H2): off = case fields and case routes are hidden from
+  HTTP and the employee fields stay authoritative for the UI; storage is
+  unchanged.
+- `CLAIMS_AGENTIC_INVESTIGATION` (H5): off = new runs go through the legacy
+  structured-folder adapter; old runs are never reinterpreted.
+- `CLAIMS_FULL_DUMP_GROUPING` (H6): off = Map & Group actions are disabled and a
+  flat folder behaves as it does today.
+- `CLAIMS_PYTHON_SANDBOX` (H8): off = `run_python` is absent from the tool
+  allowlist; `TOOL_UNAVAILABLE` where an investigation genuinely needs it.
+
+No rollback deletes user data or writes to SharePoint.
 
 ## Implementation file map
 
@@ -733,7 +834,8 @@ backend/app/claims/
 │   ├── contracts.py       # deep module interface and normalized results
 │   ├── investigator.py    # bounded plan/act/audit loop
 │   ├── audit.py           # universal result controls
-│   └── adapters.py        # structured, full-dump, evidence-only
+│   ├── strategies.py      # post-inventory branches: structured, full-dump, evidence-only
+│   └── legacy.py          # current mapper + worker path behind the interface (rollback)
 ├── tools/
 │   ├── contracts.py       # InvestigationTools and SandboxPort
 │   ├── files.py
@@ -766,8 +868,8 @@ new `GroupView.tsx` replacing the employee-only assumptions in `MapView.tsx`.
 
 Recommended defaults are shown first:
 
-1. **Unresolved evidence:** potentially claim-related unresolved evidence blocks;
-   reviewer-confirmed irrelevant evidence does not.
+1. **Unresolved artifacts:** an `unresolved` artifact always blocks; only a
+   reviewer's `irrelevant` or `unreadable` disposition releases it.
 2. **Grouping:** always pause at Map & Group, even when identity signals are
    strong.
 3. **Output granularity:** one Payment Listing Row per confirmed Claim Case;

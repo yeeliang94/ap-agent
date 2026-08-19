@@ -1,7 +1,8 @@
 # Implementation Plan: Employee Claims Verification Module
 
-**Overall Progress:** Core Steps 1–14 complete; follow-on Phase 4b and hardening
-H0–H12 are tracked by their checklists.
+**Overall Progress:** Core Steps 1–14 and Phase 4b R1–R10 complete; Steps 15–16
+open (15 partially done on the backend); hardening H0–H12 tracked in
+[CLAIMS-AGENT-HARDENING.md](CLAIMS-AGENT-HARDENING.md).
 
 **PRD Reference:** [docs/PRD.md](PRD.md) (Flows 1–4, withdrawn 2b/5,
 check catalogue in Flow 3, steering, decisions table)
@@ -52,9 +53,10 @@ rows). The next tier is the run-local, tool-using full-dump investigation in
 - **Company values are not hard-coded** — rates, receipt-optional items,
   category rule, mileage layout live in a per-client profile + playbook.
   LinkedIn's confirmed values are the *sample's* defaults, not the code's.
-- **Correctness before agentic expansion** — finish the reusable backend
-  controls in Phase 4b, then implement H0–H12 in the hardening plan. Persistent
-  discovery and learn-from-decisions were withdrawn by the owner on 2026-08-19.
+- **Correctness before agentic expansion** — Phase 4b R1–R10 and its review
+  fixes are complete; they are the protected baseline for H0–H12 in the
+  hardening plan. Persistent discovery and learn-from-decisions were withdrawn
+  by the owner on 2026-08-19.
 - **Listing columns come from the client's own listing** — the reviewer links
   the month's listing; the AI maps its header row; code emits rows in that
   order.
@@ -71,11 +73,14 @@ peer review and the checks walkthrough:*
   new check can never appear on screen as a bare `SNAKE_CASE` code again.
 - **A wrong total is a flag, not a lost report** — when the report's lines
   are internally consistent but don't add up to the total cell, the lines
-  are kept and a person sees `REPORT_TOTAL_MISMATCH`; today a 10-cent typo
-  makes the whole report "unreadable" and pays from receipts alone. The
+  are kept and a person sees `REPORT_TOTAL_MISMATCH`; previously a 10-cent typo
+  made the whole report "unreadable" and paid from receipts alone. The
   reader is told: *if your reading is right, answer the same again* — a
   reading that comes back identical twice is accepted early, so the AI is
   not tempted to move the row span to make the sum work.
+- **The report total is independent evidence** — it is the source's own total
+  or it is absent. The sum of extracted rows is stored separately and never
+  substituted for a missing report total just to make Output reconcile.
 - **Duplicates are found by values first, images later** — same vendor +
   date + amount + currency on two pages, each matched to a different row →
   `DUPLICATE_SCAN` (a person decides: one receipt scanned twice, or two real
@@ -83,17 +88,19 @@ peer review and the checks walkthrough:*
   `SHARED_RECEIPT` on both. Perceptual image hashing is a later refinement,
   not v1 — values are deterministic and testable today.
 - **Unclaimed receipts above a threshold block** — `UNCLAIMED_RECEIPT` stays
-  a note below the client's threshold (profile field, **default RM 100 —
-  owner to confirm**) and is an open flag at or above it, because a large
-  receipt no row claims is how a missed line looks from the outside.
+  a note below the client's threshold (profile field, **default RM 100**) and
+  is an open flag at or above it, because a large receipt no row claims is how
+  a missed line looks from the outside. `0` is a real setting, not a request to
+  restore the default.
 - **The review surface is the employee's whole row table; flags are
   annotations on it** — the reviewer sees every row with its verdict and
   its receipt, not only the flagged rows. Same CSS, same components; the
   flag cards stay, gaining title / meaning / what-to-do / amount at stake,
   and a summary strip with filters above them.
-- **Phase 4b backend controls remain prerequisites** — Step 15's checks on/off
-  toggles need the catalogue (R1). R7–R10 should be completed against Claim
-  Cases during hardening so the employee-only UI is not built twice.
+- **Phase 4b is the migration baseline** — Step 15's toggles use the catalogue.
+  R7–R10 are delivered and should be migrated to Claim Cases by changing their
+  selectors, labels, and routes while retaining the shared cards, filters,
+  tables, previews, and output surface.
 
 ## Screens & UX (what the reviewer sees)
 
@@ -109,7 +116,7 @@ a programmer either.
 |---|---|---|---|
 | **Claims list** (new *Claims* tab beside *Runs*) | See past batches, start a new one | *New claims run* card at top; table of runs: client, folder, started, status chip ("Map ready", "Verifying 3/10", "Ready", "Failed"), employees, open flags | Empty: "No claims runs yet — start one above." Failed row shows the reason inline |
 | **New claims run** form | The Copilot-simple start | Folder link · listing link · received date · *Instructions for this client* (textarea, prefilled from the client playbook, optional, placeholder shows an example paragraph) · *Start*. Local dev only: zip upload | Inline validation (link shape, date); disabled *Start* until valid; "Starting…" then redirect |
-| **Run detail → Map & Rules** | Confirm the agent's current v1 map with one click; correct if needed | One row per subfolder: employee · ER code · report file+tab · mileage tab · receipt files · ignored · unplaced · warnings badge; each role is a dropdown; **reason on hover/expand** ("tab `Expense Report`: name header, Date/Item/Amount columns"); *remember for <client>* tick per correction; **Confirm & verify** (disabled until valid, tooltip says why). H6 replaces this with Map & Group for flat dumps. | Loading skeleton while mapping; warnings listed above the table; invalid edit → inline message |
+| **Run detail → Map & Rules** | Confirm the agent's current v1 map with one click; correct if needed | One row per subfolder: employee · ER code · report file+tab · mileage tab · receipt files · ignored · unplaced · warnings badge; each role is a dropdown; **reason on hover/expand** ("tab `Expense Report`: name header, Date/Item/Amount columns"); *remember for <client>* tick per correction; **Confirm & verify** (disabled until valid, tooltip says why). H6 migrates this screen into Map & Group for every input shape (a structured folder arrives pre-grouped). | Loading skeleton while mapping; warnings listed above the table; invalid edit → inline message |
 | **Run detail → Verifying** | Watch progress without refreshing | Employee chips: queued / verifying / done (n flags) / failed (retry button); overall bar; Activity link | Poll every 3 s (as today); failed employee shows reason and *Retry* |
 | **Run detail → Review** | Clear flags fast | Employee summary table (name, ER code, category + why, rows verified/flagged, total, status); below it flag cards **grouped by employee**, each: code, reason, basis ("client profile: car RM 0.64/km"), **evidence preview** — page image with the receipt's position highlighted, or the sheet row — and actions *Accept* / *Exclude (note)* / *Fix a value* / *Re-verify employee* | "All flags resolved — Output unlocked" banner; per-flag saving state; instant re-check spinner on fix |
 | **Run detail → Review (Phase 4b additions)** | Understand the batch at a glance; review by employee, not by flag | **Summary strip**: counts by kind with RM at stake ("5 need a receipt · RM 340 · 3 uncertain reads · 2 mileage · 4 notes"), click to filter; **flag cards** carry a title, a one-line meaning, "what to do" and the amount at stake ("Accept — leave RM 45.00 out"); **All rows** per employee (expandable): every row with a verdict chip (matched ✓ / no receipt / uncertain / duplicate / receipt-optional / excluded), its receipt (vendor · page · position, *show* highlights it), the flags on that row, *Fix a value*; mileage rows beside their map trip | Filter with no matches: "No open flags of this kind"; excluded rows greyed with the decision; corrected values marked |
@@ -280,11 +287,11 @@ clean sample).
   - **Verify:** browser screenshots of Verifying, Output, list; `ALL CHECKS PASSED` twice; PRD lists every code in `CATALOGUE` (a doc test greps them).
 
 ### Phase 5: Steering v1 — the few things a client needs to say
-- [ ] 🟥 **Step 15: Client profile + playbook + Settings UI** — rates, receipt-optional items, tolerances, the paragraph.
+- [ ] 🟥 **Step 15: Client profile + playbook + Settings UI** — rates, receipt-optional items, tolerances, the paragraph. *Partially done:* the backend profile storage, `GET`/`PUT /api/claims-settings`, the per-run snapshot and the playbook prefill of the New-run form exist (Steps 5/6, R6). *Pending:* the reviewer-facing Settings → Claims screen (`saveClaimsSettings` in `api.ts` has no caller yet), `unclaimed_receipt_threshold` in the frontend `ClaimsSettings` type, and the "set by reviewer on <date>" display. Sits before or beside H1 in the hardening path — the hardening plan assumes a reviewer can change profile values without the API.
   - [ ] 🟥 Per-client profile stored under the client name (rates by vehicle, km tolerance default 0, receipt date window default same day, receipt-optional items, mileage item pattern, checks on/off) + playbook text + last confirmed map; snapshot taken per run; *Settings → Claims* section with save confirmation and "set by reviewer on <date>"
   - **Verify:** change the car rate → the next run flags `MILEAGE_RATE` on every trip; add *Taxi* to receipt-optional → the Taxi N flag disappears; the playbook prefills the New-run form; a run started before a settings change is still judged by its snapshot.
 
-- [ ] 🟥 **Step 16: Docs + Windows handoff** — so the enterprise test can include claims.
+- [ ] 🟥 **Step 16: Docs + Windows handoff** — so the enterprise test can include claims. Runs beside H8's Windows enterprise feasibility spike.
   - [ ] 🟥 README: Claims section, .env notes; `docs/WINDOWS-AGENT-TASK.md`: add "nested folder read through the real MCP" and "listing header read on a real Summary of Invoices" to the checklist; PRD status line updated
   - **Verify:** `start.bat`/`start.sh` serve the Claims tab; docs read through once by the owner.
 
@@ -378,4 +385,10 @@ evaluation matrix there.
 - Nothing is ever written to SharePoint or to a client workbook, so there is no external state to undo.
 - The client profile/playbook lives in app settings under the client name; *forget* on the Settings screen or deleting those keys resets a client.
 - If a real-model step misbehaves, the run diary records every AI call's role, rounds and cost — read it before changing code.
-- *Phase 4b:* every new flag is a new **code**, so it can be switched off per client through the existing checks on/off without a code change; the catalogue is additive (an unknown code still renders, as today); R7–R9 are presentational and touch no endpoint but the existing correct/decide/retry ones; the unclaimed threshold defaults to the old behaviour for anything below RM 100. Reverting a step's commit removes only that step's flag and its words.
+- *Phase 4b:* every new flag is a new **code**; toggleable checks can be switched
+  off per client through the existing checks on/off without a code change, while
+  run-level `MISSING_REFERENCE` cannot. The catalogue is additive (an unknown
+  code still renders, as today); R7–R9 are presentational and touch no endpoint
+  but the existing correct/decide/retry ones; the unclaimed threshold defaults
+  to the old behaviour for anything below RM 100. Reverting a step's commit
+  removes only that step's flag and its words.

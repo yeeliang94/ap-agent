@@ -306,10 +306,12 @@ comparison and every sum.
   add up to the total cell, the lines are **kept** and a person sees
   `REPORT_TOTAL_MISMATCH` (a typo in the total, or a missed line — a dated
   row with an amount just outside the span is caught as structural); a
-  reading the AI answers identically twice is accepted early. Subtotal or
+  reading whose structure the AI answers identically twice is accepted early
+  (changes only to its prose do not reset convergence). Subtotal or
   heading rows inside the span may be named in `skip_rows` (never a dated
-  row with an amount). A workbook whose formulas have no saved values is
-  named as such ("open it in Excel, save, re-upload").
+  row with an amount). If normal reading fails, a workbook whose formulas have
+  no saved values is named as such ("open it in Excel, save, re-upload"); the
+  presence of those formulas does not pre-empt a successful normal read.
 - Mileage tab (if the map names one): same method. Rows are trips: date,
   description / from–to, km, rate, amount. Code checks each row: km × rate
   = amount (→ `MILEAGE_ARITHMETIC` when off), and the rate equals one of
@@ -370,13 +372,14 @@ comparison and every sum.
 - A receipt may support only one row. A second use → `DUPLICATE_RECEIPT` on
   both rows. Receipts matched to no row → `UNCLAIMED_RECEIPT` — a note
   below the client's threshold (profile `unclaimed_receipt_threshold`,
-  default RM 100), an open flag at or above it (a large receipt no row
-  claims is how a missed line looks). The same receipt by value (vendor,
-  date, amount, currency) on two pages, each supporting a different row →
-  `DUPLICATE_SCAN` on both (one receipt scanned twice, or two real ones — a
-  person tells). The same receipt matched under two employees → at run
-  close, `SHARED_RECEIPT` on both. Value-identical candidates skip the AI
-  tie-break.
+  default RM 100; `0` is a valid setting), an open flag at or above it (a
+  large receipt no row claims is how a missed line looks). The same receipt by
+  value (vendor, date, amount, currency) on two pages, each supporting a
+  different row → `DUPLICATE_SCAN` on both (one receipt scanned twice, or two
+  real ones — a person tells). This value fingerprint requires a non-empty
+  vendor; missing vendor does not prove that two receipts are the same. The
+  same receipt matched under two employees → at run close, `SHARED_RECEIPT` on
+  both. Value-identical candidates skip the AI tie-break.
 - Controls the batch needs and cannot find (no mileage rates in the profile
   but the batch has KM rows; no listing to take the column order from) →
   one run-level `MISSING_REFERENCE` per control, acknowledged or fixed
@@ -443,10 +446,12 @@ outputs while **any** flag is open — the same gate as today.
 - One row per employee: received date (typed at run start), employee name,
   `ER(...)` code, the employee's category and GL (by the client's confirmed
   rule — 3a), amount in MYR, remark.
-- Totals reconciled independently from the emitted text: sum of employee
-  rows = sum of the report totals of included employees; excluded rows are
-  subtracted and named. Employees marked failed or skipped are listed under
-  *not included*, with why.
+- Totals reconciled independently from the emitted text: the source's Reported
+  Total, the Calculated Lines Total, and the emitted total remain separate;
+  excluded rows are subtracted and named. A missing Reported Total stays
+  missing and Output says there is no independent total to compare—it is never
+  replaced with the line sum. Employees marked failed or skipped are listed
+  under *not included*, with why.
 - Copy button → tab-separated rows for a clean Excel paste, sanitised as
   today.
 
@@ -623,7 +628,7 @@ not learned automatically.
 | Item | Confirmed value |
 |---|---|
 | Story 5 (learn from reviewer decisions) | **Withdrawn 2026-08-19**; no company recipe or automatic learning |
-| Delivery order | Finish reusable Phase 4b controls, then H0–H12 in `CLAIMS-AGENT-HARDENING.md`; run-local investigation and full-dump support replace persistent Discovery and `RULE_DRIFT`. |
+| Delivery order | Phase 4b R1–R10 is complete and becomes the protected baseline; continue with H0–H12 in `CLAIMS-AGENT-HARDENING.md`. Run-local investigation and full-dump support replace persistent Discovery and `RULE_DRIFT`. |
 | Pause at the map | Always, in v1 (one click); auto-continue on a clean map is a later option |
 | Received date on listing rows | Typed by the reviewer when starting the run |
 | Quotas | 30 employee folders per batch; 60 files / 200 pages per employee; 25 MB per file; over a limit the run refuses and names it |
