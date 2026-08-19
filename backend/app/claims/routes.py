@@ -158,6 +158,8 @@ def get_claims_run(run_id: str) -> dict:
             "rows": [_row_dict(r) for r in rows],
             "evidence": [_evidence_dict(e) for e in evidence],
             "flags": [_flag_dict(f) for f in flags],
+            # The words for every code on screen (title, meaning, what to do).
+            "catalogue": _catalogue_payload()["codes"],
             # The human gate, enforced server-side: no output leaves while
             # any flag is undecided. Built fresh from the reviewed state
             # (code only, Decimal) and kept on the run for the record.
@@ -624,6 +626,19 @@ def _settings_payload(client: str) -> dict:
 @settings_router.get("")
 def get_claims_settings() -> dict:
     return _settings_payload(settings_store.get_setting("client_name"))
+
+
+def _catalogue_payload() -> dict:
+    return {"codes": {code: profile_mod.describe(code) for code in profile_mod.CATALOGUE},
+            "kinds": list(profile_mod.FLAG_KINDS),
+            "toggleable": list(profile_mod.CHECK_CODES)}
+
+
+@settings_router.get("/catalogue")
+def get_flag_catalogue() -> dict:
+    """Every flag code with its title, meaning, what to do, kind and default
+    — the words the Review screen and the Settings toggles show."""
+    return _catalogue_payload()
 
 
 @settings_router.put("")

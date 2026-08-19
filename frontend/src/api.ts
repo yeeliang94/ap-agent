@@ -345,6 +345,20 @@ export interface ClaimFlag {
   resolution: string;
 }
 
+// One flag code's words — from the backend catalogue, the single source
+// of truth the Review screen, Settings and the tests share.
+export interface FlagInfo {
+  code: string;
+  title: string;
+  meaning: string;
+  what_to_do: string;
+  kind: "money" | "evidence" | "mileage" | "structure" | "note";
+  blocks: "open" | "info";
+  toggle: boolean;
+}
+
+export type FlagCatalogue = Record<string, FlagInfo>;
+
 export interface ClaimsOutputs {
   header: string[];
   rows: string[][];
@@ -377,6 +391,7 @@ export interface ClaimsRunDetail extends ClaimsRunSummary {
   rows: ClaimRow[];
   evidence: ClaimEvidence[];
   flags: ClaimFlag[];
+  catalogue: FlagCatalogue;
   outputs: ClaimsOutputs | Record<string, never>;
 }
 
@@ -492,6 +507,12 @@ export interface ClaimsSettings {
   };
   playbook: string;
   last_map: { run_id?: string; at?: string; map?: ClaimMap } | Record<string, never>;
+}
+
+export async function getFlagCatalogue(): Promise<{ codes: FlagCatalogue; kinds: string[]; toggleable: string[] }> {
+  const r = await fetch("/api/claims-settings/catalogue");
+  if (!r.ok) return fail(r, "Could not load the flag catalogue");
+  return r.json();
 }
 
 export async function getClaimsSettings(): Promise<ClaimsSettings> {

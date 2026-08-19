@@ -57,11 +57,141 @@ PROFILE_DEFAULTS: dict = {
     "set_by": {},
 }
 
-CHECK_CODES = ("NO_RECEIPT", "RECEIPT_AMBIGUOUS", "DUPLICATE_RECEIPT",
-               "UNCLAIMED_RECEIPT", "CURRENCY_MISMATCH", "EVIDENCE_UNCERTAIN",
-               "MILEAGE_RATE", "MILEAGE_ARITHMETIC",
-               "MILEAGE_LINE_MISMATCH", "MILEAGE_DISCREPANCY", "MILEAGE_NO_MAP",
-               "CATEGORY_UNCLEAR", "REPORT_UNREADABLE", "NO_REPORT")
+# The flag catalogue — ONE table the checks, the Review screen, the Settings
+# toggles and the tests all read, so a flag can never reach a person as a
+# bare code. Per code:
+#   title       what the reviewer sees as the heading
+#   meaning     one plain sentence: what the system found
+#   what_to_do  one plain sentence: the reviewer's move
+#   kind        money (a payment could be wrong) | evidence (a read to
+#               confirm) | mileage | structure (a file or a rule the run
+#               needed) | note (never blocks)
+#   blocks      "open" (a person must decide) or "info" (a note) by default
+#   toggle      whether a client may switch the check off (run-level
+#               controls cannot be)
+CATALOGUE: dict[str, dict] = {
+    "NO_RECEIPT": {
+        "title": "No receipt for this row", "kind": "money", "blocks": "open",
+        "meaning": "No receipt in the bundle has this row's date, amount and currency.",
+        "what_to_do": "Look at the page named (if any): if the row is wrong, fix the value; if the "
+                      "receipt is missing, accept to leave the row out; if the client allows it "
+                      "without a receipt, dismiss with a note."},
+    "RECEIPT_AMBIGUOUS": {
+        "title": "Several receipts could be this row's", "kind": "evidence", "blocks": "open",
+        "meaning": "More than one receipt matches the row's day, amount and currency, and they "
+                   "could not be told apart.",
+        "what_to_do": "Open the candidates and choose; dismiss with a note naming which one supports "
+                      "the row."},
+    "DUPLICATE_RECEIPT": {
+        "title": "One receipt claimed by several rows", "kind": "money", "blocks": "open",
+        "meaning": "Two or more rows lean on the same single receipt; a receipt supports one row.",
+        "what_to_do": "Keep the row the receipt belongs to; accept the others to leave them out, or "
+                      "fix a misread value so they match their own receipts."},
+    "DUPLICATE_SCAN": {
+        "title": "The same receipt appears twice", "kind": "money", "blocks": "open",
+        "meaning": "Two pages carry a receipt with the same vendor, date, amount and currency, and "
+                   "each is matched to a different row — one receipt scanned twice, or two real ones.",
+        "what_to_do": "Compare the two pages. If they are the same receipt, accept one row to leave "
+                      "it out; if they are two real receipts, dismiss with a note."},
+    "SHARED_RECEIPT": {
+        "title": "Receipt also claimed by another employee", "kind": "money", "blocks": "open",
+        "meaning": "A receipt with the same vendor, date, amount and currency supports a row of "
+                   "another employee in this batch.",
+        "what_to_do": "Decide who the expense belongs to; accept the other person's row to leave it "
+                      "out, or dismiss with a note if both are genuine."},
+    "UNCLAIMED_RECEIPT": {
+        "title": "A receipt no row uses", "kind": "note", "blocks": "info",
+        "meaning": "A receipt in the bundle supports none of the report's rows — nothing to pay, "
+                   "noted so it is not lost. Above the client's threshold it needs a decision, "
+                   "because a large unclaimed receipt is how a missed line looks.",
+        "what_to_do": "Usually nothing. If a line was left off the report, the employee resubmits; "
+                      "if a row was misread, fix it so it matches this receipt."},
+    "CURRENCY_MISMATCH": {
+        "title": "Currency or exchange arithmetic is off", "kind": "money", "blocks": "open",
+        "meaning": "A foreign-currency row has no rate, its amount × rate does not equal its MYR "
+                   "total, or its receipt is in another currency.",
+        "what_to_do": "Check the receipt's currency and the typed rate; fix the value, or accept to "
+                      "leave the row out."},
+    "EVIDENCE_UNCERTAIN": {
+        "title": "Matched, but the read is uncertain", "kind": "evidence", "blocks": "open",
+        "meaning": "The row is matched, but the receipt has no date, a date that fits only after a "
+                   "swap or a second read, a low-confidence amount, or an uncertain km figure.",
+        "what_to_do": "Open the page and confirm what it says; dismiss with a note if it is right, "
+                      "or fix the value if it is not."},
+    "MILEAGE_RATE": {
+        "title": "Mileage rate is not the client's", "kind": "mileage", "blocks": "open",
+        "meaning": "The rate on the KM tab (typed, or implied by amount ÷ km) is not one of the "
+                   "client's rates.",
+        "what_to_do": "Fix the rate or the amount; if the client's rates in Settings are out of date, "
+                      "update them and re-verify."},
+    "MILEAGE_ARITHMETIC": {
+        "title": "km × rate does not equal the amount", "kind": "mileage", "blocks": "open",
+        "meaning": "On a KM-tab row, the kilometres times the rate is not the amount claimed.",
+        "what_to_do": "Fix the value that is wrong, or accept to leave the row out."},
+    "MILEAGE_LINE_MISMATCH": {
+        "title": "Report and KM tab disagree", "kind": "mileage", "blocks": "open",
+        "meaning": "A mileage line on the report has no KM-tab trip of the same date and amount, or "
+                   "a KM-tab trip has no report line.",
+        "what_to_do": "Find the twin on the other tab and fix the date or amount that differs; "
+                      "accept the odd one out to leave it out."},
+    "MILEAGE_DISCREPANCY": {
+        "title": "km claimed differs from the map", "kind": "mileage", "blocks": "open",
+        "meaning": "The kilometres claimed are not what the map page prints (allowing exactly double "
+                   "for a trip the narrative calls a return).",
+        "what_to_do": "Open the map page; fix the km if the claim is wrong, or dismiss with a note if "
+                      "the map is."},
+    "MILEAGE_NO_MAP": {
+        "title": "No map for this trip", "kind": "mileage", "blocks": "open",
+        "meaning": "No map page in the bundle carries this trip's date (or, as a note, a map trip no "
+                   "KM row claims).",
+        "what_to_do": "Ask for the map or accept to leave the trip out; a note needs nothing."},
+    "CATEGORY_UNCLEAR": {
+        "title": "Listing category not settled", "kind": "structure", "blocks": "open",
+        "meaning": "The category for the listing row could not be decided from the report's purpose "
+                   "and lines, or no category list is known.",
+        "what_to_do": "Choose the category on the employee's line; if there is no list, add it in "
+                      "Settings → Claims."},
+    "REPORT_UNREADABLE": {
+        "title": "The report could not be read", "kind": "structure", "blocks": "open",
+        "meaning": "The report file, tab or workbook could not be opened or its layout could not be "
+                   "confirmed; the employee was checked from receipts only.",
+        "what_to_do": "Open the file; fix it (or its map role) and re-verify, or acknowledge to pay "
+                      "from the receipt-derived rows."},
+    "REPORT_TOTAL_MISMATCH": {
+        "title": "The report's lines do not add up to its total", "kind": "structure", "blocks": "open",
+        "meaning": "The lines were read and checked, but their sum is not what the report's total "
+                   "cell says — usually a typo in the total, sometimes a line the reader missed.",
+        "what_to_do": "Compare the two figures on the report; acknowledge if the lines are right (the "
+                      "listing pays the lines), or re-verify after fixing the file."},
+    "NO_REPORT": {
+        "title": "No expense report — rows built from receipts", "kind": "structure", "blocks": "open",
+        "meaning": "The folder has receipts but no report, so the rows to pay were built from the "
+                   "receipts found.",
+        "what_to_do": "Confirm the derived list is what should be paid; acknowledge, or fix values."},
+    "MISSING_REFERENCE": {
+        "title": "A control this batch needs is not set", "kind": "structure", "blocks": "open",
+        "toggle": False,
+        "meaning": "The batch needs something the run does not have — mileage rates for the KM check, "
+                   "or the month's listing for the column order — so that check could not run.",
+        "what_to_do": "Set it (Settings → Claims, or link the listing) and re-verify, or acknowledge "
+                      "to proceed without it."},
+}
+
+# The checks a client may switch off (run-level controls stay on).
+CHECK_CODES = tuple(code for code, entry in CATALOGUE.items() if entry.get("toggle", True))
+
+# The kinds, in the order the Review screen shows them.
+FLAG_KINDS = ("money", "evidence", "mileage", "structure", "note")
+
+
+def describe(code: str) -> dict:
+    """The catalogue entry, or a plain fallback so an unknown code still
+    renders (title from the code) rather than failing."""
+    entry = CATALOGUE.get(code)
+    if entry:
+        return {"code": code, **entry, "toggle": entry.get("toggle", True)}
+    return {"code": code, "title": code.replace("_", " ").capitalize(), "meaning": "", "what_to_do": "",
+            "kind": "structure", "blocks": "open", "toggle": True}
 
 
 def _key(kind: str, client: str) -> str:
