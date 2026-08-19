@@ -380,6 +380,14 @@ def test_unclaimed_receipt_blocks_at_or_above_the_threshold():
     res = _checks(rows, ev, {**PROFILE, "unclaimed_receipt_threshold": "10"})
     unc = {f["evidence_id"]: f for f in res["flags"] if f["code"] == "UNCLAIMED_RECEIPT"}
     assert unc["e2"]["status"] == "open" and unc["e3"]["status"] == "open"
+    # 0 is a real setting (every unclaimed receipt needs a decision), not "use the default"
+    res = _checks(rows, ev, {**PROFILE, "unclaimed_receipt_threshold": "0"})
+    unc = {f["evidence_id"]: f for f in res["flags"] if f["code"] == "UNCLAIMED_RECEIPT"}
+    assert unc["e2"]["status"] == "open" and unc["e3"]["status"] == "open"
+    # a profile with no value at all takes the default
+    res = _checks(rows, ev, {k: v for k, v in PROFILE.items() if k != "unclaimed_receipt_threshold"})
+    unc = {f["evidence_id"]: f for f in res["flags"] if f["code"] == "UNCLAIMED_RECEIPT"}
+    assert unc["e2"]["status"] == "open" and unc["e3"]["status"] == "info"
 
 
 def test_threshold_is_saved_through_settings_and_validated(monkeypatch, tmp_path):
@@ -396,3 +404,83 @@ def test_threshold_is_saved_through_settings_and_validated(monkeypatch, tmp_path
     assert r.status_code == 200
     assert client.get("/api/claims-settings").json()["profile"]["unclaimed_receipt_threshold"] == "250"
     assert profile.PROFILE_DEFAULTS["unclaimed_receipt_threshold"] == "100"
+
+
+# ---- review follow-ups -----------------------------------------------------------------
+
+def test_prd_names_every_catalogued_code():
+    prd = (Path(__file__).resolve().parents[2] / "docs" / "PRD.md").read_text()
+    missing = [c for c in profile.CATALOGUE if f"`{c}`" not in prd]
+    assert not missing, f"codes the PRD does not name: {missing}"
+
+
+def test_run_detail_carries_the_catalogue(Session, monkeypatch):
+    from app import settings_store
+    from app.claims import routes as claims_routes
+    for module in (claims_routes, profile, settings_store):
+        monkeypatch.setattr(module, "SessionLocal", Session)
+    s = Session()
+    run = ClaimsRun(client="c", folder_url="", listing_url="", received_date="2026-08-19", instructions="",
+                    snapshot={}, status="ready")
+    s.add(run)
+    s.commit()
+    body = TestClient(app).get(f"/api/claims-runs/{run.id}").json()
+    assert body["catalogue"]["NO_RECEIPT"]["title"] == "No receipt for this row"
+    assert body["notes"] == 0 and body["open_flags"] == 0
+    s.close()
+
+
+def test_unreadable_reason_names_uncomputed_formulas(tmp_path):
+    wb, ws, last, total_row = _report_sheet(LINES, 0)
+    ws[f"H{total_row}"] = f"=SUM(H7:H{last})"
+    path = tmp_path / "r.xlsx"
+    wb.save(path)
+    why = worker._unreadable_reason(path, "Expense Report", "A_1/r.xlsx", RuntimeError("3 rounds"))
+    assert "formula cell(s) with no saved value" in why and "open it in Excel".lower() in why.lower()
+    wb2, *_ = _report_sheet(LINES, 73.90)
+    wb2.save(tmp_path / "v.xlsx")
+    why = worker._unreadable_reason(tmp_path / "v.xlsx", "Expense Report", "A_1/v.xlsx", RuntimeError("3 rounds"))
+    assert "3 rounds" in why and "formula" not in why
+
+
+def test_report_total_mismatch_can_be_switched_off():
+    header = {"total_check": {"lines": "73.90", "cell": "74.00", "column": "total"}, "total_cell": "H11"}
+    assert worker._report_total_flags(header, "S", PROFILE)
+    assert worker._report_total_flags(header, "S", {**PROFILE, "checks": {"REPORT_TOTAL_MISMATCH": False}}) == []
+
+
+def test_shared_receipt_survives_a_retry_of_one_employee(Session):
+    s = Session()
+    run = ClaimsRun(client="c", folder_url="", listing_url="", received_date="2026-08-19", instructions="",
+                    snapshot={"profile": PROFILE}, status="verifying", listing_headers={"state": "ok"})
+    s.add(run)
+    s.commit()
+    a, arow, aev = _employee_with_matched_receipt(s, run, "A_1", "Alice")
+    _employee_with_matched_receipt(s, run, "B_2", "Bob", page=3)
+    assert worker._finish_run(run.id, 0.0) is True
+    # a retry of Alice: her open flags, rows and evidence go; new ones come back
+    s.query(ClaimFlag).filter(ClaimFlag.employee_id == a.id, ClaimFlag.status.in_(("open", "info"))).delete()
+    s.query(ClaimEvidence).filter(ClaimEvidence.employee_id == a.id).delete()
+    s.query(ClaimRow).filter(ClaimRow.employee_id == a.id).delete()
+    s.commit()
+    row = ClaimRow(run_id=run.id, employee_id=a.id, kind="expense", sheet="S", row=7,
+                   values={"date": "2026-07-01", "amount": "120.00", "total": "120.00", "currency": "MYR"}, verdict="matched")
+    s.add(row)
+    s.commit()
+    ev = ClaimEvidence(run_id=run.id, employee_id=a.id, kind="receipt", file="A_1/r.pdf", page=1, position="middle",
+                       values={"vendor": "Sushi King", "date": "2026-07-01", "amount": "120.00", "currency": "MYR"},
+                       confidence={}, matched_row_id=row.id)
+    s.add(ev)
+    s.commit()
+    assert worker._finish_run(run.id, 0.0) is True
+    flags = s.query(ClaimFlag).filter(ClaimFlag.run_id == run.id, ClaimFlag.code == "SHARED_RECEIPT").all()
+    assert len(flags) == 2 and len({f.employee_id for f in flags}) == 2
+    s.close()
+
+
+def test_receipts_without_a_vendor_are_never_the_same_receipt():
+    rows = [_row("r1", "2026-07-01", "45.00"), _row("r2", "2026-07-01", "45.00")]
+    ev = [_receipt("e1", "2026-07-01", "45.00", page=2, vendor=""), _receipt("e2", "2026-07-01", "45.00", page=5, vendor="")]
+    res = _checks(rows, ev)
+    assert res["tie_calls"] >= 1  # nothing to call identical: the AI is asked
+    assert not [f for f in res["flags"] if f["code"] == "DUPLICATE_SCAN"]

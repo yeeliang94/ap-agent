@@ -104,7 +104,6 @@ export default function ReviewView({ run, onChanged }: { run: ClaimsRunDetail; o
       acc[k].cents += stakeCents(f, rowById, evById) ?? 0;
     }
     return acc;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run.flags, run.rows, run.evidence]);
 
   const passes = (f: ClaimFlag) =>
@@ -307,7 +306,13 @@ function EmployeeTable({ run, onChanged, selected, onSelect }: {
                 {String(e.summary?.rows ?? "—")} verified
                 {openFor(e.id) ? <span className="sub">{openFor(e.id)} flagged</span> : null}
               </td>
-              <td>{e.report_total || "—"}</td>
+              <td>
+                {e.report_total
+                  ? e.report_total
+                  : e.summary?.rows_total
+                    ? <>{String(e.summary.rows_total)}<span className="sub">from the rows (no report total)</span></>
+                    : "—"}
+              </td>
               <td>
                 <span className={`chip ${e.status === "verified" ? (openFor(e.id) ? "review" : "ok") : e.status === "failed" ? "flag" : "wait"}`}>{e.status}</span>
                 {e.error && <span className="sub">{e.error}</span>}
@@ -403,11 +408,7 @@ function ClaimFlagCard({ run, flag, row, evidence, onChanged, defaultOpen = fals
   const fields = row?.kind === "mileage" ? KM_FIELDS : ROW_FIELDS;
   const rowLevel = !!flag.row_id && !!row;
   const words = describeFlag(run, flag.code);
-  const stake = row
-    ? centsOf(row.values.total ?? row.values.amount)
-    : evidence && evidence.kind === "receipt"
-      ? centsOf(evidence.values.amount)
-      : null;
+  const stake = stakeCents(flag, new Map(row ? [[row.id, row]] : []), new Map(evidence ? [[evidence.id, evidence]] : []));
 
   return (
     <FlagCard
@@ -482,6 +483,11 @@ function ClaimFlagCard({ run, flag, row, evidence, onChanged, defaultOpen = fals
                 Re-verify employee
               </button>
             )}
+            <span className="sub" style={{ flexBasis: "100%" }}>
+              {rowLevel
+                ? `Accept leaves ${rm(stake) || "this row"} out of the batch · Dismiss keeps it (a note is required) · Fix a value corrects a misread and re-checks this employee at once`
+                : "Acknowledge records this as seen and the run proceeds · Dismiss sets it aside with a note"}
+            </span>
           </div>
         )
       }

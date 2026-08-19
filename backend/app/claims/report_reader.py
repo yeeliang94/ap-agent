@@ -459,8 +459,9 @@ async def read_report(ws, employee_name: str, er_code: str, usage=None) -> tuple
         # or as soon as the AI, shown the problem, answers the SAME reading
         # again: it has looked and stands by it, and pushing further only
         # tempts it to move the span to make a typo add up.
-        same_again = previous is not None and reading.model_dump() == previous
-        previous = reading.model_dump()
+        structure = reading.model_dump(exclude={"why", "observations"})
+        same_again = previous is not None and structure == previous
+        previous = structure
         if not structural and (not soft or round_no == MAX_ROUNDS or same_again):
             check = total_check(ws, reading, rows)
             header = {

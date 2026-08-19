@@ -1,28 +1,33 @@
-"""The check catalogue (PRD Flow 3c–3e). Code decides; a person clears.
+"""The checks (PRD Flow 3c–3e). Code decides; a person clears.
 
 Inputs are plain dicts (rows, evidence, the profile), so the same code
 runs inside a worker and again, instantly, when a reviewer corrects a
 value. Every flag carries:
 
-  code    — one of the catalogue codes below
-  reason  — the plain sentence
+  code    — a code from the catalogue in profile.py (title, meaning, what
+            to do — the words a person sees)
+  reason  — the plain sentence for THIS row
   basis   — the rule it applied and where it came from
   cite    — where to look: {"file", "page", "position"} or {"sheet", "row"}
   status  — "open" (a person must decide) or "info" (a note; never blocks)
 
 Matching rows ↔ receipts: same currency, same amount (to the cent), same
 day (the profile's date window, default 0). One candidate → matched.
-Several → an AI tie-break among the candidates only; unsure →
-RECEIPT_AMBIGUOUS. None → NO_RECEIPT (naming how many pages in how many
-files were searched, and any same-day receipt whose amount differs),
-unless the row says receipt=N AND the item is receipt-optional in the
-profile → an info note. A receipt may support one row: two rows on the
-same receipt → DUPLICATE_RECEIPT on both. Receipts no row claims →
-UNCLAIMED_RECEIPT (info). Foreign rows: rate present and ≠ 1, amount ×
-rate = total, receipt currency = row currency, else CURRENCY_MISMATCH.
-A match on a receipt with no date, a date that fits only after a swap or
-the second read, or a low-confidence date/amount/currency →
-EVIDENCE_UNCERTAIN (a person confirms; never accepted silently).
+Several → an AI tie-break among the candidates only (skipped when they
+are value-identical: the first is taken); unsure → RECEIPT_AMBIGUOUS.
+None → NO_RECEIPT (naming how many pages in how many files were searched,
+and any same-day receipt whose amount differs), unless the row says
+receipt=N AND the item is receipt-optional in the profile → an info note.
+A receipt may support one row: two rows on the same receipt →
+DUPLICATE_RECEIPT on both. The same receipt by value on two pages, each
+supporting a different row → DUPLICATE_SCAN on both. Receipts no row
+claims → UNCLAIMED_RECEIPT: a note below the client's threshold, open at
+or above it. Foreign rows: rate present and ≠ 1, amount × rate = total,
+receipt currency = row currency, else CURRENCY_MISMATCH. A match on a
+receipt with no date, a date that fits only after a swap or the second
+read, or a low-confidence date/amount/currency → EVIDENCE_UNCERTAIN (a
+person confirms; never accepted silently). The same receipt matched under
+two employees is the worker's run-close pass (SHARED_RECEIPT).
 
 Mileage rows ↔ map trips: same date; km equal (± tolerance, default 0),
 or exactly double when the narrative says a return trip; else
@@ -107,6 +112,9 @@ def _receipt_key(ev: dict) -> tuple:
     folded), date, amount to the cent, currency."""
     v = ev.get("values") or {}
     vendor = " ".join(str(v.get("vendor") or "").lower().split())
+    if not vendor:
+        # no vendor read: two such receipts cannot be called "the same"
+        return ("<no vendor>", ev.get("id") or id(ev))
     amount = _dec(v.get("amount"))
     return (vendor, str(v.get("date") or ""), str(amount.quantize(Decimal("0.01"))) if amount is not None else "",
             (v.get("currency") or "MYR").upper())
@@ -386,7 +394,11 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
                                    "universal rule: one receipt supports one row; two pages with the same vendor, "
                                    "date, amount and currency are shown to a person",
                                    _ev_cite(e), row_id=rid, evidence_id=e["id"]))
-    threshold = _dec(profile.get("unclaimed_receipt_threshold")) or Decimal("100")
+    # The client's threshold; 0 is a real setting (every unclaimed receipt
+    # needs a decision), so only a missing/unparsable value takes the default.
+    threshold = _dec(profile.get("unclaimed_receipt_threshold"))
+    if threshold is None:
+        threshold = Decimal(profile_mod.PROFILE_DEFAULTS["unclaimed_receipt_threshold"])
     for e in receipts:
         if e["id"] not in matches and on("UNCLAIMED_RECEIPT"):
             ev = e["values"]
@@ -552,6 +564,6 @@ def needs_missing_reference(rows: list[dict], profile: dict) -> str:
     lacks, as a sentence — or "" when nothing is missing."""
     if any(r["kind"] == "mileage" for r in rows) and not (profile.get("mileage_rates") or {}):
         return ("The batch has mileage rows but the client profile has no mileage rates, so the "
-                "rate check (MILEAGE_RATE) could not run. Set the rates in Settings → Claims and "
+                "mileage-rate check could not run. Set the rates in Settings → Claims and "
                 "re-verify, or acknowledge to proceed without that check.")
     return ""

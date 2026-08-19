@@ -121,29 +121,43 @@ def _shared_receipt_flags(s, run_id: str, profile: dict) -> int:
             others = [x for x in group if x.employee_id != e.employee_id]
             names = sorted({(employees.get(x.employee_id).name or employees.get(x.employee_id).folder)
                             if employees.get(x.employee_id) else "?" for x in others})
+            as_dict = lambda x: {"file": x.file, "page": x.page, "position": x.position, "values": x.values or {}}  # noqa: E731
             v = e.values or {}
             s.add(ClaimFlag(
                 run_id=run_id, employee_id=e.employee_id, row_id=e.matched_row_id, evidence_id=e.id,
                 code="SHARED_RECEIPT",
                 reason=(f"The receipt from {v.get('vendor', '?')} ({v.get('date') or 'no date'}, "
-                        f"{v.get('currency', 'MYR')} {v.get('amount')}) at {e.file} page {e.page}"
-                        + (f", {e.position}" if e.position else "")
+                        f"{v.get('currency', 'MYR')} {v.get('amount')}) at {checks_mod._where(as_dict(e))}"
                         + f" also supports a row of {', '.join(names)} ("
-                        + "; ".join(f"{x.file} page {x.page}" for x in others)
+                        + "; ".join(checks_mod._where(as_dict(x)) for x in others)
                         + "). One expense, two claims — or two identical receipts. Decide whose it is."),
                 basis="universal rule: one receipt supports one row, across the whole batch",
-                cite={"file": e.file, "page": e.page, "position": e.position}))
+                cite=checks_mod._ev_cite(as_dict(e))))
             existing.add(key)
             added += 1
     return added
 
 
-def _report_total_flags(header: dict, tab: str) -> list[dict]:
+def _unreadable_reason(path: Path, tab: str, report_file: str, exc: Exception) -> str:
+    """The sentence for a report tab that never verified. When the tab
+    holds formulas with no saved value (a workbook written by a script and
+    never opened in Excel), that is the cause and the fix — say so instead
+    of the generic three-rounds message."""
+    n = report_reader.uncomputed_formulas(path, tab)
+    if n:
+        return (f"The report tab {tab!r} of {report_file} has {n} formula cell(s) with no saved value — "
+                "the workbook was never opened and saved in Excel, so its totals read as empty. Open it "
+                "in Excel, save it, re-upload and re-verify. Continuing with receipts only.")
+    return (f"The report tab {tab!r} of {report_file} could not be read reliably: {exc} "
+            "Continuing with receipts only.")
+
+
+def _report_total_flags(header: dict, tab: str, profile: dict | None = None) -> list[dict]:
     """REPORT_TOTAL_MISMATCH when the report's lines were read and checked
     but do not add up to its total cell — the lines are kept and paid; a
-    person confirms which figure is right."""
+    person confirms which figure is right. Off per client like any check."""
     check = (header or {}).get("total_check")
-    if not check:
+    if not check or (profile is not None and not profile_mod.check_enabled(profile, "REPORT_TOTAL_MISMATCH")):
         return []
     cell = (header or {}).get("total_cell") or ""
     row_no = int("".join(ch for ch in cell if ch.isdigit()) or 0)
@@ -335,21 +349,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
         if wb is not None:
             categories = report_reader.read_categories(wb) or list(profile.get("categories") or [])
             tab = roles.get("report_tab")
-            uncomputed = report_reader.uncomputed_formulas(path, tab) if tab in wb.sheetnames else 0
-            if tab in wb.sheetnames and uncomputed:
-                # A workbook written by a script and never opened in Excel:
-                # every formula reads as empty. No amount of re-reading
-                # helps; the fix is the file's, so say exactly that.
-                flags.append(checks_mod._flag("REPORT_UNREADABLE",
-                                              f"The report tab {tab!r} of {roles['report_file']} has {uncomputed} "
-                                              "formula cell(s) with no saved value — the workbook was never "
-                                              "opened and saved in Excel, so its totals read as empty. Open "
-                                              "it in Excel, save it, re-upload and re-verify. Continuing with "
-                                              "receipts only.",
-                                              "universal rule: a report that cannot be read is said so, never guessed",
-                                              {"sheet": tab, "row": 0}))
-                notes.append(("WARNING", f"Report tab {tab!r}: {uncomputed} formula cell(s) with no saved value"))
-            elif tab in wb.sheetnames:
+            if tab in wb.sheetnames:
                 try:
                     r_rows, header, r_notes = await report_reader.read_report(
                         wb[tab], emp.name, emp.er_code, usage)
@@ -357,11 +357,10 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
                     for r in r_rows:
                         rows.append({"kind": "expense", "sheet": tab, "row": r["row"], "values": r})
                     report_ok = True
-                    flags += _report_total_flags(header, tab)
+                    flags += _report_total_flags(header, tab, profile)
                 except report_reader.ReportUnreadable as exc:
-                    flags.append(checks_mod._flag("REPORT_UNREADABLE",
-                                                  f"The report tab {tab!r} of {roles['report_file']} could not be "
-                                                  f"read reliably: {exc} Continuing with receipts only.",
+                    why = _unreadable_reason(path, tab, roles["report_file"], exc)
+                    flags.append(checks_mod._flag("REPORT_UNREADABLE", why,
                                                   "universal rule: three attempts, then a person",
                                                   {"sheet": tab, "row": 0}))
                     notes.append(("WARNING", f"Report tab {tab!r}: unreadable — {exc}"))
@@ -531,15 +530,19 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
                         basis="client profile: categories (not set)", cite={}))
 
     # ---- summary -----------------------------------------------------------------------
-    total = header.get("total") if header else None
-    if total is None:
-        total = str(sum((Decimal(r["values"]["total"] or r["values"]["amount"]) for r in rows
-                         if r["kind"] in ("expense", "derived") and (r["values"].get("total") or r["values"].get("amount"))),
-                        Decimal("0")).quantize(Decimal("0.01")))
-    emp.report_total = total
+    # report_total is the figure the REPORT states (its total cell) — the
+    # independent side of the output reconciliation. An employee with no
+    # such figure (no report, or no total cell) has none, and the output
+    # says so rather than reconciling the rows against themselves. The
+    # rows' own sum is kept beside it for the screen.
+    rows_total = str(sum((Decimal(r["values"]["total"] or r["values"]["amount"]) for r in rows
+                          if r["kind"] in ("expense", "derived") and (r["values"].get("total") or r["values"].get("amount"))),
+                         Decimal("0")).quantize(Decimal("0.01")))
+    emp.report_total = (header.get("total") if header else None) or ""
     n_rows = sum(1 for r in rows if r["kind"] != "mileage")
     open_flags = sum(1 for f in flags + result["flags"] if f["status"] == "open")
-    emp.summary = {**(emp.summary or {}), "rows": n_rows, "km_rows": sum(1 for r in rows if r["kind"] == "mileage"),
+    emp.summary = {**(emp.summary or {}), "rows": n_rows, "rows_total": rows_total,
+                   "km_rows": sum(1 for r in rows if r["kind"] == "mileage"),
                    "receipts": len(receipts), "map_trips": len(trips), "pages": pages_read,
                    "flagged": len({f["row_id"] for f in result["flags"] if f["status"] == "open" and f["row_id"]}),
                    "open_flags": open_flags, "purpose": (header or {}).get("purpose", ""),
@@ -588,7 +591,7 @@ async def run_checks_for(s, run: ClaimsRun, emp: ClaimEmployee, profile: dict,
             for r in row_objs]
     evidence = [{"id": e.id, "kind": e.kind, "file": e.file, "page": e.page, "position": e.position,
                  "values": dict(e.values), "confidence": dict(e.confidence or {})} for e in ev_objs]
-    tie = TieBreak(usage or evidence_mod.Usage())
+    tie = TieBreak(usage or evidence_mod.Usage(cap=WORKER_REQUEST_CAP))
     result = await checks_mod.run_checks(rows, evidence, profile,
                                          {"name": emp.name, "er_code": emp.er_code}, searched, tie)
     by_id = {r.id: r for r in row_objs}

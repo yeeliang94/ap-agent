@@ -377,6 +377,10 @@ comparison and every sum.
   person tells). The same receipt matched under two employees → at run
   close, `SHARED_RECEIPT` on both. Value-identical candidates skip the AI
   tie-break.
+- Controls the batch needs and cannot find (no mileage rates in the profile
+  but the batch has KM rows; no listing to take the column order from) →
+  one run-level `MISSING_REFERENCE` per control, acknowledged or fixed
+  before output; it cannot be switched off.
 - **Every flag code has words** (title, one-line meaning, what to do, kind:
   money / evidence / mileage / structure / note) in one backend catalogue
   the Review screen, the Settings toggles and the tests read; a flag never
