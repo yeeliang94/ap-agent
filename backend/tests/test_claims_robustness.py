@@ -283,3 +283,80 @@ def test_two_real_receipts_with_different_vendors_are_untouched():
     ev2 = [_receipt("e1", "2026-07-01", "45.00", page=2), _receipt("e2", "2026-07-01", "45.00", page=5)]
     res = _checks(rows2, ev2, {**PROFILE, "checks": {"DUPLICATE_SCAN": False}})
     assert not [f for f in res["flags"] if f["code"] == "DUPLICATE_SCAN"]
+
+
+# ---- R5: one receipt, two employees ------------------------------------------------
+
+from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy.orm import sessionmaker  # noqa: E402
+
+from app.claims.models import ClaimEmployee, ClaimEvidence, ClaimFlag, ClaimRow, ClaimsRun  # noqa: E402
+from app.db import Base  # noqa: E402
+
+
+@pytest.fixture()
+def Session(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 't.sqlite3'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    S = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(worker, "SessionLocal", S)
+    return S
+
+
+def _employee_with_matched_receipt(s, run, folder, name, vendor="Sushi King", page=1):
+    e = ClaimEmployee(run_id=run.id, folder=folder, name=name, er_code="", roles={}, status="verified")
+    s.add(e)
+    s.commit()
+    row = ClaimRow(run_id=run.id, employee_id=e.id, kind="expense", sheet="S", row=7,
+                   values={"date": "2026-07-01", "amount": "120.00", "total": "120.00", "currency": "MYR"},
+                   verdict="matched")
+    s.add(row)
+    s.commit()
+    ev = ClaimEvidence(run_id=run.id, employee_id=e.id, kind="receipt", file=f"{folder}/r.pdf", page=page,
+                       position="middle", values={"vendor": vendor, "date": "2026-07-01", "amount": "120.00",
+                                                  "currency": "MYR"}, confidence={}, matched_row_id=row.id)
+    s.add(ev)
+    s.commit()
+    row.matched_evidence_id = ev.id
+    s.commit()
+    return e, row, ev
+
+
+def test_shared_receipt_across_employees_is_flagged_once_on_each(Session):
+    s = Session()
+    run = ClaimsRun(client="c", folder_url="", listing_url="", received_date="2026-08-19", instructions="",
+                    snapshot={"profile": PROFILE}, status="verifying", listing_headers={"state": "ok"})
+    s.add(run)
+    s.commit()
+    a, arow, _ = _employee_with_matched_receipt(s, run, "A_1", "Alice")
+    b, brow, _ = _employee_with_matched_receipt(s, run, "B_2", "Bob", page=3)
+    _employee_with_matched_receipt(s, run, "C_3", "Cara", vendor="Starbucks")  # different receipt
+    for _ in range(2):  # closing twice must not double the flags
+        assert worker._finish_run(run.id, 0.0) is True
+    flags = s.query(ClaimFlag).filter(ClaimFlag.run_id == run.id, ClaimFlag.code == "SHARED_RECEIPT").all()
+    assert {f.row_id for f in flags} == {arow.id, brow.id}
+    by_row = {f.row_id: f for f in flags}
+    assert "Bob" in by_row[arow.id].reason and "B_2/r.pdf page 3" in by_row[arow.id].reason
+    assert "Alice" in by_row[brow.id].reason and by_row[brow.id].status == "open"
+    assert by_row[arow.id].cite == {"file": "A_1/r.pdf", "page": 1, "position": "middle"}
+    # a decided one stays decided across another close
+    by_row[arow.id].status = "dismissed"
+    s.commit()
+    assert worker._finish_run(run.id, 0.0) is True
+    flags = s.query(ClaimFlag).filter(ClaimFlag.run_id == run.id, ClaimFlag.code == "SHARED_RECEIPT").all()
+    assert len(flags) == 2 and {f.status for f in flags} == {"dismissed", "open"}
+    s.close()
+
+
+def test_shared_receipt_check_can_be_off(Session):
+    s = Session()
+    run = ClaimsRun(client="c", folder_url="", listing_url="", received_date="2026-08-19", instructions="",
+                    snapshot={"profile": {**PROFILE, "checks": {"SHARED_RECEIPT": False}}}, status="verifying",
+                    listing_headers={"state": "ok"})
+    s.add(run)
+    s.commit()
+    _employee_with_matched_receipt(s, run, "A_1", "Alice")
+    _employee_with_matched_receipt(s, run, "B_2", "Bob")
+    assert worker._finish_run(run.id, 0.0) is True
+    assert s.query(ClaimFlag).filter(ClaimFlag.run_id == run.id, ClaimFlag.code == "SHARED_RECEIPT").count() == 0
+    s.close()

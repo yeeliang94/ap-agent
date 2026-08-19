@@ -92,6 +92,52 @@ async def verify_run(db, run: ClaimsRun) -> None:
     _finish_run(run.id, started)
 
 
+def _shared_receipt_flags(s, run_id: str, profile: dict) -> int:
+    """SHARED_RECEIPT: the same receipt (vendor, date, amount, currency)
+    matched to a row under two or more employees. Each worker sees only its
+    own folder, so this is the one pass over the whole batch — at run
+    close. Idempotent by (code, row, evidence); a flag a person already
+    decided is not raised again. Returns how many were added."""
+    if not profile_mod.check_enabled(profile, "SHARED_RECEIPT"):
+        return 0
+    receipts = s.query(ClaimEvidence).filter(ClaimEvidence.run_id == run_id, ClaimEvidence.kind == "receipt",
+                                             ClaimEvidence.matched_row_id != "").all()
+    if not receipts:
+        return 0
+    employees = {e.id: e for e in s.query(ClaimEmployee).filter(ClaimEmployee.run_id == run_id).all()}
+    existing = {(f.code, f.row_id, f.evidence_id) for f in s.query(ClaimFlag).filter(
+        ClaimFlag.run_id == run_id, ClaimFlag.code == "SHARED_RECEIPT").all()}
+    groups: dict[tuple, list[ClaimEvidence]] = {}
+    for e in receipts:
+        groups.setdefault(checks_mod._receipt_key({"values": e.values or {}}), []).append(e)
+    added = 0
+    for group in groups.values():
+        if len({e.employee_id for e in group}) < 2:
+            continue
+        for e in group:
+            key = ("SHARED_RECEIPT", e.matched_row_id, e.id)
+            if key in existing:
+                continue
+            others = [x for x in group if x.employee_id != e.employee_id]
+            names = sorted({(employees.get(x.employee_id).name or employees.get(x.employee_id).folder)
+                            if employees.get(x.employee_id) else "?" for x in others})
+            v = e.values or {}
+            s.add(ClaimFlag(
+                run_id=run_id, employee_id=e.employee_id, row_id=e.matched_row_id, evidence_id=e.id,
+                code="SHARED_RECEIPT",
+                reason=(f"The receipt from {v.get('vendor', '?')} ({v.get('date') or 'no date'}, "
+                        f"{v.get('currency', 'MYR')} {v.get('amount')}) at {e.file} page {e.page}"
+                        + (f", {e.position}" if e.position else "")
+                        + f" also supports a row of {', '.join(names)} ("
+                        + "; ".join(f"{x.file} page {x.page}" for x in others)
+                        + "). One expense, two claims — or two identical receipts. Decide whose it is."),
+                basis="universal rule: one receipt supports one row, across the whole batch",
+                cite={"file": e.file, "page": e.page, "position": e.position}))
+            existing.add(key)
+            added += 1
+    return added
+
+
 def _report_total_flags(header: dict, tab: str) -> list[dict]:
     """REPORT_TOTAL_MISMATCH when the report's lines were read and checked
     but do not add up to its total cell — the lines are kept and paid; a
@@ -175,6 +221,7 @@ def _finish_run(run_id: str, started: float) -> bool:
                                       "the listing and start a new run, or acknowledge to proceed with the "
                                       "fallback."),
                             basis="run input: this month's listing link", cite={"what": "listing"}))
+        _shared_receipt_flags(s, run_id, profile)
         s.flush()  # so the count below sees the flags just added
         n_flags = s.query(ClaimFlag).filter(ClaimFlag.run_id == run_id, ClaimFlag.status == "open").count()
         failed = [e for e in employees if e.status == "failed"]
