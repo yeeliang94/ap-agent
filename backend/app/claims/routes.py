@@ -272,6 +272,12 @@ async def confirm_map(run_id: str, body: dict) -> dict:
         problems = mapping.validate_confirmed_map(new_map, run.survey)
         if problems:
             raise HTTPException(400, "The map is not ready to confirm: " + "; ".join(problems))
+        from . import source as source_mod
+
+        n_cases = sum(1 for e in new_map["employees"] if e.get("is_employee") and not e.get("skip"))
+        if n_cases > source_mod.MAX_CASES_PER_RUN:
+            raise HTTPException(400, f"{n_cases} cases to verify — more than the {source_mod.MAX_CASES_PER_RUN} "
+                                     "one run may hold. Skip some at the map and run them in a second batch.")
         changes = _map_changes(run.map, new_map)
         # File-role patterns the reviewer ticked "remember" on go into the
         # client profile — the map AI is shown them next time and code
@@ -443,6 +449,17 @@ async def decide_claim_flag(run_id: str, flag_id: str, body: dict) -> dict:
             raise HTTPException(404, "No such flag.")
         if flag.status not in ("open", "info"):
             raise HTTPException(400, f"This flag is already {flag.status}.")
+        if flag.code == "ARTIFACT_UNRESOLVED":
+            # A file is not "dismissed": it gets a disposition, which is
+            # what releases the control (H3). The decision route accepts
+            # the disposition inline so the flag card can offer it.
+            disposition = str(body.get("disposition", "")).strip()
+            if disposition not in ("irrelevant", "unreadable", "duplicate"):
+                raise HTTPException(400, "Say what this file is: disposition must be irrelevant, unreadable "
+                                         "or duplicate (with a note) — that is what settles an unplaced file.")
+            _set_disposition(db, run_id, flag.artifact_id, disposition, note or decision, actor="reviewer")
+            db.commit()
+            return {"ok": True, "disposition": disposition}
         flag.status, flag.resolution = decision, note
         run = db.get(ClaimsRun, run_id)
         run.outputs = {}  # withdrawn; rebuilt from the reviewed state on next read
@@ -451,6 +468,56 @@ async def decide_claim_flag(run_id: str, flag_id: str, body: dict) -> dict:
                           detail=f"[{flag.code}] {flag.reason[:200]} — note: {note or 'none'}"))
         db.commit()
         return {"ok": True}
+    finally:
+        db.close()
+
+
+DISPOSITIONS = ("used", "duplicate", "irrelevant", "unreadable")
+
+
+def _set_disposition(db, run_id: str, artifact_id: str, disposition: str, reason: str, actor: str) -> ClaimSourceArtifact:
+    """The reviewer settles a Source Artifact (H3): its disposition is
+    recorded as theirs (never overwritten by an adapter afterwards), the
+    open ARTIFACT_UNRESOLVED flag for it is resolved, the output is
+    withdrawn for a rebuild, and the change is audited."""
+    art = db.query(ClaimSourceArtifact).filter(ClaimSourceArtifact.run_id == run_id,
+                                               ClaimSourceArtifact.artifact_id == artifact_id).first()
+    if art is None:
+        raise HTTPException(404, "No such file in this run.")
+    if disposition not in DISPOSITIONS:
+        raise HTTPException(400, f"disposition must be one of {', '.join(DISPOSITIONS)}.")
+    if disposition == "used" and not art.case_id:
+        raise HTTPException(400, "A file is 'used' only inside a case — move it into a case at the map first.")
+    if disposition != "used" and not reason.strip():
+        raise HTTPException(400, "A short reason is required — it goes in the audit trail.")
+    old = art.disposition
+    art.disposition, art.disposition_reason, art.disposition_by = disposition, reason.strip()[:400], actor
+    art.needs_confirmation = 0
+    for fl in db.query(ClaimFlag).filter(ClaimFlag.run_id == run_id, ClaimFlag.code == "ARTIFACT_UNRESOLVED",
+                                          ClaimFlag.artifact_id == artifact_id, ClaimFlag.status.in_(("open", "info"))):
+        fl.status, fl.resolution = "resolved_by_correction", f"file marked {disposition} — {reason.strip() or 'no reason given'}"
+    run = db.get(ClaimsRun, run_id)
+    run.outputs = {}
+    cases_mod.bump_revision(run)
+    db.add(AuditEvent(run_id=run_id, actor=actor, action="artifact_disposition",
+                      detail=f"{art.path}: {old} -> {disposition} — {reason.strip() or 'no reason given'}"[:2000]))
+    return art
+
+
+@router.post("/{run_id}/artifacts/{artifact_id}/disposition")
+def set_artifact_disposition(run_id: str, artifact_id: str, body: dict) -> dict:
+    """The reviewer says what a file is. body = {disposition, reason}."""
+    db = SessionLocal()
+    try:
+        run = db.get(ClaimsRun, run_id)
+        if not run:
+            raise HTTPException(404, "No such claims run.")
+        if run.status not in ("map_ready", "verifying", "ready"):
+            raise HTTPException(400, f"Files can be settled once the map is proposed (the run is {run.status}).")
+        art = _set_disposition(db, run_id, artifact_id, str(body.get("disposition", "")).strip(),
+                               str(body.get("reason", "")).strip(), actor="reviewer")
+        db.commit()
+        return {"ok": True, "artifact": cases_mod.artifact_dict(art)}
     finally:
         db.close()
 

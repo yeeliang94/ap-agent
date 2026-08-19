@@ -173,11 +173,77 @@ CATALOGUE: dict[str, dict] = {
         "what_to_do": "Confirm the derived list is what should be paid; acknowledge, or fix values."},
     "MISSING_REFERENCE": {
         "title": "A control this batch needs is not set", "kind": "structure", "blocks": "open",
-        "toggle": False,
+        "toggle": False, "identity": ("what",),
         "meaning": "The batch needs something the run does not have — mileage rates for the KM check, "
                    "or the month's listing for the column order — so that check could not run.",
         "what_to_do": "Set it (Settings → Claims, or link the listing) and re-verify, or acknowledge "
                       "to proceed without it."},
+    # ---- hardening H3–H8: files, grouping, evidence-derived lines, tools ----
+    "ARTIFACT_UNRESOLVED": {
+        "title": "A file nobody has placed", "kind": "structure", "blocks": "open",
+        "toggle": False, "identity": ("artifact_id",),
+        "meaning": "A file in the batch has no disposition yet: it was not read as a report or receipts, "
+                   "and no one has said it is irrelevant, unreadable or a duplicate. Nothing uploaded "
+                   "vanishes silently, so it blocks the output until settled.",
+        "what_to_do": "Open the file. Mark it irrelevant (with why), unreadable, or a duplicate — or move it "
+                      "into the right case at the map and re-verify."},
+    "CLAIMANT_UNKNOWN": {
+        "title": "Nobody knows whose claim this is", "kind": "structure", "blocks": "open",
+        "toggle": False, "identity": ("case_id",),
+        "meaning": "The case has lines or evidence but no confirmed claimant: the files carry no name or "
+                   "code, or only weak hints. A payment cannot go to a guessed person.",
+        "what_to_do": "Set the claimant on the case (from a roster, the approval e-mail, or by asking), "
+                      "or exclude the case."},
+    "OWNERSHIP_CONFLICT": {
+        "title": "Two people could own this", "kind": "structure", "blocks": "open",
+        "toggle": False, "identity": ("case_id",),
+        "meaning": "Strong identity signals in the case's files point at different people (two names, or "
+                   "a name and a code that belong to someone else).",
+        "what_to_do": "Look at the cited files; split the case, move the evidence, or set the claimant "
+                      "with a note."},
+    "UNASSIGNED_EVIDENCE": {
+        "title": "Evidence that belongs to no case", "kind": "note", "blocks": "info",
+        "identity": ("evidence_id", "artifact_id"),
+        "meaning": "A receipt or file was read but could not be placed with any case on a sound basis. "
+                   "It is listed so it is not lost; nothing is paid on it.",
+        "what_to_do": "If it belongs to someone, move it into their case at the map; otherwise leave it."},
+    "CLAIM_AMOUNT_UNCONFIRMED": {
+        "title": "Amount taken from a receipt, not a claim", "kind": "money", "blocks": "open",
+        "toggle": False, "identity": ("row_id",),
+        "meaning": "This line was built from a receipt because no claim summary states what is claimed. "
+                   "A receipt total is a proposal, not an approved amount.",
+        "what_to_do": "Confirm the amount to pay (acknowledge), fix it, or accept to leave the line out."},
+    "PURPOSE_UNKNOWN": {
+        "title": "No stated purpose", "kind": "structure", "blocks": "open",
+        "identity": ("case_id",),
+        "meaning": "The listing needs a purpose / category basis for this case and none is stated in any "
+                   "file — the lines were derived from evidence.",
+        "what_to_do": "Type the purpose or choose the category on the case; or acknowledge to proceed."},
+    "NO_SUMMARY": {
+        "title": "No claim summary — lines derived from evidence", "kind": "structure", "blocks": "open",
+        "identity": ("case_id",),
+        "meaning": "No expense report or claim list was found for this case, so the lines to pay were built "
+                   "from the receipts and maps found (the delivered NO_REPORT, for any input shape).",
+        "what_to_do": "Confirm the derived list is what should be paid; acknowledge, or fix values."},
+    "TOOL_UNAVAILABLE": {
+        "title": "A tool this investigation needed is switched off", "kind": "structure", "blocks": "open",
+        "toggle": False, "identity": ("what",),
+        "meaning": "The investigation genuinely needed a capability that is not enabled here (for example "
+                   "the isolated Python sandbox), so part of it could not be done.",
+        "what_to_do": "Do that part by hand and acknowledge, or enable the tool where policy allows and "
+                      "re-run."},
+    "TOOL_FAILED": {
+        "title": "A read failed during the investigation", "kind": "structure", "blocks": "open",
+        "toggle": False, "identity": ("what",),
+        "meaning": "A tool call (a workbook, document, search or calculation) failed or was cut short, so "
+                   "the investigation may be incomplete for the named file.",
+        "what_to_do": "Open the file named; if it is fine, re-verify; if not, mark it unreadable."},
+    "SANDBOX_LIMIT": {
+        "title": "A calculation was stopped at its limit", "kind": "structure", "blocks": "open",
+        "toggle": False, "identity": ("what",),
+        "meaning": "Model-written Python hit a time, memory or output limit and was killed; nothing it "
+                   "produced was used.",
+        "what_to_do": "Nothing to trust here; the rest of the run stands. Acknowledge, or re-run."},
 }
 
 # The checks a client may switch off (run-level controls stay on).
@@ -187,14 +253,38 @@ CHECK_CODES = tuple(code for code, entry in CATALOGUE.items() if entry.get("togg
 FLAG_KINDS = ("money", "evidence", "mileage", "structure", "note")
 
 
+# The default identity of a flag instance: its code + the row and the
+# evidence it is about. Catalogue entries name another identity where the
+# flag is about something else (a file, a case, a run-level control).
+DEFAULT_IDENTITY = ("row_id", "evidence_id")
+
+
 def describe(code: str) -> dict:
     """The catalogue entry, or a plain fallback so an unknown code still
     renders (title from the code) rather than failing."""
     entry = CATALOGUE.get(code)
     if entry:
-        return {"code": code, **entry, "toggle": entry.get("toggle", True)}
+        return {"code": code, **entry, "toggle": entry.get("toggle", True),
+                "identity": list(entry.get("identity", DEFAULT_IDENTITY))}
     return {"code": code, "title": code.replace("_", " ").capitalize(), "meaning": "", "what_to_do": "",
-            "kind": "structure", "blocks": "open", "toggle": True}
+            "kind": "structure", "blocks": "open", "toggle": True, "identity": list(DEFAULT_IDENTITY)}
+
+
+def flag_key(flag) -> tuple:
+    """The idempotency key of a flag (a dict from checks, or a ClaimFlag):
+    its code plus the identity fields the catalogue names, so a re-run or a
+    regroup never raises the same finding twice and a decided flag stays
+    decided. "what" reads cite["what"] (run-level controls)."""
+    get = (lambda k: flag.get(k)) if isinstance(flag, dict) else (lambda k: getattr(flag, k, None))
+    code = get("code")
+    fields = CATALOGUE.get(code, {}).get("identity", DEFAULT_IDENTITY)
+    parts = [code]
+    for f in fields:
+        if f == "what":
+            parts.append(str((get("cite") or {}).get("what", "")))
+        else:
+            parts.append(str(get(f) or ""))
+    return tuple(parts)
 
 
 def _key(kind: str, client: str) -> str:

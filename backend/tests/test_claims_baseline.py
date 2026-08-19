@@ -114,12 +114,21 @@ async def test_structured_folder_baseline_is_pinned(db, monkeypatch):
     assert any(f["code"] == "NO_REPORT" for f in flags_by_emp[arjun["id"]])
     assert all(r["kind"] == "derived" for r in got["rows"] if r["employee_id"] == arjun["id"])
 
-    # The human gate: nothing out while a flag is open.
+    # The human gate: nothing out while a flag is open. The stray
+    # notes.txt is a file nobody placed (H3): it blocks until the reviewer
+    # says what it is — a dismissal is not enough.
     assert got["outputs"] == {}
+    stray = [f for f in got["flags"] if f["code"] == "ARTIFACT_UNRESOLVED"]
+    assert len(stray) == 1 and stray[0]["cite"]["file"].endswith("notes.txt") and stray[0]["employee_id"] == ""
+    r = client.post(f"/api/claims-runs/{run_id}/flags/{stray[0]['id']}/decide",
+                    json={"decision": "dismissed", "note": "just notes"})
+    assert r.status_code == 400 and "disposition" in r.text
     for f in got["flags"]:
         if f["status"] == "open":
-            r = client.post(f"/api/claims-runs/{run_id}/flags/{f['id']}/decide",
-                            json={"decision": "dismissed", "note": "baseline pin"})
+            body = {"decision": "dismissed", "note": "baseline pin"}
+            if f["code"] == "ARTIFACT_UNRESOLVED":
+                body["disposition"] = "irrelevant"
+            r = client.post(f"/api/claims-runs/{run_id}/flags/{f['id']}/decide", json=body)
             assert r.status_code == 200, r.text
     got = client.get(f"/api/claims-runs/{run_id}").json()
     out = got["outputs"]

@@ -8,10 +8,15 @@ laid out exactly as the batch was, and from then on the run reads only
 that copy — the run is judged against the files as they were when it
 started, and SharePoint is never asked twice.
 
-Quotas (confirmed by the owner, PRD "Confirmed defaults") are enforced
-here, BEFORE any AI call, and a refusal names the quota it hit:
-  30 employee folders per batch · 60 files and 200 pages per employee ·
-  25 MB per file.
+Quotas are enforced here, BEFORE any AI call, and a refusal names the
+quota it hit. Since hardening H3 the ingestion quotas are RUN-WIDE — a
+batch is a folder of files, structured or a flat dump, and an employee
+folder is no longer the unit: 1500 files, 1500 MB and 6000 pages per run,
+25 MB per file, three levels deep. The per-CASE budgets (60 files, 200
+pages) apply after grouping, to each Claim Case as it is verified
+(case_budget_problems); a case over one is failed with the reason and the
+rest of the run carries on. MAX_CASES_PER_RUN caps what one run may
+verify (30, the delivered 30-employee-folder default) at confirm time.
 """
 from __future__ import annotations
 
@@ -25,15 +30,17 @@ from ..docsource import SourceUnavailable
 log = logging.getLogger("claims.source")
 
 MAX_DEPTH = 3
-MAX_EMPLOYEE_FOLDERS = 30
-MAX_FILES_PER_EMPLOYEE = 60
-MAX_PAGES_PER_EMPLOYEE = 200
 MAX_FILE_MB = 25
 MAX_ZIP_MB = 200
-# Batch-wide caps, so many small folders (or a pile of root files) cannot
-# add up to more than a run is meant to hold, on disk or in the survey.
+# Run-wide caps (H3): a flat dump has no employee folders to count by.
 MAX_TOTAL_FILES = 1500
 MAX_TOTAL_MB = 1500      # every file's uncompressed size, added up
+MAX_TOTAL_PAGES = 6000   # 30 cases × 200 pages, as one number
+# Post-grouping budgets, per Claim Case (applied when a case is verified,
+# and at confirm time for the case count).
+MAX_CASES_PER_RUN = 30
+MAX_FILES_PER_CASE = 60
+MAX_PAGES_PER_CASE = 200
 
 # Every transient source failure is retried this many times. The REST
 # fake retries inside itself already; the real MCP source and the walk
@@ -91,18 +98,12 @@ def walk_folder(source, folder_url: str) -> list[dict]:
 
 
 def _check_listing_quotas(entries: list[dict]) -> None:
-    top_folders = [e for e in entries if e["kind"] == "folder" and e["depth"] == 1]
-    if len(top_folders) > MAX_EMPLOYEE_FOLDERS:
-        raise QuotaExceeded(
-            f"The batch folder holds {len(top_folders)} subfolders — more than the "
-            f"{MAX_EMPLOYEE_FOLDERS} employee folders a run may have.")
-    per_top: dict[str, int] = {}
+    """The run-wide file quotas, from the listing alone (before a byte is
+    downloaded). Per-case budgets are a later, per-case matter."""
     total_files, total_bytes = 0, 0
     for e in entries:
         if e["kind"] != "file":
             continue
-        top = e["path"].split("/", 1)[0] if "/" in e["path"] else ""
-        per_top[top] = per_top.get(top, 0) + 1
         total_files += 1
         total_bytes += int(e.get("size") or 0)
         if e.get("size") and e["size"] > MAX_FILE_MB * 1024 * 1024:
@@ -115,11 +116,6 @@ def _check_listing_quotas(entries: list[dict]) -> None:
     if total_bytes > MAX_TOTAL_MB * 1024 * 1024:
         raise QuotaExceeded(f"The batch's files add up to {total_bytes / 1024 / 1024:.0f} MB — over the "
                             f"{MAX_TOTAL_MB} MB limit for a run.")
-    for top, n in per_top.items():
-        if top and n > MAX_FILES_PER_EMPLOYEE:
-            raise QuotaExceeded(
-                f"Folder {top!r} holds {n} files — more than the "
-                f"{MAX_FILES_PER_EMPLOYEE} files an employee folder may have.")
 
 
 def download_all(source, folder_url: str, entries: list[dict], dest: Path,
@@ -252,13 +248,18 @@ def page_count(path: Path) -> int | None:
 
 
 def check_page_quotas(files: list[dict]) -> None:
-    """The 200-pages-per-employee quota, once page counts are known."""
-    per_top: dict[str, int] = {}
-    for f in files:
-        top = f["path"].split("/", 1)[0] if "/" in f["path"] else ""
-        per_top[top] = per_top.get(top, 0) + (f.get("pages") or 0)
-    for top, n in per_top.items():
-        if top and n > MAX_PAGES_PER_EMPLOYEE:
-            raise QuotaExceeded(
-                f"Folder {top!r} holds {n} pages — more than the "
-                f"{MAX_PAGES_PER_EMPLOYEE} pages an employee folder may have.")
+    """The run-wide page quota, once page counts are known."""
+    n = sum(int(f.get("pages") or 0) for f in files)
+    if n > MAX_TOTAL_PAGES:
+        raise QuotaExceeded(f"The batch holds {n} pages — more than the {MAX_TOTAL_PAGES} pages a run may have.")
+
+
+def case_budget_problems(n_files: int, n_pages: int, label: str = "this case") -> str:
+    """The per-case budget (H3), as a sentence when it is exceeded, else ""."""
+    if n_files > MAX_FILES_PER_CASE:
+        return (f"{label} has {n_files} files to read — more than the {MAX_FILES_PER_CASE} files one case "
+                "may have. Split it into two cases at the map, or leave some files out, then re-verify.")
+    if n_pages > MAX_PAGES_PER_CASE:
+        return (f"{label} has {n_pages} pages to read — more than the {MAX_PAGES_PER_CASE} pages one case "
+                "may have. Split it into two cases at the map, or leave some files out, then re-verify.")
+    return ""

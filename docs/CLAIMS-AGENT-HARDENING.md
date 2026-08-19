@@ -678,11 +678,20 @@ and rollback switch.
 
 ### H3 — Global inventory independent of folders
 
-- [ ] Replace employee-named quotas with run-wide limits plus post-group case
-  budgets.
-- [ ] Hash and manifest every file before mapping.
-- [ ] Inspect root and nested files uniformly.
-- [ ] Create Source Artifact dispositions and completeness audit.
+- [x] Replace employee-named quotas with run-wide limits plus post-group case
+  budgets (`source.py`: 1500 files / 1500 MB / 6000 pages per run at ingestion;
+  60 files / 200 pages per case at verification, a case over budget fails alone;
+  30 cases per run at confirm; 2026-08-19).
+- [x] Hash and manifest every file before mapping (`manifest.py`, H1; stored on
+  `claims_runs.manifest`).
+- [x] Inspect root and nested files uniformly (a flat folder with zero
+  subfolders reaches investigation with every file inventoried; `FLAT_FOLDER`
+  diary line; nothing is refused for lacking subfolders).
+- [x] Create Source Artifact dispositions and completeness audit
+  (`ARTIFACT_UNRESOLVED` at run close, one per unresolved file, keyed by the
+  artifact id; released only by a reviewer disposition —
+  `POST /artifacts/{id}/disposition` or the flag decision carrying one; the
+  catalogue gained the H3–H8 codes, each with an identity key, `profile.flag_key`).
 - **Exit:** a flat folder with zero subfolders reaches investigation with every
   file visible; nothing is silently dropped.
 

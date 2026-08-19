@@ -44,18 +44,21 @@ def test_local_walk_lists_subfolders_to_depth_three(tmp_path):
     assert {e["kind"] for e in entries} == {"file", "folder"}
 
 
-def test_thirty_one_folders_are_refused_with_the_quota_named(tmp_path):
+def test_quotas_are_run_wide_not_per_employee_folder(tmp_path, monkeypatch):
+    """H3: a batch is a folder of files; 31 subfolders or 61 files in one
+    folder are fine at ingestion. The run-wide caps still refuse and name
+    themselves; the per-case budget applies later, per case."""
     _tree(tmp_path, 31, files_per=1, depth_extra=False)
+    assert sum(1 for e in batch_source.walk_folder(LocalFolderSource(), str(tmp_path)) if e["kind"] == "file") == 31
+    _tree(tmp_path / "wide", 1, files_per=61, depth_extra=False)
+    assert batch_source.walk_folder(LocalFolderSource(), str(tmp_path / "wide"))
+    monkeypatch.setattr(batch_source, "MAX_TOTAL_FILES", 10)
     with pytest.raises(batch_source.QuotaExceeded) as exc:
         batch_source.walk_folder(LocalFolderSource(), str(tmp_path))
-    assert "30 employee folders" in str(exc.value)
-
-
-def test_too_many_files_in_one_folder_names_that_folder(tmp_path):
-    _tree(tmp_path, 1, files_per=61, depth_extra=False)
-    with pytest.raises(batch_source.QuotaExceeded) as exc:
-        batch_source.walk_folder(LocalFolderSource(), str(tmp_path))
-    assert "60 files" in str(exc.value) and "Person 0_0" in str(exc.value)
+    assert "10 files a run may have" in str(exc.value)
+    assert "61 files" in batch_source.case_budget_problems(61, 10, "Case A")
+    assert "201 pages" in batch_source.case_budget_problems(3, 201, "Case A")
+    assert batch_source.case_budget_problems(60, 200) == ""
 
 
 def test_download_all_copies_the_tree_and_refuses_oversized_files(tmp_path, monkeypatch):
@@ -141,11 +144,13 @@ def test_unpack_zip_refuses_path_escapes_and_bad_zips(tmp_path):
         batch_source.unpack_zip(bad, dest)
 
 
-def test_page_quota_after_download(tmp_path):
+def test_page_quota_after_download_is_run_wide(tmp_path, monkeypatch):
     files = [{"path": "A_1/x.pdf", "pages": 150}, {"path": "A_1/y.pdf", "pages": 60}]
+    batch_source.check_page_quotas(files)  # 210 pages in one folder: fine at ingestion (per-case later)
+    monkeypatch.setattr(batch_source, "MAX_TOTAL_PAGES", 200)
     with pytest.raises(batch_source.QuotaExceeded) as exc:
         batch_source.check_page_quotas(files)
-    assert "200 pages" in str(exc.value)
+    assert "200 pages a run may have" in str(exc.value)
 
 
 def test_folder_entry_shape():

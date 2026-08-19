@@ -420,6 +420,25 @@ value** (e.g. the amount was misread): the fix is audited and the affected
 checks for that employee re-run instantly. A **Re-verify employee** button
 re-runs one worker.
 
+**3f. Hardening controls (CLAIMS-AGENT-HARDENING.md H3–H8).** The same
+catalogue carries the codes the full-dump investigation adds; each has a
+title, meaning, what-to-do, kind, blocking default and an identity (the
+fields that make one flag instance, so a re-run never raises it twice):
+- `ARTIFACT_UNRESOLVED` — a submitted file with no disposition; run-level,
+  cannot be switched off; settled only by a reviewer's *irrelevant*,
+  *unreadable* or *duplicate* disposition (or by moving it into a case).
+- `CLAIMANT_UNKNOWN` — a case with lines or evidence and no confirmed
+  claimant; `OWNERSHIP_CONFLICT` — strong identity signals disagree. Both
+  block, per case, and cannot be switched off.
+- `UNASSIGNED_EVIDENCE` — evidence placed with no case on a sound basis (a
+  note; nothing is paid on it).
+- `CLAIM_AMOUNT_UNCONFIRMED` — a line built from a receipt (a proposal, not
+  an approved amount); `PURPOSE_UNKNOWN`; `NO_SUMMARY` (the delivered
+  `NO_REPORT`, for any input shape).
+- `TOOL_UNAVAILABLE`, `TOOL_FAILED`, `SANDBOX_LIMIT` — an investigation
+  that could not complete a step says so, per step, instead of failing the
+  run or pretending the step was done.
+
 **Error states.**
 - A worker fails (model error, request cap reached) → that employee is
   marked *failed* with the reason; the other employees continue; the
@@ -631,7 +650,7 @@ not learned automatically.
 | Delivery order | Phase 4b R1–R10 is complete and becomes the protected baseline; continue with H0–H12 in `CLAIMS-AGENT-HARDENING.md`. Run-local investigation and full-dump support replace persistent Discovery and `RULE_DRIFT`. |
 | Pause at the map | Always, in v1 (one click); auto-continue on a clean map is a later option |
 | Received date on listing rows | Typed by the reviewer when starting the run |
-| Quotas | 30 employee folders per batch; 60 files / 200 pages per employee; 25 MB per file; over a limit the run refuses and names it |
+| Quotas | Run-wide since H3 (2026-08-19): 1500 files / 1500 MB / 6000 pages per run, 25 MB per file, three levels deep — over a limit the run refuses and names it. Per case, after grouping: 60 files / 200 pages (a case over one fails with the reason; the rest of the run continues); at most 30 cases verified per run |
 | Speed target | Under 5 minutes for a 10-employee batch |
 
 Smaller details still marked **[assumed]** in the flows: map-trip date must

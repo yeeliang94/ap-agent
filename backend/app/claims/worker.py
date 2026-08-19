@@ -29,7 +29,8 @@ from . import checks as checks_mod
 from . import evidence as evidence_mod
 from . import profile as profile_mod
 from . import report_reader
-from .models import ClaimEmployee, ClaimEvidence, ClaimFlag, ClaimRow, ClaimsRun
+from . import source as batch_source
+from .models import ClaimEmployee, ClaimEvidence, ClaimFlag, ClaimRow, ClaimSourceArtifact, ClaimsRun
 
 log = logging.getLogger("claims.worker")
 
@@ -140,6 +141,38 @@ def _shared_receipt_flags(s, run_id: str, profile: dict) -> int:
     return added
 
 
+def _artifact_completeness_flags(s, run_id: str) -> int:
+    """Universal control 2 (H3): every Source Artifact reaches a terminal
+    disposition before output. Each `unresolved` artifact gets one open
+    ARTIFACT_UNRESOLVED flag (run-level, keyed by the artifact id — a
+    re-verification or regroup never raises it twice; a decided or
+    resolved one is not raised again while the artifact stays as it is).
+    Returns how many were added."""
+    unresolved = s.query(ClaimSourceArtifact).filter(ClaimSourceArtifact.run_id == run_id,
+                                                     ClaimSourceArtifact.disposition == "unresolved").all()
+    if not unresolved:
+        return 0
+    existing = {profile_mod.flag_key(f) for f in s.query(ClaimFlag).filter(
+        ClaimFlag.run_id == run_id, ClaimFlag.code == "ARTIFACT_UNRESOLVED").all()}
+    added = 0
+    for art in unresolved:
+        if ("ARTIFACT_UNRESOLVED", art.artifact_id) in existing:
+            continue
+        s.add(ClaimFlag(
+            run_id=run_id, employee_id="", case_id=art.case_id or "", artifact_id=art.artifact_id,
+            code="ARTIFACT_UNRESOLVED",
+            reason=(f"{art.path} ({art.media_type or 'file'}"
+                    + (f", {art.pages} page(s)" if art.pages else "") + ") has no disposition: "
+                    + (art.role_reason or "it was not read as a report or receipts and nobody has said what it is")
+                    + ". Nothing uploaded vanishes silently — say what this file is before the output is released."),
+            basis="universal rule: every submitted file reaches a disposition (used, duplicate, irrelevant "
+                  "or unreadable) before output",
+            cite={"file": art.path, "page": 1 if art.pages else 0}))
+        added += 1
+    s.flush()
+    return added
+
+
 def _unreadable_reason(path: Path, tab: str, report_file: str, exc: Exception) -> str:
     """The sentence for a report tab that never verified. When the tab
     holds formulas with no saved value (a workbook written by a script and
@@ -238,6 +271,7 @@ def _finish_run(run_id: str, started: float) -> bool:
                                       "fallback."),
                             basis="run input: this month's listing link", cite={"what": "listing"}))
         _shared_receipt_flags(s, run_id, profile)
+        _artifact_completeness_flags(s, run_id)
         s.flush()  # so the count below sees the flags just added
         n_flags = s.query(ClaimFlag).filter(ClaimFlag.run_id == run_id, ClaimFlag.status == "open").count()
         failed = [e for e in employees if e.status == "failed"]
@@ -278,6 +312,13 @@ async def verify_employee(run_id: str, employee_id: str) -> None:
         s.query(ClaimFlag).filter(ClaimFlag.employee_id == employee_id,
                                   ClaimFlag.status.in_(("open", "info"))).delete()
         s.commit()
+        # The per-case budget (H3): files and pages this case would read.
+        over = _case_budget_problem(run, emp)
+        if over:
+            _fail_employee(s, run_id, emp, over, started, usage)
+            telemetry.record(s, run_id, "verify", telemetry.WARNING, "CASE_OVER_BUDGET",
+                             f"{emp.name or emp.folder}: {over}")
+            return
         try:
             await _work(s, run, emp, usage)
         except WorkerBudgetExceeded as exc:
@@ -305,6 +346,15 @@ async def verify_employee(run_id: str, employee_id: str) -> None:
                          f"{usage.requests} AI request(s), {usage.tokens} tokens.")
     finally:
         s.close()
+
+
+def _case_budget_problem(run: ClaimsRun, emp: ClaimEmployee) -> str:
+    """The per-case file/page budget, from the manifest's page counts."""
+    roles = emp.roles or {}
+    files = [p for p in [roles.get("report_file")] + list(roles.get("receipt_files") or []) if p]
+    pages_by_path = {m.get("path"): int(m.get("pages") or 0) for m in (run.manifest or [])}
+    n_pages = sum(pages_by_path.get(p, 0) for p in files)
+    return batch_source.case_budget_problems(len(files), n_pages, emp.name or emp.folder)
 
 
 def _discard_partial(s, employee_id: str) -> ClaimEmployee:

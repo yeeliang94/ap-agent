@@ -107,10 +107,12 @@ async def process_run(run_id: str) -> None:
         telemetry.record(db, run_id, "survey", telemetry.INFO, "STAGE_DONE",
                          f"Survey done in {_secs(started)}: {len(survey['folders'])} "
                          f"folder(s), {len(survey['files'])} file(s), {n_peeked} peeked inside.")
-        if not survey["folders"] and not any(f.get("peek") for f in survey["files"]):
-            raise RuntimeError(
-                "Nothing that looks like a claims batch was found in the folder: "
-                "no subfolders and no readable files.")
+        if not survey["files"]:
+            raise RuntimeError("The folder holds no files at all — nothing to investigate.")
+        if not survey["folders"]:
+            telemetry.record(db, run_id, "survey", telemetry.INFO, "FLAT_FOLDER",
+                             f"No subfolders: {len(survey['files'])} file(s) sit directly in the batch folder. "
+                             "Every file is inventoried; grouping is proposed at the map, not assumed.")
 
         # ---- investigate: manifest, then the adapter behind the seam --------
         # (H1) Every file is hashed into the immutable manifest first; the
