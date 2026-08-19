@@ -739,10 +739,22 @@ and rollback switch.
 
 ### H6 — Full-dump grouping and Map & Group gate
 
-- [ ] Extract identity signals with Citations.
-- [ ] Propose Claim Cases and Evidence Assignments, including unknown/unassigned.
-- [ ] Implement grouping validation and revision control.
-- [ ] Build Map & Group UI and audited merge/split/move/claimant actions.
+- [x] Extract identity signals with Citations (`claims/grouping.py`: ER codes and
+  names from file names, header cells beside a Name label, folder names — each
+  cited and graded strong/weak; 2026-08-19).
+- [x] Propose Claim Cases and Evidence Assignments, including unknown/unassigned
+  (investigator normalize + `refresh`: `OWNERSHIP_CONFLICT`, `CLAIMANT_UNKNOWN`,
+  the unassigned pool; a proposed claimant is confirmed only by the reviewer's
+  Confirm, never by AI inference).
+- [x] Implement grouping validation and revision control (`grouping.gate`,
+  `expected_revision` on every mutation → 409 when stale; `confirm-grouping` is
+  the one gate; `confirm-map` runs through the same core).
+- [x] Build Map & Group UI and audited merge/split/move/claimant actions
+  (`frontend/src/screens/claims/GroupView.tsx` — the one map screen when the
+  server sends cases; the delivered `MapView.tsx` remains only as the fallback
+  while `CLAIMS_CASE_MODEL` is off; coverage counter, pool, dispositions,
+  role + remember, Confirm grouping & verify; verified in the browser on a
+  seeded flat dump).
 - **Exit:** scenarios B–D behave as specified; no output is possible before
   grouping confirmation.
 

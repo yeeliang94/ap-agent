@@ -313,6 +313,8 @@ export interface ClaimEmployee {
 export interface ClaimRow {
   id: string;
   employee_id: string;
+  /** The Claim Case this line belongs to (hardening H2). */
+  case_id?: string;
   kind: string;
   sheet: string;
   row: number;
@@ -325,6 +327,7 @@ export interface ClaimRow {
 export interface ClaimEvidence {
   id: string;
   employee_id: string;
+  case_id?: string;
   kind: string;
   file: string;
   page: number;
@@ -337,8 +340,11 @@ export interface ClaimEvidence {
 export interface ClaimFlag {
   id: string;
   employee_id: string;
+  case_id?: string;
   row_id: string;
   evidence_id: string;
+  /** A flag about a whole file (ARTIFACT_UNRESOLVED): the file's manifest id. */
+  artifact_id?: string;
   code: string;
   reason: string;
   basis: string;
@@ -382,7 +388,117 @@ export interface ClaimsOutputs {
   received_date: string;
 }
 
+// ---- the case model (hardening H2/H6) --------------------------------------
+
+export interface Claimant {
+  name: string;
+  identifier: string;
+  state: "confirmed" | "proposed" | "unknown";
+  basis: string;
+  citations: unknown[];
+}
+
+/** One Claim Case: a proposed payment-listing decision. Mirrors an
+ *  employee record 1:1 while both exist (employee_id). */
+export interface ClaimCase {
+  id: string;
+  employee_id: string;
+  label: string;
+  claimant: Claimant;
+  state: "proposed" | "confirmed" | "blocked" | "excluded";
+  grouping_basis: string;
+  citations: unknown[];
+  artifact_ids: string[];
+  roles: ClaimEmployee["roles"];
+  status: string;
+  error: string;
+  category: string;
+  gl: string;
+  category_basis: string;
+  reported_total: string;
+  lines_total: string;
+  summary: Record<string, unknown>;
+  confidence: number;
+  reason: string;
+  // delivered aliases
+  folder: string;
+  name: string;
+  er_code: string;
+  report_total: string;
+}
+
+export type Disposition = "used" | "duplicate" | "irrelevant" | "unreadable" | "unresolved";
+export type ArtifactRole =
+  | "report" | "receipts" | "approval" | "report_copy" | "listing" | "roster" | "policy" | "other" | "unknown";
+
+/** One submitted file, whatever it turns out to be. */
+export interface ClaimArtifact {
+  id: string;
+  path: string;
+  sha256: string;
+  media_type: "workbook" | "pdf" | "image" | "other" | string;
+  size: number;
+  pages: number | null;
+  sheets: string[];
+  inspection_state: string;
+  failure_reason: string;
+  proposed_role: ArtifactRole;
+  role_reason: string;
+  disposition: Disposition;
+  disposition_reason: string;
+  disposition_by: "" | "adapter" | "reviewer";
+  needs_confirmation: boolean;
+  case_id: string;
+}
+
+export interface ClaimAssignment {
+  id: string;
+  evidence_id: string;
+  artifact_id: string;
+  case_id: string;
+  line_id: string;
+  state: "proposed" | "confirmed" | "rejected";
+  basis: string;
+  confidence: number;
+  reason: string;
+}
+
+export interface Grouping {
+  problems: string[];
+  counts: {
+    artifacts: number;
+    dispositioned: number;
+    unresolved: number;
+    material_unresolved: number;
+    cases: number;
+    to_verify: number;
+    claimants_confirmed: number;
+    conflicts: number;
+  };
+  ok: boolean;
+}
+
+export interface Investigation {
+  id?: string;
+  adapter?: string;
+  strategy?: string;
+  status?: string;
+  plan?: { strategy?: string; steps?: string[]; assumptions?: string[]; questions?: string[]; rounds?: number; adapter?: string };
+  summary?: Record<string, unknown>;
+  rounds?: number;
+}
+
 export interface ClaimsRunDetail extends ClaimsRunSummary {
+  /** Bumped on every reviewer change; sent back with every action so two
+   *  screens never overwrite each other (409 = reload). */
+  revision: number;
+  cases?: ClaimCase[];
+  artifacts?: ClaimArtifact[];
+  assignments?: ClaimAssignment[];
+  grouping?: Grouping;
+  investigation?: Investigation;
+  tool_summary?: Record<string, { calls: number; failed: number }>;
+  artifact_counts?: { total: number; unresolved: number; needs_review: number };
   folder_url: string;
   listing_url: string;
   received_date: string;
@@ -585,4 +701,80 @@ export async function setEmployeeCategory(
     body: JSON.stringify({ category, gl, reason }),
   });
   if (!r.ok) return fail(r, "Could not set the category");
+}
+
+
+// ---- Map & Group actions (hardening H6). Every one sends the revision the
+// screen last saw; a 409 means someone (or another tab) changed the run —
+// reload and try again.
+
+async function groupingCall(url: string, method: string, body: Record<string, unknown>, fallback: string) {
+  const r = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (r.status === 409) throw new StaleRunError();
+  if (!r.ok) return fail(r, fallback);
+  return r.json() as Promise<{ ok: boolean; revision: number; grouping?: Grouping }>;
+}
+
+export class StaleRunError extends Error {
+  constructor() {
+    super("This run changed since your screen loaded — it has been reloaded; please try again.");
+    this.name = "StaleRunError";
+  }
+}
+
+export function createCase(runId: string, revision: number, label: string, artifactIds: string[]) {
+  return groupingCall(`/api/claims-runs/${runId}/cases`, "POST",
+    { label, artifact_ids: artifactIds, expected_revision: revision }, "Could not create the case");
+}
+
+export function updateCase(runId: string, revision: number, caseId: string,
+  patch: { label?: string; roles?: Partial<ClaimEmployee["roles"]>; state?: "excluded" | "proposed" }) {
+  return groupingCall(`/api/claims-runs/${runId}/cases/${caseId}`, "PUT",
+    { ...patch, expected_revision: revision }, "Could not update the case");
+}
+
+export function setClaimant(runId: string, revision: number, caseId: string, name: string, identifier: string) {
+  return groupingCall(`/api/claims-runs/${runId}/cases/${caseId}/claimant`, "PUT",
+    { name, identifier, expected_revision: revision }, "Could not set the claimant");
+}
+
+export function confirmClaimant(runId: string, revision: number, caseId: string) {
+  return groupingCall(`/api/claims-runs/${runId}/cases/${caseId}/claimant`, "PUT",
+    { confirm: true, expected_revision: revision }, "Could not confirm the claimant");
+}
+
+export function mergeCase(runId: string, revision: number, caseId: string, into: string) {
+  return groupingCall(`/api/claims-runs/${runId}/cases/${caseId}/merge`, "POST",
+    { into, expected_revision: revision }, "Could not merge the cases");
+}
+
+export function splitCase(runId: string, revision: number, caseId: string, artifactIds: string[], label: string) {
+  return groupingCall(`/api/claims-runs/${runId}/cases/${caseId}/split`, "POST",
+    { artifact_ids: artifactIds, label, expected_revision: revision }, "Could not split the case");
+}
+
+export function moveArtifact(runId: string, revision: number, artifactId: string, caseId: string) {
+  return groupingCall(`/api/claims-runs/${runId}/artifacts/${artifactId}/move`, "POST",
+    { case_id: caseId, expected_revision: revision }, "Could not move the file");
+}
+
+export function setArtifactRole(runId: string, revision: number, artifactId: string, role: ArtifactRole, remember: boolean) {
+  return groupingCall(`/api/claims-runs/${runId}/artifacts/${artifactId}/role`, "PUT",
+    { role, remember, expected_revision: revision }, "Could not set the file's role");
+}
+
+export async function setArtifactDisposition(runId: string, artifactId: string, disposition: Disposition, reason: string) {
+  const r = await fetch(`/api/claims-runs/${runId}/artifacts/${artifactId}/disposition`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ disposition, reason }),
+  });
+  if (!r.ok) return fail(r, "Could not settle the file");
+}
+
+export async function confirmGrouping(runId: string, revision: number): Promise<{ ok: boolean; cases: number; revision: number }> {
+  const r = await fetch(`/api/claims-runs/${runId}/confirm-grouping`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected_revision: revision }),
+  });
+  if (r.status === 409) throw new StaleRunError();
+  if (!r.ok) return fail(r, "Could not confirm the grouping");
+  return r.json();
 }

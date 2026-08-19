@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ClaimsRunDetail, getClaimsRun, getClaimsRunEvents } from "../api";
 import ActivityLog from "../components/ActivityLog";
 import MapView from "./claims/MapView";
+import GroupView from "./claims/GroupView";
 import VerifyingView from "./claims/VerifyingView";
 import ReviewView from "./claims/ReviewView";
 import OutputView from "./claims/OutputView";
@@ -69,6 +70,10 @@ export default function ClaimsRunDetailScreen({ runId }: { runId: string }) {
         : "map";
   const tab = chosenTab ?? defaultTab;
   const mapExists = "employees" in run.map;
+  // The case model (H6): when the server sends cases, Map & Group is the
+  // one map screen; the delivered MapView is the fallback while
+  // CLAIMS_CASE_MODEL is off.
+  const caseModel = Array.isArray(run.cases) && !!run.grouping;
 
   return (
     <section>
@@ -110,9 +115,9 @@ export default function ClaimsRunDetailScreen({ runId }: { runId: string }) {
         </div>
       )}
       <div className="tabs">
-        <button className={tab === "map" ? "tab active" : "tab"} disabled={!mapExists} onClick={() => setTab("map")}
-          title={mapExists ? "" : "The map is not ready yet"}>
-          Map &amp; Rules {run.map_warnings.length > 0 && <em>{run.map_warnings.length}</em>}
+        <button className={tab === "map" ? "tab active" : "tab"} disabled={!mapExists && !caseModel} onClick={() => setTab("map")}
+          title={mapExists || caseModel ? "" : "The map is not ready yet"}>
+          Map &amp; Group {(run.map_warnings.length + (run.grouping?.problems.length ?? 0)) > 0 && <em>{run.map_warnings.length + (run.grouping?.problems.length ?? 0)}</em>}
         </button>
         <button className={tab === "verifying" ? "tab active" : "tab"} disabled={run.employees.length === 0}
           onClick={() => setTab("verifying")} title={run.employees.length ? "" : "Verification has not started"}>
@@ -130,7 +135,18 @@ export default function ClaimsRunDetailScreen({ runId }: { runId: string }) {
           Activity {run.errors + run.warnings > 0 && <em className={run.errors > 0 ? "bad" : ""}>{run.errors + run.warnings}</em>}
         </button>
       </div>
-      {tab === "map" && mapExists && (
+      {tab === "map" && caseModel && (
+        <GroupView
+          key={`${run.status}-${run.revision}`}
+          run={run}
+          onChanged={reload}
+          onConfirmed={() => {
+            setTab("verifying");
+            reload();
+          }}
+        />
+      )}
+      {tab === "map" && !caseModel && mapExists && (
         <MapView
           key={run.status}
           run={run}
