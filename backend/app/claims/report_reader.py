@@ -360,6 +360,8 @@ async def read_report(ws, employee_name: str, er_code: str, usage=None) -> tuple
     notes: list[tuple[str, str]] = []
     problems: list[tuple[str, str]] = []
     for round_no in range(1, MAX_ROUNDS + 1):
+        if usage is not None:
+            usage.reserve()
         result = await ai_call(agent.run(grid + feedback, usage_limits=USAGE_LIMITS), "the report reader")
         if usage is not None:
             usage.add(result)
@@ -456,6 +458,8 @@ async def read_km(ws, usage=None) -> tuple[list[dict], list[tuple[str, str]]]:
     feedback = ""
     problems: list[str] = []
     for round_no in range(1, MAX_ROUNDS + 1):
+        if usage is not None:
+            usage.reserve()
         result = await ai_call(agent.run(grid + feedback, usage_limits=USAGE_LIMITS), "the mileage reader")
         if usage is not None:
             usage.add(result)

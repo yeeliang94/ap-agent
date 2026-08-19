@@ -1,8 +1,8 @@
 # Implementation Plan: Employee Claims Verification Module
 
-**Overall Progress:** `70%` (Steps 1–14 of 20)
+**Overall Progress:** `47%` (Steps 1–14 of 30 — Phase 4b R1–R10 added 2026-08-19)
 **PRD Reference:** [docs/PRD.md](PRD.md) (flows 1–5, check catalogue in Flow 3, steering, decisions table)
-**Last Updated:** 2026-08-19 (Phases 1–4 done; Phase 5 next)
+**Last Updated:** 2026-08-19 (Phases 1–4 done; peer-review fixes landed same day; **Phase 4b next**, then Phase 5)
 **Previous plan (invoice pipeline MVP, complete):** [docs/PLAN-MVP.md](PLAN-MVP.md)
 
 ## Summary
@@ -51,6 +51,39 @@ learning** so a new company needs no instructions at all.
 - **Old plan preserved** — the finished MVP plan is now `docs/PLAN-MVP.md`;
   README links to both.
 
+*Added 2026-08-19 for Phase 4b (robustness + flag surfacing), after the
+peer review and the checks walkthrough:*
+
+- **The flag catalogue is data, in one place (backend)** — every code gets a
+  human title, a one-line meaning, "what to do", a kind (money / evidence /
+  mileage / structure / note) and whether it blocks by default. The UI,
+  the Settings toggles (Step 15) and the tests all read the same table, so a
+  new check can never appear on screen as a bare `SNAKE_CASE` code again.
+- **A wrong total is a flag, not a lost report** — when the report's lines
+  are internally consistent but don't add up to the total cell, the lines
+  are kept and a person sees `REPORT_TOTAL_MISMATCH`; today a 10-cent typo
+  makes the whole report "unreadable" and pays from receipts alone. The
+  reader is told: *if your reading is right, answer the same again* — a
+  reading that comes back identical twice is accepted early, so the AI is
+  not tempted to move the row span to make the sum work.
+- **Duplicates are found by values first, images later** — same vendor +
+  date + amount + currency on two pages, each matched to a different row →
+  `DUPLICATE_SCAN` (a person decides: one receipt scanned twice, or two real
+  ones). Across employees the same test runs once at run close →
+  `SHARED_RECEIPT` on both. Perceptual image hashing is a later refinement,
+  not v1 — values are deterministic and testable today.
+- **Unclaimed receipts above a threshold block** — `UNCLAIMED_RECEIPT` stays
+  a note below the client's threshold (profile field, **default RM 100 —
+  owner to confirm**) and is an open flag at or above it, because a large
+  receipt no row claims is how a missed line looks from the outside.
+- **The review surface is the employee's whole row table; flags are
+  annotations on it** — the reviewer sees every row with its verdict and
+  its receipt, not only the flagged rows. Same CSS, same components; the
+  flag cards stay, gaining title / meaning / what-to-do / amount at stake,
+  and a summary strip with filters above them.
+- **Phase 4b goes before Phase 5** — Step 15's checks on/off toggles need
+  the catalogue (R1); nothing in Phase 5/6 is changed, only pushed down.
+
 ## Screens & UX (what the reviewer sees)
 
 Design rules for every screen below: same look as the existing screens
@@ -68,6 +101,7 @@ a programmer either.
 | **Run detail → Map & Rules** | Confirm the agent's map with one click; correct if needed | One row per subfolder: employee · ER code · report file+tab · mileage tab · receipt files · ignored · unplaced · warnings badge; each role is a dropdown; **reason on hover/expand** ("tab `Expense Report`: name header, Date/Item/Amount columns"); *remember for <client>* tick per correction; **Confirm & verify** (disabled until valid, tooltip says why); v2 adds a *Rules* panel beside the map | Loading skeleton while mapping; warnings listed above the table; invalid edit → inline message |
 | **Run detail → Verifying** | Watch progress without refreshing | Employee chips: queued / verifying / done (n flags) / failed (retry button); overall bar; Activity link | Poll every 3 s (as today); failed employee shows reason and *Retry* |
 | **Run detail → Review** | Clear flags fast | Employee summary table (name, ER code, category + why, rows verified/flagged, total, status); below it flag cards **grouped by employee**, each: code, reason, basis ("client profile: car RM 0.64/km"), **evidence preview** — page image with the receipt's position highlighted, or the sheet row — and actions *Accept* / *Exclude (note)* / *Fix a value* / *Re-verify employee* | "All flags resolved — Output unlocked" banner; per-flag saving state; instant re-check spinner on fix |
+| **Run detail → Review (Phase 4b additions)** | Understand the batch at a glance; review by employee, not by flag | **Summary strip**: counts by kind with RM at stake ("5 need a receipt · RM 340 · 3 uncertain reads · 2 mileage · 4 notes"), click to filter; **flag cards** carry a title, a one-line meaning, "what to do" and the amount at stake ("Accept — leave RM 45.00 out"); **All rows** per employee (expandable): every row with a verdict chip (matched ✓ / no receipt / uncertain / duplicate / receipt-optional / excluded), its receipt (vendor · page · position, *show* highlights it), the flags on that row, *Fix a value*; mileage rows beside their map trip | Filter with no matches: "No open flags of this kind"; excluded rows greyed with the decision; corrected values marked |
 | **Run detail → Output** | Copy the listing rows | Totals cards (employees included, total MYR), reconciliation line (green/red with the difference named), copy block (TSV preview, header order from the client's listing), *Not included* list with reasons | Locked state: "Review is not complete: 4 flags open" with link to Review; header-fallback notice when the listing headers could not be read |
 | **Run detail → Activity** | What the system did | Run diary as today: map rounds, per-employee timings, AI cost, warnings, RULE_DRIFT (v2) | — |
 | **Settings → Claims (per client)** | The few values code needs | Mileage rates by vehicle type; km tolerance (default 0); receipt-optional items; mileage item pattern; the playbook textarea; last confirmed map (read-only, with *forget*) | Save confirmation; values carry "set by reviewer on <date>" (v2: evidence) |
@@ -78,6 +112,11 @@ a programmer either.
 - [x] 🟩 Owner confirmed the four defaults (2026-08-18): always pause at the map; received date typed at run start; quotas 30 / 60 files / 200 pages / 25 MB; under 5 minutes for 10 employees
 - [x] 🟩 No conflicting in-progress work (repo clean at start)
 - [x] 🟩 Local `.env` OpenAI key still valid (`AP_LIVE_TESTS=1 pytest backend/tests/test_model_layer.py` — 1 passed, 2026-08-18)
+
+*For Phase 4b (added 2026-08-19):*
+- [ ] 🟥 The 2026-08-19 peer-review fixes are committed as their own commit before R1 starts (they are in the working tree, 219 tests green)
+- [ ] 🟥 Owner confirms three defaults: unclaimed-receipt threshold **RM 100**; `SHARED_RECEIPT` is **open** (not a note); the *All rows* table is wanted as the main review surface
+- [ ] 🟥 PRD Flow 3 updated with the new codes as each lands (`REPORT_TOTAL_MISMATCH`, `DUPLICATE_SCAN`, `SHARED_RECEIPT`, the unclaimed threshold)
 
 ## Tasks
 
@@ -155,6 +194,78 @@ a programmer either.
 - [x] 🟩 **Step 14: End-to-end verifier** — done 2026-08-19 — proof, repeatable.
   - [x] 🟩 `backend/scripts/verify_claims_run.py`: runs the sample end to end, simulates a competent reviewer (fixes the RM 10 row, excludes the acceptable N flag), asserts every planted error found, false positives ≤ 1/employee, every flag cited, the gate, totals, listing header order
   - **Verify:** `ALL CHECKS PASSED` on two consecutive runs; the run's AI cost printed.
+
+### Phase 4b: Robustness of the checks + surfacing the flags (added 2026-08-19)
+
+*Why this phase exists.* The 2026-08-19 peer review fixed what was wrong
+(reconciliation, run close, uncertain evidence, mileage arithmetic, budget).
+The checks walkthrough that followed found where the code-based checks can
+still fail **silently** (a receipt scanned twice, a receipt shared by two
+people, a large unclaimed receipt) or **loudly for the wrong reason** (a
+typo in the report's total throws the whole report away). And the flags the
+system already raises reach the reviewer as bare codes in a flat list.
+R1–R6 close the failure modes; R7–R10 give the flags a proper surface. Each
+step is code-only or UI-only, small, and lands as its own commit.
+
+*Fixtures.* No new sample generator: R2–R6 tests build tiny inputs
+in-memory (an openpyxl sheet with a wrong total, a subtotal row, dict rows
+and evidence for the checks) next to the existing scripted-AI pattern in
+`test_claims_checks.py`. New tests live in
+`backend/tests/test_claims_robustness.py`. The sample end-to-end verifier
+must still pass after every step (none of the new flags should fire on the
+clean sample).
+
+- [ ] 🟥 **R1: The flag catalogue as data** — one table the UI, Settings and tests all read.
+  - [ ] 🟥 `profile.py`: `CATALOGUE = {code: {title, meaning, what_to_do, kind, blocks}}` for every code raised anywhere (`checks.py`, `worker.py`, run-level ones); `CHECK_CODES` derived from it; `kind ∈ money | evidence | mileage | structure | note`
+  - [ ] 🟥 `GET /api/claims-settings/catalogue`; run detail includes `catalogue` so the Review screen needs no second call; `api.ts` type
+  - [ ] 🟥 Test: every `code=` literal in `checks.py`/`worker.py`/`routes.py` has a catalogue entry (a small AST/regex scan, so a new flag without words fails CI); the planted-errors sample raises only catalogued codes
+  - **Verify:** `curl /api/claims-settings/catalogue` lists 15+ codes each with a title and a what-to-do; the coverage test fails when a fake code is added to `checks.py` and passes when it is catalogued.
+
+- [ ] 🟥 **R2: A wrong report total is a flag, not a lost report** (L1 + L2) — the reader stops conflating "I read it wrong" with "the sheet is wrong".
+  - [ ] 🟥 `audit_report`: "lines' totals ≠ total cell" is **soft** when the reading has no other structural problem (rows dated, amounts present, per-row arithmetic mostly right); the feedback text says *if the lines are right, answer the same reading again*; `read_report` accepts a reading that comes back **identical twice** even with soft problems (so the AI is not pushed into moving the span to make the sum work); header gains `total_check: {lines, cell}`
+  - [ ] 🟥 Worker: when `lines ≠ cell` → `REPORT_TOTAL_MISMATCH` (open, employee-level, cites the total cell: "the report's lines add up to 258.60 but the total cell says 258.70"); rows are still extracted and checked; `emp.report_total` = the cell value, so the Output reconciliation names the same RM 0.10 by employee
+  - [ ] 🟥 Uncomputed formulas: when the total cell (or an amount column) is `None` under `data_only=True` and the cell holds a formula in a plain load → `REPORT_UNREADABLE` with the specific reason "the workbook's formulas have no saved values — open it in Excel, save it, and re-upload" (not the generic 3-rounds message)
+  - **Verify:** in-memory sheet whose total is off by 0.10 → rows extracted on round ≤ 2, `REPORT_TOTAL_MISMATCH` open, `report_total` = the cell, reconciliation lists the employee; a sheet with formula cells never opened in Excel → the specific message; the sample e2e still passes with no new flag.
+
+- [ ] 🟥 **R3: Rows the reader may skip** (L3) — subtotal / section rows inside the line span.
+  - [ ] 🟥 `ReportReading.skip_rows: list[int]` (+ `why`), same on `KMReading`; `extract_rows` / `extract_trips` leave them out; audit: a skipped row that carries a date **and** an amount and no total/subtotal-like label → structural problem ("row 12 looks like a claim line, not a subtotal")
+  - [ ] 🟥 `_REPORT_INSTRUCTIONS` / `_KM_INSTRUCTIONS` mention skip_rows in one sentence
+  - **Verify:** in-memory sheet with a "Meals subtotal" row between lines verifies on round ≤ 2 with the subtotal skipped and the sum equal to the grand total; skipping a real line is rejected by the audit; existing report tests unchanged.
+
+- [ ] 🟥 **R4: The same receipt on two pages** (S1) — inside one employee.
+  - [ ] 🟥 `run_checks`: after matching, group receipts by (vendor normalised, date, amount, currency); a group with ≥ 2 members matched to **different** rows → `DUPLICATE_SCAN` (open) on each of those rows, citing both pages ("the same receipt appears on page 2 and page 5 — one receipt or two? if one, one of these rows is a double claim")
+  - [ ] 🟥 Tie-break: candidates that are value-identical are not sent to the AI (it cannot tell them apart); take the first, let `DUPLICATE_SCAN` speak — one request saved per such row
+  - **Verify:** dict test: two rows RM 45 + the Grab receipt on pages 2 and 5 → both rows flagged with both pages cited; one row + duplicate page → one match, one `UNCLAIMED_RECEIPT` note, no `DUPLICATE_SCAN`; two genuinely different same-value receipts (different vendors) → untouched; check can be switched off per client.
+
+- [ ] 🟥 **R5: One receipt, two employees** (S2) — the only pass that sees the whole batch.
+  - [ ] 🟥 `_finish_run`: over every **matched** receipt in the run, group by (vendor normalised, date, amount, currency) across employees; ≥ 2 employees → `SHARED_RECEIPT` (open) on each employee's row, citing the other employee, file and page; idempotent by (code, row_id, evidence_id) like the correction re-check; a re-verified employee's flags are re-derived at the next close
+  - **Verify:** DB test with two employees each matched to the same dinner receipt → two flags naming each other; a retry of one employee does not duplicate them; the sample (no shared receipts) raises none.
+
+- [ ] 🟥 **R6: Unclaimed receipts that matter** (S5) — a large receipt no row claims is how a missed line looks.
+  - [ ] 🟥 Profile field `unclaimed_receipt_threshold` (MYR, default 100, snapshot per run as the others); `UNCLAIMED_RECEIPT` is **open** at/above it with the catalogue's stronger wording ("supports no row — was a line missed? Acknowledge, or fix a row so it matches"), a note below
+  - [ ] 🟥 Settings → Claims (Step 15) will show the field; until then it is settable through the existing profile PUT
+  - **Verify:** dict test: RM 240 unclaimed → open; RM 12 → info; threshold 300 in the profile flips the first to info; the sample's unclaimed amounts (all small) stay notes so the verifier is unchanged.
+
+- [ ] 🟥 **R7 (UI): Flag cards that explain themselves** — the same card, with words.
+  - [ ] 🟥 `FlagCard` takes `title`, `meaning`, `whatToDo` from the catalogue (`run.catalogue[code]`); header shows the amount at stake for row-level flags ("RM 45.00 at stake"); *Accept* names it ("Accept — leave RM 45.00 out"); one line under the actions says what each button does; the decided-flags list uses titles, not codes
+  - [ ] 🟥 The evidence preview opens by itself for the first open flag of each employee (the rest stay on *Show page*), so the reviewer's first look is at the page, not a code
+  - **Verify:** browser, sample run: every card shows title / meaning / what-to-do / amount; no `SNAKE_CASE` visible anywhere on Review; screenshot kept.
+
+- [ ] 🟥 **R8 (UI): The summary strip + filters** — the batch at a glance.
+  - [ ] 🟥 Above the employee table: one chip per **kind** with count and RM at stake ("5 need a receipt · RM 340"), plus *notes*; click a chip → only those cards; click an employee's name in the table → only theirs; *hide notes* toggle; cards sorted by amount at stake within an employee; state in the component; empty state written
+  - **Verify:** browser, the 12-flag sample run: chip counts equal the cards shown; filtering by kind then by employee narrows correctly; clearing returns everything; keyboard reachable.
+
+- [ ] 🟥 **R9 (UI): Every row, not just the flagged ones** — the review surface.
+  - [ ] 🟥 Per employee an expandable **All rows** table from data already in the run detail: row · date · item · amount · **verdict chip** (matched ✓ / no receipt / uncertain / duplicate / receipt-optional / excluded / unchecked) · evidence (vendor · page · position; *show* opens the highlighted page inline) · the flags on that row (title) · *Fix a value* (same `FieldEditor` and endpoint); excluded rows greyed with the decision; corrected fields marked
+  - [ ] 🟥 Mileage rows in their own small table: date · km · rate · amount · map trip's printed km · verdict; unclaimed map trips listed under it
+  - **Verify:** browser, Aegene Ong on the sample: 8 rows with the right verdicts, the corrected row marked, the excluded row greyed, *show* on a matched row highlights the right third; a *Fix a value* from this table re-checks and the verdict chip changes without a reload; screenshot kept.
+
+- [ ] 🟥 **R10: Verifying / Output / list touches + docs + verifier** — the rest of the surface, and proof.
+  - [ ] 🟥 Verifying chips: "done · 8 rows · 2 flags · 1 note" (from `emp.summary`) and the failure reason inline (exists) — no new data
+  - [ ] 🟥 Output tab: an **Evidence not used** section (unclaimed receipts and map trips, with amounts, decided or not) beside *Excluded rows* and the reconciliation differences, so what will *not* be paid is on the same screen as what will
+  - [ ] 🟥 Claims list status chip: "12 to review · 4 notes"
+  - [ ] 🟥 PRD Flow 3 + this plan's implementation notes: the new codes and the threshold; `verify_claims_run.py` asserts none of the new flags fire on the clean sample and that every raised code is catalogued
+  - **Verify:** browser screenshots of Verifying, Output, list; `ALL CHECKS PASSED` twice; PRD lists every code in `CATALOGUE` (a doc test greps them).
 
 ### Phase 5: Steering v1 — the few things a client needs to say
 - [ ] 🟥 **Step 15: Client profile + playbook + Settings UI** — rates, receipt-optional items, tolerances, the paragraph.
@@ -262,3 +373,4 @@ a programmer either.
 - Nothing is ever written to SharePoint or to a client workbook, so there is no external state to undo.
 - The client profile/playbook lives in app settings under the client name; *forget* on the Settings screen or deleting those keys resets a client.
 - If a real-model step misbehaves, the run diary records every AI call's role, rounds and cost — read it before changing code.
+- *Phase 4b:* every new flag is a new **code**, so it can be switched off per client through the existing checks on/off without a code change; the catalogue is additive (an unknown code still renders, as today); R7–R9 are presentational and touch no endpoint but the existing correct/decide/retry ones; the unclaimed threshold defaults to the old behaviour for anything below RM 100. Reverting a step's commit removes only that step's flag and its words.

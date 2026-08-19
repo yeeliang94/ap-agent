@@ -20,12 +20,18 @@ profile → an info note. A receipt may support one row: two rows on the
 same receipt → DUPLICATE_RECEIPT on both. Receipts no row claims →
 UNCLAIMED_RECEIPT (info). Foreign rows: rate present and ≠ 1, amount ×
 rate = total, receipt currency = row currency, else CURRENCY_MISMATCH.
+A match on a receipt with no date, a date that fits only after a swap or
+the second read, or a low-confidence date/amount/currency →
+EVIDENCE_UNCERTAIN (a person confirms; never accepted silently).
 
 Mileage rows ↔ map trips: same date; km equal (± tolerance, default 0),
 or exactly double when the narrative says a return trip; else
 MILEAGE_DISCREPANCY with both numbers. No trip that day → MILEAGE_NO_MAP.
-Rate not one of the profile's rates → MILEAGE_RATE. A report mileage line
-with no KM row (or the reverse) → MILEAGE_LINE_MISMATCH.
+A match on a km figure the reader was unsure of → EVIDENCE_UNCERTAIN.
+Rate not one of the profile's rates → MILEAGE_RATE (a row with no rate
+typed is judged by amount ÷ km). km × rate ≠ amount → MILEAGE_ARITHMETIC.
+A report mileage line with no KM row (or the reverse) →
+MILEAGE_LINE_MISMATCH.
 
 Controls the batch needs and cannot find are RUN-LEVEL flags, never a
 silent skip: profile has no mileage rate but the batch has mileage rows
@@ -90,6 +96,28 @@ def _conf_note(ev: dict) -> str:
     if not conf:
         return ""
     return " (low-confidence read: " + "; ".join(f"{k}: {v}" for k, v in list(conf.items())[:3]) + ")"
+
+
+# The receipt fields a match stands on; doubt on any of these goes to a person.
+_CRITICAL = ("date", "amount", "currency", "receipt", "page")
+
+
+def _receipt_doubts(ev: dict, row: dict, window: int) -> list[str]:
+    """Why a matched receipt is not to be trusted without a look: no date,
+    a date that only fits after swapping day and month or taking the
+    second read's value, or a low-confidence note on a critical field."""
+    v, conf = ev.get("values") or {}, ev.get("confidence") or {}
+    doubts = []
+    ed, d = _date(v.get("date")), _date(row["values"].get("date"))
+    if not ed:
+        doubts.append("the receipt has no readable date, so it cannot prove the day")
+    elif d and abs((ed - d).days) > window:
+        doubts.append(f"the receipt reads {ed.isoformat()}, the row says {d.isoformat()} "
+                      "(matched only by swapping day and month, or by the second read's date)")
+    for k in _CRITICAL:
+        if conf.get(k):
+            doubts.append(f"{k}: {conf[k]}")
+    return doubts
 
 
 def _is_mileage(row: dict, profile: dict) -> bool:
@@ -298,6 +326,27 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
                                + ". Choose which one supports it.",
                                "universal rule: same day, amount and currency; the AI could not tell them apart",
                                _ev_cite(cs[0]), row_id=row["id"], evidence_id=cs[0]["id"]))
+    # A match on evidence the reader was not sure of (no date, or the two
+    # reads disagreed on date/amount/currency, or the reader said so) is
+    # never accepted silently: a person confirms it.
+    if on("EVIDENCE_UNCERTAIN"):
+        by_id = {e["id"]: e for e in receipts}
+        for row in expense_rows:
+            verdict, eid = verdicts.get(row["id"], ("", ""))
+            if verdict != "matched" or not eid or eid not in by_id or row["kind"] == "derived":
+                continue
+            e = by_id[eid]
+            doubts = _receipt_doubts(e, row, window)
+            if doubts:
+                v = row["values"]
+                flags.append(_flag("EVIDENCE_UNCERTAIN",
+                                   f"Row {row['row']} ({v.get('date')}, {v.get('item_name') or v.get('item') or ''}, "
+                                   f"{v.get('currency', 'MYR')} {v.get('amount')}) is matched to the receipt from "
+                                   f"{e['values'].get('vendor', '?')} at {_where(e)}, but that read is uncertain: "
+                                   + "; ".join(doubts) + ". Look at the page and confirm, or correct the value.",
+                                   "universal rule: evidence with a missing or doubtful date, amount or currency "
+                                   "is confirmed by a person, never accepted silently",
+                                   _ev_cite(e), row_id=row["id"], evidence_id=e["id"]))
     for e in receipts:
         if e["id"] not in matches and on("UNCLAIMED_RECEIPT"):
             ev = e["values"]
@@ -344,16 +393,35 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
     rate_values = [_dec(r) for r in rates]
     tol = _dec(profile.get("km_tolerance")) or Decimal("0")
     used_trips: set[str] = set()
+    rates_text = ", ".join(f"{veh} RM {r}/km" for r, veh in rates.items())
     for k in km_rows:
         kv = k["values"]
-        km, rate = _dec(kv.get("km")), _dec(kv.get("rate"))
-        if rate is not None and rate_values and on("MILEAGE_RATE") and rate not in rate_values:
-            flags.append(_flag("MILEAGE_RATE",
-                               f"KM-tab row {k['row']} uses RM {rate}/km; the client's rates are "
-                               + ", ".join(f"{veh} RM {r}/km" for r, veh in rates.items()) + ".",
-                               profile_mod.basis_for(profile, "mileage_rates",
-                                                     "mileage rates " + ", ".join(f"{veh} RM {r}/km" for r, veh in rates.items())),
-                               _row_cite(k), row_id=k["id"]))
+        km, rate, amount = _dec(kv.get("km")), _dec(kv.get("rate")), _dec(kv.get("amount"))
+        if rate_values and on("MILEAGE_RATE"):
+            if rate is not None and rate not in rate_values:
+                flags.append(_flag("MILEAGE_RATE",
+                                   f"KM-tab row {k['row']} uses RM {rate}/km; the client's rates are {rates_text}.",
+                                   profile_mod.basis_for(profile, "mileage_rates", "mileage rates " + rates_text),
+                                   _row_cite(k), row_id=k["id"]))
+            elif rate is None and km and amount is not None:
+                # No rate typed: the rate the row implies (amount ÷ km) must
+                # still be one of the client's, else the check is not skipped
+                # silently — it is raised.
+                implied = (amount / km).quantize(Decimal("0.0001"))
+                if not any(abs(implied - rv) <= Decimal("0.005") for rv in rate_values if rv is not None):
+                    flags.append(_flag("MILEAGE_RATE",
+                                       f"KM-tab row {k['row']} has no rate typed; MYR {amount} ÷ {km} km = "
+                                       f"RM {implied}/km, which is none of the client's rates ({rates_text}).",
+                                       profile_mod.basis_for(profile, "mileage_rates", "mileage rates " + rates_text),
+                                       _row_cite(k), row_id=k["id"]))
+        if rate is not None and km is not None and amount is not None and on("MILEAGE_ARITHMETIC"):
+            expect = (km * rate).quantize(Decimal("0.01"))
+            if expect != amount.quantize(Decimal("0.01")):
+                flags.append(_flag("MILEAGE_ARITHMETIC",
+                                   f"KM-tab row {k['row']}: {km} km × RM {rate}/km = {expect}, but the row's "
+                                   f"amount says {amount}.",
+                                   "universal rule: km × rate must equal the amount to the cent",
+                                   _row_cite(k), row_id=k["id"]))
         same_day = [t for t in trips if t["values"].get("date") == kv.get("date") and t["id"] not in used_trips]
         if not same_day:
             verdicts.setdefault(k["id"], ("no_evidence", ""))
@@ -380,6 +448,15 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
             used_trips.add(chosen["id"])
             matches[chosen["id"]] = k["id"]
             verdicts[k["id"]] = ("matched", chosen["id"])
+            doubt = (chosen.get("confidence") or {}).get("km_printed")
+            if doubt and on("EVIDENCE_UNCERTAIN"):
+                flags.append(_flag("EVIDENCE_UNCERTAIN",
+                                   f"KM-tab row {k['row']} ({kv.get('date')}, {kv.get('from', '')} → "
+                                   f"{kv.get('to', '')}, {km} km) matches the map at {_where(chosen)}, but the "
+                                   f"km figure on that page is uncertain: {doubt}. Open the page and confirm.",
+                                   "universal rule: a km figure the reader was not sure of is confirmed by a "
+                                   "person, never accepted silently",
+                                   _ev_cite(chosen), row_id=k["id"], evidence_id=chosen["id"]))
             continue
         t = same_day[0]
         used_trips.add(t["id"])

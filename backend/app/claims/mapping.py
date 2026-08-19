@@ -401,18 +401,45 @@ def _complete(claim_map: ClaimMap, survey: dict, warnings: list[str]) -> dict:
 
 # ---- validation of a reviewer-edited map (before confirm) ---------------
 
+def _folder_of(path: str) -> str:
+    return path.split("/", 1)[0] if "/" in path else ""
+
+
 def validate_confirmed_map(claim_map: dict, survey: dict) -> list[str]:
     """What must hold before Confirm & verify: every employee has a report
-    (a workbook that exists, with a tab) or at least one receipts file, or
-    is skipped; no shared ER codes. Returns plain-language problems."""
+    (a workbook IN THEIR OWN FOLDER, with a tab) or at least one receipts
+    file, or is skipped; every file an employee lists is in their folder;
+    every surveyed file is placed exactly once (nothing vanishes, nothing
+    is read for two people); no shared ER codes. Returns plain-language
+    problems."""
     problems: list[str] = []
     by_path = {f["path"]: f for f in survey["files"]}
     codes: dict[str, str] = {}
+    placed: dict[str, list[str]] = {}  # file -> who lists it
+    for e in claim_map.get("employees", []):
+        for fr in e.get("files", []):
+            placed.setdefault(fr["path"], []).append(e.get("name") or e["folder"])
+    for fr in claim_map.get("root_files", []) or []:
+        placed.setdefault(fr["path"], []).append("root")
+    for path in sorted(by_path):
+        who = placed.get(path, [])
+        if not who:
+            problems.append(f"{path}: this file is in the batch but nowhere on the map — every file "
+                            "must be placed (as a report, receipts, or ignore)")
+        elif len(who) > 1:
+            problems.append(f"{path}: listed under {' and '.join(who)} — a file belongs to one place")
+    for path in placed:
+        if path not in by_path:
+            problems.append(f"{path}: this file is on the map but not in the batch")
     for e in claim_map.get("employees", []):
         if not e.get("is_employee") or e.get("skip"):
             continue
         label = e.get("name") or e["folder"]
         roles = {fr["path"]: fr["role"] for fr in e.get("files", [])}
+        for path in roles:
+            if _folder_of(path) != e["folder"]:
+                problems.append(f"{label}: {path} is not in the folder {e['folder']!r} — "
+                                "a file is read only for the employee whose folder holds it")
         receipts = [p for p, r in roles.items() if r == "receipts"]
         if e.get("no_report"):
             if not receipts:
@@ -424,6 +451,11 @@ def validate_confirmed_map(claim_map: dict, survey: dict) -> list[str]:
                 problems.append(f"{label}: choose the report file, or mark 'no report'")
             elif rf not in by_path or by_path[rf]["type"] != "workbook":
                 problems.append(f"{label}: the report file must be a workbook in the folder")
+            elif _folder_of(rf) != e["folder"]:
+                problems.append(f"{label}: the report file {rf} is not in the folder {e['folder']!r}")
+            elif roles.get(rf) != "report":
+                problems.append(f"{label}: {rf} is the report file, so its role must be 'report' "
+                                f"(it is {roles.get(rf) or 'not listed'})")
             elif not e.get("report_tab"):
                 problems.append(f"{label}: choose the report tab")
             else:

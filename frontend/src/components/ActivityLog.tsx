@@ -21,14 +21,18 @@ export default function ActivityLog({
   useEffect(() => {
     let alive = true;
     fetchEvents(runId, onlyProblems)
-      .then((e) => alive && setEvents(e))
+      .then((e) => {
+        if (!alive) return;
+        setEvents(e);
+        setError("");
+      })
       .catch(() => alive && setError("Could not load the activity log"));
     return () => {
       alive = false;
     };
   }, [runId, onlyProblems, fetchEvents]);
 
-  if (error) return <p className="error">{error}</p>;
+  if (error && !events) return <p className="error">{error}</p>;
   if (!events) return <p className="sub">Loading…</p>;
 
   return (

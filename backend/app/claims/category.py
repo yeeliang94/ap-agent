@@ -65,6 +65,8 @@ async def judge_category(categories: list[dict], purpose: str, rows: list[dict],
     if examples:
         prompt += "\n# How this client categorised similar reports before\n" + "\n".join(f"- {e}" for e in examples[:12])
     agent = create_agent("judge", CategoryJudgment, _INSTRUCTIONS, temperature=0)
+    if usage is not None:
+        usage.reserve()
     result = await ai_call(agent.run(prompt, usage_limits=USAGE_LIMITS), "the category judge")
     if usage is not None:
         usage.add(result)

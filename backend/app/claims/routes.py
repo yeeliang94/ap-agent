@@ -33,6 +33,25 @@ def _local_mode() -> bool:
     return os.getenv("DOC_SOURCE", "local").lower() != "mcp"
 
 
+async def _read_upload(upload: UploadFile | None, max_mb: int, what: str) -> bytes:
+    """The upload's bytes, read in chunks and refused as soon as it passes
+    the limit — never the whole body into memory first."""
+    if upload is None or not upload.filename:
+        return b""
+    limit = max_mb * 1024 * 1024
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = await upload.read(1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > limit:
+            raise HTTPException(413, f"{what} is over the {max_mb} MB limit.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post("")
 async def create_claims_run(
     received_date: str = Form(...),
@@ -58,8 +77,10 @@ async def create_claims_run(
     instructions = (instructions or "").strip()
     if len(instructions) > MAX_INSTRUCTIONS:
         raise HTTPException(400, f"Instructions are too long (max {MAX_INSTRUCTIONS} characters).")
-    zip_bytes = await batch.read() if batch is not None and batch.filename else b""
-    listing_bytes = await listing.read() if listing is not None and listing.filename else b""
+    from . import source as source_mod
+
+    zip_bytes = await _read_upload(batch, source_mod.MAX_ZIP_MB, "The zip")
+    listing_bytes = await _read_upload(listing, source_mod.MAX_FILE_MB, "The listing file")
     if not zip_bytes and not folder_url:
         raise HTTPException(400, "Give the batch folder link, or upload a zip of the folder.")
     if zip_bytes and folder_url:
@@ -338,6 +359,8 @@ async def retry_employee(run_id: str, employee_id: str) -> dict:
             raise HTTPException(400, f"Employees can be re-verified once the run is verifying or ready (it is {run.status}).")
         if emp.status == "verifying":
             raise HTTPException(400, "This employee is being verified right now.")
+        if emp.status == "pending" and run.status == "verifying":
+            raise HTTPException(400, "This employee is already queued; the run will get to them.")
         emp.status, emp.error = "pending", ""
         db.add(AuditEvent(run_id=run_id, actor="reviewer", action="employee_reverify",
                           detail=f"{emp.name or emp.folder}: re-verify requested"))

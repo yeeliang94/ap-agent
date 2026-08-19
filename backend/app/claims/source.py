@@ -30,6 +30,10 @@ MAX_FILES_PER_EMPLOYEE = 60
 MAX_PAGES_PER_EMPLOYEE = 200
 MAX_FILE_MB = 25
 MAX_ZIP_MB = 200
+# Batch-wide caps, so many small folders (or a pile of root files) cannot
+# add up to more than a run is meant to hold, on disk or in the survey.
+MAX_TOTAL_FILES = 1500
+MAX_TOTAL_MB = 1500      # every file's uncompressed size, added up
 
 # Every transient source failure is retried this many times. The REST
 # fake retries inside itself already; the real MCP source and the walk
@@ -93,15 +97,24 @@ def _check_listing_quotas(entries: list[dict]) -> None:
             f"The batch folder holds {len(top_folders)} subfolders — more than the "
             f"{MAX_EMPLOYEE_FOLDERS} employee folders a run may have.")
     per_top: dict[str, int] = {}
+    total_files, total_bytes = 0, 0
     for e in entries:
         if e["kind"] != "file":
             continue
         top = e["path"].split("/", 1)[0] if "/" in e["path"] else ""
         per_top[top] = per_top.get(top, 0) + 1
+        total_files += 1
+        total_bytes += int(e.get("size") or 0)
         if e.get("size") and e["size"] > MAX_FILE_MB * 1024 * 1024:
             raise QuotaExceeded(
                 f"{e['path']} is {e['size'] / 1024 / 1024:.0f} MB — over the "
                 f"{MAX_FILE_MB} MB limit per file.")
+    if total_files > MAX_TOTAL_FILES:
+        raise QuotaExceeded(f"The batch holds {total_files} files — more than the "
+                            f"{MAX_TOTAL_FILES} files a run may have.")
+    if total_bytes > MAX_TOTAL_MB * 1024 * 1024:
+        raise QuotaExceeded(f"The batch's files add up to {total_bytes / 1024 / 1024:.0f} MB — over the "
+                            f"{MAX_TOTAL_MB} MB limit for a run.")
     for top, n in per_top.items():
         if top and n > MAX_FILES_PER_EMPLOYEE:
             raise QuotaExceeded(
@@ -179,7 +192,23 @@ def unpack_zip(zip_path: Path, dest: Path) -> list[dict]:
             for info, rel, _n in listing:
                 target = _safe_join(dest, rel)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(z.read(info))
+                # Streamed with a hard stop: the header's declared size was
+                # checked above, but the bytes that actually come out are
+                # what count.
+                limit = MAX_FILE_MB * 1024 * 1024
+                written = 0
+                with z.open(info) as src, open(target, "wb") as out:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > limit:
+                            out.close()
+                            target.unlink(missing_ok=True)
+                            raise QuotaExceeded(f"{rel} unpacks to more than the {MAX_FILE_MB} MB "
+                                                "limit per file (its header said less).")
+                        out.write(chunk)
     except zipfile.BadZipFile as exc:
         raise SourceUnavailable("The uploaded file is not a valid zip.") from exc
     return [{**e, "local": e["path"]} for e in entries if e["kind"] == "file"] + \

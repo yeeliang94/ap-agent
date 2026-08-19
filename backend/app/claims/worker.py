@@ -40,8 +40,8 @@ POOL_SIZE = 5
 WORKER_REQUEST_CAP = config.MAX_AGENT_REQUESTS * 4
 
 
-class WorkerBudgetExceeded(Exception):
-    pass
+# Raised by Usage.reserve() before any request past the cap is sent.
+WorkerBudgetExceeded = evidence_mod.BudgetExceeded
 
 
 def _files_dir(run_id: str) -> Path:
@@ -120,24 +120,34 @@ def _bump(run_id: str) -> None:
         s.close()
 
 
-def _finish_run(run_id: str, started: float) -> None:
+def _finish_run(run_id: str, started: float) -> bool:
     """Close the run: run-level flags for controls the batch needed and
-    could not find, then ready — with a diary line summing it up."""
+    could not find, then ready — with a diary line summing it up.
+
+    Only when EVERY employee is verified, failed or skipped. A retry that
+    ends while the pool is still working (or the pool ending while a
+    retry is in flight) leaves the run verifying; whoever finishes last
+    closes it. Returns whether the run was closed."""
     s = SessionLocal()
     try:
         run = s.get(ClaimsRun, run_id)
         employees = s.query(ClaimEmployee).filter(ClaimEmployee.run_id == run_id).all()
+        if any(e.status in ("pending", "verifying") for e in employees):
+            return False
         profile = profile_mod.profile_of(run.snapshot)
         rows = s.query(ClaimRow).filter(ClaimRow.run_id == run_id).all()
         row_dicts = [{"kind": r.kind} for r in rows]
-        existing = {f.code for f in s.query(ClaimFlag).filter(ClaimFlag.run_id == run_id,
-                                                                ClaimFlag.employee_id == "").all()}
+        # A run-level flag is identified by its code AND what it is about
+        # (cite.what), so a re-verification never raises the same one twice.
+        existing = {(f.code, (f.cite or {}).get("what", ""))
+                    for f in s.query(ClaimFlag).filter(ClaimFlag.run_id == run_id,
+                                                        ClaimFlag.employee_id == "").all()}
         why = checks_mod.needs_missing_reference(row_dicts, profile)
-        if why and "MISSING_REFERENCE:rates" not in existing:
+        if why and ("MISSING_REFERENCE", "rates") not in existing:
             s.add(ClaimFlag(run_id=run_id, employee_id="", code="MISSING_REFERENCE", reason=why,
                             basis="client profile: mileage_rates (not set)", cite={"what": "rates"}))
         listing_state = (run.listing_headers or {}).get("state")
-        if listing_state in (None, "missing", "unreadable") and "MISSING_REFERENCE" not in existing:
+        if listing_state in (None, "missing", "unreadable") and ("MISSING_REFERENCE", "listing") not in existing:
             s.add(ClaimFlag(run_id=run_id, employee_id="", code="MISSING_REFERENCE",
                             reason=("No listing workbook could be read for this run"
                                     + (f" ({(run.listing_headers or {}).get('why')})" if (run.listing_headers or {}).get("why") else "")
@@ -146,6 +156,7 @@ def _finish_run(run_id: str, started: float) -> None:
                                       "the listing and start a new run, or acknowledge to proceed with the "
                                       "fallback."),
                             basis="run input: this month's listing link", cite={"what": "listing"}))
+        s.flush()  # so the count below sees the flags just added
         n_flags = s.query(ClaimFlag).filter(ClaimFlag.run_id == run_id, ClaimFlag.status == "open").count()
         failed = [e for e in employees if e.status == "failed"]
         cost = sum(int((e.summary or {}).get("requests", 0)) for e in employees)
@@ -160,6 +171,7 @@ def _finish_run(run_id: str, started: float) -> None:
                          + f"; {n_flags} open flag(s); AI cost {cost} request(s), {tokens} tokens.")
         telemetry.record(s, run_id, "run", telemetry.INFO, "RUN_READY",
                          "Run is ready for review.")
+        return True
     finally:
         s.close()
 
@@ -168,7 +180,7 @@ async def verify_employee(run_id: str, employee_id: str) -> None:
     """The whole worker for one employee, in its own session, never raising."""
     s = SessionLocal()
     started = time.monotonic()
-    usage = evidence_mod.Usage()
+    usage = evidence_mod.Usage(cap=WORKER_REQUEST_CAP)
     try:
         run = s.get(ClaimsRun, run_id)
         emp = s.get(ClaimEmployee, employee_id)
@@ -186,9 +198,13 @@ async def verify_employee(run_id: str, employee_id: str) -> None:
         try:
             await _work(s, run, emp, usage)
         except WorkerBudgetExceeded as exc:
+            emp = _discard_partial(s, employee_id)
             _fail_employee(s, run_id, emp, f"AI request cap reached ({exc})", started, usage)
             return
         except Exception as exc:
+            # Whatever _work had staged (rows, evidence, flags) goes with
+            # the failure; only the failed status is recorded.
+            emp = _discard_partial(s, employee_id)
             reason = telemetry.record_failure(s, run_id, "verify", "EMPLOYEE_FAILED",
                                               f"Could not verify {emp.name or emp.folder}", exc)
             _fail_employee(s, run_id, emp, reason, started, usage)
@@ -205,6 +221,13 @@ async def verify_employee(run_id: str, employee_id: str) -> None:
                          f"{usage.requests} AI request(s), {usage.tokens} tokens.")
     finally:
         s.close()
+
+
+def _discard_partial(s, employee_id: str) -> ClaimEmployee:
+    """Roll back everything the worker staged but had not committed, and
+    hand back a fresh employee record to write the failure on."""
+    s.rollback()
+    return s.get(ClaimEmployee, employee_id)
 
 
 def _fail_employee(s, run_id: str, emp: ClaimEmployee, reason: str, started: float, usage) -> None:
@@ -225,8 +248,10 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
     flags: list[dict] = []
 
     def budget() -> None:
-        if usage.requests > WORKER_REQUEST_CAP:
-            raise WorkerBudgetExceeded(f"{usage.requests} > {WORKER_REQUEST_CAP}")
+        # Every page read reserves before it sends; this is the same check
+        # between the stages, so a report reader that used the budget up
+        # stops the worker before the evidence is opened.
+        usage.reserve()
 
     # ---- 7. the report (+ KM tab) --------------------------------------------------
     report_ok = False
@@ -464,6 +489,7 @@ class TieBreak:
                   "vendors? Answer -1 if you cannot tell.")
         agent = create_agent("judge", Pick, "Pick the receipt that supports the row, or -1 if unsure.",
                              temperature=0)
+        self.usage.reserve()
         result = await evidence_mod.ai_call(agent.run(text, usage_limits=USAGE_LIMITS), "the receipt tie-break")
         self.usage.add(result)
         i = result.output.index
@@ -512,5 +538,6 @@ async def retry_employee(run_id: str, employee_id: str) -> None:
     started = time.monotonic()
     await verify_employee(run_id, employee_id)
     _bump(run_id)
-    if was_ready or True:
-        _finish_run(run_id, started)
+    # Closes the run only if this was the last employee still working;
+    # otherwise the pool (or a later retry) closes it.
+    _finish_run(run_id, started)

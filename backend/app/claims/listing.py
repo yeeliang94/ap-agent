@@ -273,7 +273,14 @@ def build_outputs(db, run: ClaimsRun) -> dict:
 
     out_rows: list[list[str]] = []
     included, not_included, exclusions = [], [], []
+    # The INDEPENDENT side of the reconciliation: each included employee's
+    # report total (the total cell of their own report, which the reader
+    # verified against the sheet's arithmetic) less the rows the reviewer
+    # excluded. The emitted side is re-summed from the output text. They
+    # differ when a reviewer corrected an amount, when a report had no
+    # total to check against, or when something went wrong — each named.
     source_total = Decimal("0")
+    differences: list[dict] = []
     for n, e in enumerate(sorted(employees, key=lambda x: x.name or x.folder), 1):
         if e.status != "verified":
             not_included.append({"name": e.name or e.folder,
@@ -304,7 +311,22 @@ def build_outputs(db, run: ClaimsRun) -> dict:
         out_rows.append(line)
         included.append({"name": e.name, "er_code": e.er_code, "amount": f"{amount:.2f}",
                          "category": e.category, "gl": e.gl})
-        source_total += amount
+        report_total = _dec_or_none(e.report_total)
+        if report_total is None:
+            # nothing independent to check against: say so rather than pretend
+            expected = amount
+            differences.append({"name": e.name or e.folder, "expected": None, "emitted": f"{amount:.2f}",
+                                "why": "the report carried no total to reconcile against"})
+        else:
+            expected = (report_total - sum((_money(r) for r in gone), Decimal("0"))).quantize(Decimal("0.01"))
+            if expected != amount:
+                differences.append({"name": e.name or e.folder, "expected": f"{expected:.2f}",
+                                    "emitted": f"{amount:.2f}",
+                                    "why": (f"the report's total is {report_total:.2f}"
+                                            + (f" ({expected:.2f} after {len(gone)} excluded row(s))" if gone else "")
+                                            + f", but the rows to be paid sum to {amount:.2f} — "
+                                            "a corrected amount, or a row the report total does not cover")})
+        source_total += expected
     amount_idx = roles.get("amount")
     emitted_total = sum((Decimal(r[amount_idx].lstrip("'") or "0") for r in out_rows), Decimal("0")) \
         if amount_idx is not None else Decimal("0")
@@ -312,10 +334,21 @@ def build_outputs(db, run: ClaimsRun) -> dict:
         "\n".join("\t".join(r) for r in out_rows)
     return {"header": header, "rows": out_rows, "tsv": tsv,
             "totals": {"total_myr": f"{emitted_total:.2f}", "source_total": f"{source_total:.2f}",
-                       "match": emitted_total == source_total,
-                       "difference": f"{(emitted_total - source_total):.2f}"},
+                       "match": emitted_total == source_total and not any(d["expected"] is not None for d in differences),
+                       "difference": f"{(emitted_total - source_total):.2f}",
+                       "differences": differences},
             "included": included, "not_included": not_included, "exclusions": exclusions,
             "header_fallback": fallback, "header_note": note, "received_date": run.received_date}
+
+
+def _dec_or_none(text) -> Decimal | None:
+    if text is None or str(text).strip() == "":
+        return None
+    try:
+        d = Decimal(str(text))
+        return d if d.is_finite() else None
+    except Exception:
+        return None
 
 
 def _money(r: ClaimRow) -> Decimal:

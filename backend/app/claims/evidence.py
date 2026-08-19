@@ -184,20 +184,34 @@ def page_pngs(path: Path) -> list[bytes]:
 
 # ---- reading ------------------------------------------------------------------
 
-class Usage:
-    """A running count of AI requests and tokens for one worker."""
+class BudgetExceeded(Exception):
+    """The worker's AI request cap is used up; nothing more is sent."""
 
-    def __init__(self) -> None:
+
+class Usage:
+    """A running count of AI requests and tokens for one worker, with an
+    optional cap that is checked BEFORE every model call (reserve), so a
+    big bundle cannot schedule hundreds of reads past the limit."""
+
+    def __init__(self, cap: int | None = None) -> None:
         self.requests = 0
         self.tokens = 0
+        self.cap = cap
+
+    def reserve(self) -> None:
+        """Call before sending a request; raises when the cap is reached."""
+        if self.cap is not None and self.requests >= self.cap:
+            raise BudgetExceeded(f"{self.requests} of {self.cap} AI requests used")
 
     def add(self, result) -> None:
-        self.requests += 1
+        n = 1
         try:
             # pydantic-ai has moved between a usage() method and a usage
             # attribute; take whichever this version offers.
             u = result.usage
             u = u() if callable(u) else u
+            # one agent run may be several provider requests (validation retries)
+            n = int(getattr(u, "requests", 0) or 1)
             total = getattr(u, "total_tokens", None)
             if not total:
                 total = (getattr(u, "input_tokens", 0) or getattr(u, "request_tokens", 0) or 0) + \
@@ -205,6 +219,7 @@ class Usage:
             self.tokens += int(total or 0)
         except Exception:
             pass
+        self.requests += max(1, n)
 
 
 async def read_bundle(path: Path, rel_path: str, usage: Usage,
@@ -231,7 +246,12 @@ async def read_bundle(path: Path, rel_path: str, usage: Usage,
         async with sem:
             return await _read_page(agent, path, idx + 1, png, usage)
 
-    results = await asyncio.gather(*(one(i, p) for i, p in enumerate(pngs)))
+    # Every page read finishes (or fails fast at the budget) before the
+    # first failure is raised, so no read is left running unobserved.
+    results = await asyncio.gather(*(one(i, p) for i, p in enumerate(pngs)), return_exceptions=True)
+    failed = next((r for r in results if isinstance(r, BaseException)), None)
+    if failed is not None:
+        raise failed
     for idx, (kind, why, page_receipts, page_trips, page_notes) in enumerate(results, 1):
         pages.append({"file": rel_path, "page": idx, "kind": kind, "why": why})
         for r in page_receipts:
@@ -245,11 +265,13 @@ async def read_bundle(path: Path, rel_path: str, usage: Usage,
 async def _read_page(agent, path: Path, page_no: int, png: bytes, usage: Usage):
     """One page: classify + read; receipts pages twice; maps at full res."""
     prompt = ["Read this page.", BinaryContent(data=png, media_type="image/png")]
+    usage.reserve()
     first = await ai_call(agent.run(prompt, usage_limits=USAGE_LIMITS), f"reading {path.name} p.{page_no}")
     usage.add(first)
     r1 = first.output
     notes: list[str] = []
     if r1.kind == "receipts":
+        usage.reserve()
         second = await ai_call(agent.run(prompt, usage_limits=USAGE_LIMITS), f"re-reading {path.name} p.{page_no}")
         usage.add(second)
         r2 = second.output
@@ -262,9 +284,17 @@ async def _read_page(agent, path: Path, page_no: int, png: bytes, usage: Usage):
         # cut into BANDS, each small enough to be read at true resolution.
         try:
             r2 = await _read_map_bands(agent, path, page_no, usage)
-        except Exception as exc:  # the normal read still stands
+        except BudgetExceeded:
+            raise
+        except Exception as exc:  # the normal read still stands — marked as such
             log.warning("full-resolution re-read of %s p.%d failed: %s", path.name, page_no, exc)
             r2 = r1
+            for t in r1.trips:
+                t.low_confidence.setdefault(
+                    "km_printed", "read at normal resolution only — the full-resolution re-read failed "
+                                  f"({type(exc).__name__}); small figures may be misread")
+            notes.append(f"full-resolution re-read failed ({type(exc).__name__}); km figures are "
+                         "from the normal read only and marked low-confidence")
         trips, n = _merge_trip_reads(r1, r2)
         notes += n
         return "map", r1.why, [], trips, notes
@@ -294,6 +324,7 @@ async def _read_map_bands(agent, path: Path, page_no: int, usage: Usage) -> Page
     for i, band in enumerate(bands, 1):
         buf = io.BytesIO()
         band.save(buf, format="PNG")
+        usage.reserve()
         result = await ai_call(agent.run(
             [f"This is part {i} of {len(bands)} of a mileage-map page, at full resolution. "
              "List the trips whose narrative AND map are visible in this part; read the km "
@@ -379,8 +410,10 @@ def _merge_trip_reads(a: PageRead, b: PageRead) -> tuple[list[dict], list[str]]:
             b_trips = [x for x in b_trips if x is not twin]
             if twin.km_printed is not None:
                 if km is not None and abs(twin.km_printed - km) > 0.05:
-                    conf["km_printed"] = (f"normal read {km}, full-resolution read {twin.km_printed} — "
-                                          "the full-resolution figure is used")
+                    # a resolved disagreement (the full-resolution read wins by
+                    # design) — noted, but not a doubt about the figure used
+                    conf["km_normal_read"] = (f"normal read {km}, full-resolution read {twin.km_printed} — "
+                                              "the full-resolution figure is used")
                 km = twin.km_printed
             conf.update({k: v for k, v in twin.low_confidence.items() if k not in conf})
         if km is None:
@@ -398,4 +431,4 @@ def _iso(text: str) -> bool:
     return bool(re.match(DATE_PATTERN, text or ""))
 
 
-__all__ = ["read_bundle", "render_page", "Usage", "PageRead", "MAX_EDGE"]
+__all__ = ["read_bundle", "render_page", "Usage", "BudgetExceeded", "PageRead", "MAX_EDGE"]

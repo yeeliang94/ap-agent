@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ClaimsRunDetail, getClaimsRun, getClaimsRunEvents } from "../api";
 import ActivityLog from "../components/ActivityLog";
 import MapView from "./claims/MapView";
@@ -23,11 +23,23 @@ export default function ClaimsRunDetailScreen({ runId }: { runId: string }) {
   const [run, setRun] = useState<ClaimsRunDetail | null>(null);
   const [chosenTab, setTab] = useState<Tab | null>(null);
   const [error, setError] = useState("");
+  // Each poll is numbered; a reply from an older poll that lands after a
+  // newer one is dropped, so the screen never steps backwards.
+  const seq = useRef(0);
 
-  const reload = useCallback(
-    () => getClaimsRun(runId).then(setRun).catch(() => setError("Could not load the claims run")),
-    [runId]
-  );
+  const reload = useCallback(() => {
+    const mine = ++seq.current;
+    return getClaimsRun(runId)
+      .then((r) => {
+        if (mine !== seq.current) return;
+        setRun(r);
+        setError("");
+      })
+      .catch(() => {
+        if (mine !== seq.current) return;
+        setError("Could not load the claims run");
+      });
+  }, [runId]);
   useEffect(() => {
     reload();
   }, [reload]);
@@ -41,7 +53,9 @@ export default function ClaimsRunDetailScreen({ runId }: { runId: string }) {
     return () => clearInterval(t);
   }, [working, reload]);
 
-  if (error) return <p className="error">{error}</p>;
+  // A failed poll shows a notice above the last good screen; only when
+  // nothing has ever loaded does it replace the screen.
+  if (error && !run) return <p className="error">{error}</p>;
   if (!run) return <p className="sub">Loading…</p>;
 
   const failed = run.status === "failed";
@@ -58,6 +72,7 @@ export default function ClaimsRunDetailScreen({ runId }: { runId: string }) {
 
   return (
     <section>
+      {error && <p className="error">{error} — showing the last good state; retrying.</p>}
       <p className="summary-line">
         <b>{run.client}</b> · <span className="mono">{run.folder}</span> ·{" "}
         {new Date(run.created_at).toLocaleString()} ·{" "}

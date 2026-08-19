@@ -289,9 +289,11 @@ comparison and every sum.
   `REPORT_UNREADABLE`; the worker continues with receipts only.
 - Mileage tab (if the map names one): same method. Rows are trips: date,
   description / from–to, km, rate, amount. Code checks each row: km × rate
-  = amount, and the rate equals one of the client's fixed rates (car RM
-  0.64, motorcycle RM 0.35 for this client; from the profile). Mismatch →
-  flag `MILEAGE_RATE`.
+  = amount (→ `MILEAGE_ARITHMETIC` when off), and the rate equals one of
+  the client's fixed rates (car RM 0.64, motorcycle RM 0.35 for this
+  client; from the profile) → `MILEAGE_RATE` when not. A row with no rate
+  typed is judged by amount ÷ km against the same rates, so the check is
+  never skipped silently.
 - **Mileage lines on the report tab are one line per trip** *(decided)*.
   Code pairs each such line with the KM-tab trip of the same date and
   amount; a report line with no KM row, or a KM row with no report line →
@@ -323,10 +325,15 @@ comparison and every sum.
 - Receipts pages are read **twice** independently (as the pipeline does
   today, because scans are misread *confidently*); a disagreement on an
   amount or date marks that receipt low-confidence and it is shown as such
-  in any flag it appears in.
+  in any flag it appears in. A row matched to a receipt whose date is
+  missing, fits only after a day/month swap or the second read, or whose
+  date / amount / currency is low-confidence → flag `EVIDENCE_UNCERTAIN`
+  (open; a person confirms — never accepted silently).
 - Map pages are re-rendered at full resolution (the km on those screenshots
   is tiny) and re-read for the km figure. A km that cannot be read → the
-  trip is recorded as "km unreadable", never guessed.
+  trip is recorded as "km unreadable", never guessed. If the full-resolution
+  re-read fails, the normal-resolution km is kept but marked low-confidence,
+  and a mileage row matched on it → `EVIDENCE_UNCERTAIN`.
 
 **3c. Match report rows to receipts — code decides.**
 - Candidates for a row: same currency, same amount (to the cent), and

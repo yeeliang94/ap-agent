@@ -124,7 +124,13 @@ export default function ClaimsList({ onOpen }: { onOpen: (id: string) => void })
   );
 }
 
-const today = () => new Date().toISOString().slice(0, 10);
+// The reviewer's LOCAL calendar day (toISOString would give the UTC day,
+// which in Malaysia is yesterday until 08:00).
+const today = () => {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
 
 const EXAMPLE_INSTRUCTIONS =
   "Example: “Each employee has a folder named after them. The expense report is " +

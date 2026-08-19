@@ -349,7 +349,13 @@ export interface ClaimsOutputs {
   header: string[];
   rows: string[][];
   tsv: string;
-  totals: { total_myr: string; source_total: string; match: boolean; difference: string };
+  totals: {
+    total_myr: string;
+    source_total: string;
+    match: boolean;
+    difference: string;
+    differences?: { name: string; expected: string | null; emitted: string; why: string }[];
+  };
   included: { name: string; er_code: string; amount: string; category: string; gl: string }[];
   not_included: { name: string; why: string }[];
   exclusions: { name: string; row: number; amount: string; why: string }[];

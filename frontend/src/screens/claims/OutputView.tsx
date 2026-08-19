@@ -36,9 +36,18 @@ export default function OutputView({ run, onGoReview }: { run: ClaimsRunDetail; 
       {!out.totals.match && (
         <p className="basis">
           The rows below add up to RM {out.totals.total_myr}, but the included employees' report totals
-          add up to RM {out.totals.source_total}. This is written to the run diary; copy is still
-          allowed, but check before pasting.
+          (less excluded rows) add up to RM {out.totals.source_total}. This is written to the run diary;
+          copy is still allowed, but check before pasting.
         </p>
+      )}
+      {(out.totals.differences ?? []).length > 0 && (
+        <ul className="basis">
+          {(out.totals.differences ?? []).map((d, i) => (
+            <li key={i}>
+              <b>{d.name}</b>: {d.why}
+            </li>
+          ))}
+        </ul>
       )}
       {out.header_fallback && (
         <p className="basis">⚠ {out.header_note}</p>
