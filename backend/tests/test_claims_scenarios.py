@@ -28,7 +28,7 @@ from app.claims.models import ClaimInvestigation, ClaimsRun
 from app.claims.report_reader import ReportColumns, ReportReading
 
 from . import claims_scripted as scripted
-from .test_claims_baseline import client, db, run_client_a  # noqa: F401
+from .test_claims_baseline import client, db, rev, run_client_a  # noqa: F401
 
 needs_sample = pytest.mark.skipif(not scripted.GEN.is_dir(), reason="run samples/generate_claims_sample.py first")
 
@@ -313,7 +313,8 @@ async def test_scenario_h_duplicate_across_cases_is_flagged_on_both_and_idempote
     assert per_case["Aegene Ong"] == per_case["Aegene Ong (resubmitted)"] >= 1
     # Retry one case: the run closes again; the same flags, not twice.
     second = next(c for c in got["cases"] if c["label"] == "Aegene Ong (resubmitted)")
-    assert client.post(f"/api/claims-runs/{h['run_id']}/cases/{second['id']}/retry", json={}).status_code == 200
+    assert client.post(f"/api/claims-runs/{h['run_id']}/cases/{second['id']}/retry",
+                       json={"expected_revision": rev(h["run_id"])}).status_code == 200
     from app.claims import worker
 
     await worker.retry_case(h["run_id"], second["id"])
@@ -397,7 +398,7 @@ async def test_shadow_mode_compares_and_never_uses_the_investigator(db, monkeypa
     # The acceptance gates on the finished run.
     for f in got["flags"]:
         if f["status"] == "open":
-            body = {"decision": "dismissed", "note": "x"}
+            body = {"decision": "dismissed", "note": "x", "expected_revision": rev(run_id)}
             if f["code"] == "ARTIFACT_UNRESOLVED":
                 body["disposition"] = "irrelevant"
             client.post(f"/api/claims-runs/{run_id}/flags/{f['id']}/decide", json=body)

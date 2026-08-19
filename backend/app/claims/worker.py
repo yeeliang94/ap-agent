@@ -52,6 +52,23 @@ def _files_dir(run_id: str) -> Path:
     return files_dir(run_id)
 
 
+def stop_if_cancelled(s, run: ClaimsRun) -> None:
+    """Raise RunCancelled if the run has been failed under this worker.
+
+    A worker's own object was loaded when it started; a cancel lands in
+    ANOTHER session, so the only honest answer comes from the database.
+    Called before every reserved AI request and between the stages of
+    `_work`, because a worker that only checked its status at the door
+    keeps reading pages, tie-breaking and judging categories for minutes
+    after the reviewer stopped the run — and then commits rows onto it.
+    Raising here lands in the discard path, so nothing is written."""
+    from .runner import RunCancelled
+
+    status = s.query(ClaimsRun.status).filter(ClaimsRun.id == run.id).scalar()
+    if status == "failed" or status is None:
+        raise RunCancelled("the run was cancelled")
+
+
 async def verify_run(db, run: ClaimsRun) -> None:
     """Run the pool over every pending employee, then close the run."""
     from .runner import _set
@@ -301,6 +318,11 @@ def _finish_run(run_id: str, started: float) -> bool:
                          + f"; {n_flags} open flag(s); AI cost {cost} request(s), {tokens} tokens.")
         telemetry.record(s, run_id, "run", telemetry.INFO, "RUN_READY",
                          "Run is ready for review.")
+        # The output is built and stored HERE, at the end of verification,
+        # not on the next read: reading a run must not write to it.
+        from .review_gate import store_outputs
+
+        store_outputs(s, run)
         from . import retention
 
         retention.prune_tool_output(run_id)  # the investigation's scratch; the snapshot stays
@@ -311,6 +333,8 @@ def _finish_run(run_id: str, started: float) -> bool:
 
 async def verify_employee(run_id: str, employee_id: str) -> None:
     """The whole worker for one employee, in its own session, never raising."""
+    from .runner import RunCancelled
+
     s = SessionLocal()
     started = time.monotonic()
     usage = evidence_mod.Usage(cap=WORKER_REQUEST_CAP)
@@ -340,6 +364,16 @@ async def verify_employee(run_id: str, employee_id: str) -> None:
             return
         try:
             await _work(s, run, emp, usage)
+        except RunCancelled as exc:
+            # The reviewer stopped the run while this worker was inside
+            # _work: whatever it had staged goes, and the employee is left
+            # saying why rather than "verifying" for ever.
+            emp = _discard_partial(s, employee_id)
+            _fail_employee(s, run_id, emp, f"stopped: {exc}", started, usage)
+            telemetry.record(s, run_id, "verify", telemetry.INFO, "EMPLOYEE_STOPPED",
+                             f"{emp.name or emp.folder}: stopped mid-verification — {exc}. "
+                             "Nothing this worker had read was written.")
+            return
         except WorkerBudgetExceeded as exc:
             emp = _discard_partial(s, employee_id)
             _fail_employee(s, run_id, emp, f"AI request cap reached ({exc})", started, usage)
@@ -419,7 +453,10 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
     def budget() -> None:
         # Every page read reserves before it sends; this is the same check
         # between the stages, so a report reader that used the budget up
-        # stops the worker before the evidence is opened.
+        # stops the worker before the evidence is opened. A cancelled run
+        # is checked in the same breath: no request is ever sent, and no
+        # stage is entered, after the reviewer stopped the run.
+        stop_if_cancelled(s, run)
         usage.reserve()
 
     # ---- 7. the report (+ KM tab) --------------------------------------------------
@@ -475,6 +512,8 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
             budget()
     if not categories:
         categories = list(profile.get("categories") or (run.survey or {}).get("categories") or [])
+
+    stop_if_cancelled(s, run)  # report read done — before opening any evidence
 
     # ---- 8. the evidence pages ---------------------------------------------------------
     receipts: list[dict] = []
@@ -589,6 +628,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
         for row, rec in zip(derived_rows, receipts):
             row["matched_evidence_id"] = rec["id"]
             rec["matched_row_id"] = row["id"]
+    stop_if_cancelled(s, run)  # pages read — before the checks and their tie-break
     result = await checks_mod.run_checks(row_dicts, ev_dicts, profile,
                                          {"name": emp.name, "er_code": emp.er_code},
                                          (pages_read, files_read), TieBreak(usage))
@@ -614,6 +654,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
 
     # ---- category ---------------------------------------------------------------------
     emp.category, emp.gl, emp.category_basis = "", "", ""
+    stop_if_cancelled(s, run)  # checks done — before the category judge
     if categories and profile_mod.check_enabled(profile, "CATEGORY_UNCLEAR"):
         row_values = [r["values"] for r in rows if r["kind"] in ("expense", "derived")]
         examples = list((run.listing_headers or {}).get("past_examples") or [])
@@ -676,6 +717,10 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
                    "flagged": len({f["row_id"] for f in result["flags"] if f["status"] == "open" and f["row_id"]}),
                    "open_flags": open_flags, "purpose": (header or {}).get("purpose", ""),
                    "categories_from": "report" if categories and not profile.get("categories") else ("profile" if categories else "")}
+    # The last gate: rows, evidence and flags are still only staged in this
+    # session, so a run cancelled during the judgement above discards them
+    # here instead of committing a half-verified case onto a failed run.
+    stop_if_cancelled(s, run)
     cases_mod.sync_case_from_employee(s, emp)
     s.commit()
 
@@ -738,6 +783,52 @@ async def run_checks_for(s, run: ClaimsRun, emp: ClaimEmployee, profile: dict,
     return result
 
 
+async def recheck_after_correction(s, run: ClaimsRun, emp: ClaimEmployee, row_id: str,
+                                   changed: list[str], reason: str) -> int:
+    """Re-check ONE employee against their stored rows and evidence right
+    after a reviewer corrected a value, and reconcile their flags:
+
+      - an open flag the checks no longer raise resolves itself, saying
+        which correction resolved it
+      - one that still applies keeps its identity and gets the new wording
+      - a genuinely new one is raised
+      - a flag a person already DECIDED stays decided (except on the row
+        being corrected, which is being re-judged)
+
+    Code only over what is already stored, plus at most an AI tie-break —
+    which is why it can run inside the request. It lives here, with the
+    worker whose flags it is reconciling, rather than in the HTTP handler
+    that happens to call it. Returns how many rules now apply. The caller
+    commits."""
+    profile = profile_mod.profile_of(run.snapshot)
+    summary = emp.summary or {}
+    result = await run_checks_for(s, run, emp, profile,
+                                  searched=(int(summary.get("pages", 0)),
+                                            len(emp.roles.get("receipt_files") or [])))
+    existing = s.query(ClaimFlag).filter(ClaimFlag.employee_id == emp.id).all()
+    new_keys = {(f["code"], f["row_id"], f["evidence_id"]): f for f in result["flags"]}
+    open_now = {}
+    for fl in existing:
+        key = (fl.code, fl.row_id, fl.evidence_id)
+        if fl.status in ("open", "info") and key not in new_keys:
+            fl.status = "resolved_by_correction"
+            fl.resolution = f"No longer applies after correcting {', '.join(sorted(changed)) or 'values'} — {reason}"
+        elif fl.status in ("open", "info"):
+            open_now[key] = fl
+    decided = {(fl.code, fl.row_id, fl.evidence_id) for fl in existing
+               if fl.status in ("accepted", "dismissed") and fl.row_id != row_id}
+    for key, fd in new_keys.items():
+        if key in open_now:
+            open_now[key].reason, open_now[key].basis, open_now[key].cite = fd["reason"], fd["basis"], fd["cite"]
+        elif key not in decided:
+            s.add(ClaimFlag(run_id=run.id, employee_id=emp.id,
+                            case_id=cases_mod.case_id_for_employee(s, emp.id), **fd))
+    # The run-wide controls see the corrected values too (H7): a receipt
+    # that stops being shared resolves; one that starts being shared is raised.
+    rerun_global_controls(s, run.id, profile)
+    return len(result["flags"])
+
+
 async def verify_case(run_id: str, case_id: str) -> None:
     """The worker for one confirmed Claim Case (H7): the case's employee
     record is the delivered unit underneath, 1:1 during the compatibility
@@ -768,19 +859,39 @@ async def retry_case(run_id: str, case_id: str) -> None:
 
 
 async def retry_employee(run_id: str, employee_id: str) -> None:
-    """Re-run one worker (Retry on a failed employee, or Re-verify)."""
-    s = SessionLocal()
-    try:
-        run = s.get(ClaimsRun, run_id)
-        was_ready = run.status == "ready"
-        if was_ready:
-            run.status = "verifying"
-            s.commit()
-    finally:
-        s.close()
+    """Re-run one worker (Retry on a failed employee, or Re-verify).
+
+    A background entry point, so it is wrapped like the others: it flips a
+    ready run to `verifying` before it works, and anything thrown after
+    that — a missing run, a database error, a bug in the closing pass —
+    would otherwise leave the run `verifying` until the next restart, with
+    no reason on screen. Failure is recorded on the run instead."""
     started = time.monotonic()
-    await verify_employee(run_id, employee_id)
-    _bump(run_id)
-    # Closes the run only if this was the last employee still working;
-    # otherwise the pool (or a later retry) closes it.
-    _finish_run(run_id, started)
+    try:
+        s = SessionLocal()
+        try:
+            run = s.get(ClaimsRun, run_id)
+            if run is None:
+                log.warning("claims run %s: re-verification asked for a run that is gone", run_id)
+                return
+            if run.status == "ready":
+                run.status = "verifying"
+                s.commit()
+        finally:
+            s.close()
+        await verify_employee(run_id, employee_id)
+        _bump(run_id)
+        # Closes the run only if this was the last employee still working;
+        # otherwise the pool (or a later retry) closes it.
+        _finish_run(run_id, started)
+    except Exception as exc:
+        from .runner import _fail
+
+        log.exception("claims run %s: re-verifying %s failed: %s", run_id, employee_id, exc)
+        s = SessionLocal()
+        try:
+            _fail(s, run_id, f"re-verification failed: {exc}", "RUN_FAILED")
+        except Exception:
+            log.exception("claims run %s: could not record the re-verification failure", run_id)
+        finally:
+            s.close()

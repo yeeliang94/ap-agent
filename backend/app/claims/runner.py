@@ -86,6 +86,35 @@ def _set(db, run: ClaimsRun, **values) -> None:
     db.commit()
 
 
+class RunCancelled(Exception):
+    """The run left its in-progress status under the conductor's feet (the
+    reviewer cancelled it): the stage stops and writes nothing more."""
+
+
+def _advance(db, run: ClaimsRun, expect: tuple[str, ...], **values) -> None:
+    """Move the run to a new status ONLY if it is still in one of `expect`
+    — a conditional UPDATE, not a write through the object loaded at the
+    start of the job. A cancel lands in another session; the stale object
+    must never resurrect a failed run as mapping or map_ready."""
+    n = (db.query(ClaimsRun)
+         .filter(ClaimsRun.id == run.id, ClaimsRun.status.in_(expect))
+         .update(values, synchronize_session=False))
+    db.commit()
+    if n != 1:
+        db.refresh(run)
+        raise RunCancelled(f"the run is {run.status}, not {' or '.join(expect)}")
+    for k, v in values.items():
+        setattr(run, k, v)
+
+
+def _still_running(db, run: ClaimsRun) -> None:
+    """Raise RunCancelled if the run was failed meanwhile (checked between
+    long stages, so a cancelled run stores nothing more)."""
+    db.refresh(run)
+    if run.status == "failed":
+        raise RunCancelled("the run was cancelled")
+
+
 def _secs(started: float) -> str:
     return f"{time.monotonic() - started:.1f}s"
 
@@ -100,7 +129,7 @@ async def process_run(run_id: str) -> None:
                          + (" from a SharePoint folder." if run.folder_url else " from a zip."))
 
         # ---- bring the files in ----------------------------------------
-        _set(db, run, status="surveying", progress={})
+        _advance(db, run, ("queued",), status="surveying", progress={})
         started = time.monotonic()
         dest = files_dir(run_id)
         dest.mkdir(parents=True, exist_ok=True)
@@ -127,6 +156,7 @@ async def process_run(run_id: str) -> None:
         except batch_source.QuotaExceeded as exc:
             telemetry.record(db, run_id, "source", telemetry.ERROR, "QUOTA_EXCEEDED", str(exc))
             raise
+        _still_running(db, run)
         _set(db, run, survey=survey)
         n_peeked = sum(1 for f in survey["files"] if f.get("peek"))
         telemetry.record(db, run_id, "survey", telemetry.INFO, "STAGE_DONE",
@@ -147,10 +177,11 @@ async def process_run(run_id: str) -> None:
         from . import investigator
         from . import manifest as manifest_mod
 
-        _set(db, run, status="mapping", progress={})
+        _advance(db, run, ("surveying",), status="mapping", progress={})
         started = time.monotonic()
         try:
             manifest = await asyncio.to_thread(manifest_mod.build_manifest, dest, files)
+            await asyncio.to_thread(manifest_mod.lock_snapshot, dest)  # read-only from here (H11)
             request = investigator.InvestigationRequest(
                 run_id=run_id, workspace=str(workspace_for(run_id)), manifest=manifest,
                 instructions=run.instructions or "", objective=OBJECTIVE,
@@ -162,6 +193,7 @@ async def process_run(run_id: str) -> None:
             raise RuntimeError(
                 "could not map folder — the survey listing is shown so you can add "
                 "instructions and start again") from exc
+        _still_running(db, run)
         claim_map, warnings, notes = result.map, list(result.warnings), list(result.notes)
         run.manifest = manifest_mod.to_dicts(manifest)
         store_investigation(db, run, result)
@@ -173,12 +205,19 @@ async def process_run(run_id: str) -> None:
         for text in warnings:
             telemetry.record(db, run_id, "map", telemetry.WARNING, "MAP_WARNING", text)
         n_emp = sum(1 for e in claim_map.get("employees", []) if e.get("is_employee", True))
-        _set(db, run, map=claim_map, map_warnings=warnings, status="map_ready",
-             progress={"employees": n_emp})
+        _advance(db, run, ("mapping",), map=claim_map, map_warnings=warnings, status="map_ready",
+                 progress={"employees": n_emp})
         telemetry.record(db, run_id, "map", telemetry.INFO, "STAGE_DONE",
                          f"Map proposed in {_secs(started)}: {n_emp} employee(s), "
                          f"{len(warnings)} warning(s). Waiting for the reviewer to confirm.")
         db.commit()
+    except RunCancelled as exc:
+        # Cancelled by the reviewer while this stage ran: the run is already
+        # failed with their reason; this stage writes nothing more.
+        db.rollback()
+        log.info("claims run %s stopped: %s", run_id, exc)
+        telemetry.record(db, run_id, "run", telemetry.INFO, "RUN_STOPPED",
+                         f"Stage stopped: {exc}.")
     except Exception as exc:
         log.exception("claims run %s failed: %s", run_id, exc)
         db.rollback()
@@ -234,14 +273,119 @@ def _fail(db, run_id: str, error: str, code: str) -> None:
 
     agentic.cancel_run(run_id)
     run = db.get(ClaimsRun, run_id)
-    if run:
-        _set(db, run, status="failed", error=error[:1000])
-        telemetry.record(db, run_id, "run", telemetry.ERROR, code, f"Run stopped: {error}")
+    if run is None:
+        return
+    db.refresh(run)
+    if run.status == "failed":
+        # Already failed (cancelled by the reviewer meanwhile): their reason
+        # stands; the stage's own failure is a diary line, not an overwrite.
+        telemetry.record(db, run_id, "run", telemetry.INFO, "RUN_STOPPED",
+                         f"Stage ended after the run was stopped: {error[:300]}")
+        return
+    _set(db, run, status="failed", error=error[:1000])
+    telemetry.record(db, run_id, "run", telemetry.ERROR, code, f"Run stopped: {error}")
 
 
-def start_background(coro) -> None:
-    """Fire a stage without blocking the HTTP response."""
-    asyncio.get_event_loop().create_task(coro)
+# ---- background stages ------------------------------------------------------------
+# Stages run as tasks on the application's ONE event loop (uvicorn's). A
+# sync route runs in a worker thread, where there is no running loop, so
+# the loop is captured once at startup (main.py → set_loop) and tasks are
+# handed to it thread-safely. Every task is kept referenced until it ends
+# (the loop keeps only weak references) and watched by a done-callback, so
+# a stage that dies unobserved still fails its run instead of leaving it
+# "verifying" until the next restart.
+
+_loop: asyncio.AbstractEventLoop | None = None
+_tasks: set[asyncio.Task] = set()
+
+
+def set_loop(loop: asyncio.AbstractEventLoop | None = None) -> None:
+    """Remember the application's event loop (call from startup, on the
+    loop thread; `None` = the loop running right now)."""
+    global _loop
+    _loop = loop or asyncio.get_running_loop()
+
+
+def _run_id_of(coro) -> str | None:
+    """Every stage coroutine takes the run id as a parameter named run_id;
+    read it off the not-yet-started coroutine's frame so the done-callback
+    knows which run to fail."""
+    frame = getattr(coro, "cr_frame", None)
+    value = frame.f_locals.get("run_id") if frame is not None else None
+    return value if isinstance(value, str) else None
+
+
+def start_background(coro, run_id: str | None = None) -> None:
+    """Fire a stage without blocking the HTTP response — from the loop
+    thread (an async route) or from a worker thread (a sync route) alike.
+    Raises RuntimeError (and closes the coroutine) only when no loop was
+    ever registered and none is running: a programming error, not a
+    silently dropped stage."""
+    run_id = run_id or _run_id_of(coro)
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    loop = _loop if _loop is not None and not _loop.is_closed() else running
+    if loop is None:
+        coro.close()
+        raise RuntimeError("no event loop to run the background stage on — "
+                           "runner.set_loop() must be called at application startup")
+    if running is loop:
+        _track(loop.create_task(coro), run_id)
+    else:
+        loop.call_soon_threadsafe(lambda: _track(loop.create_task(coro), run_id))
+
+
+def _track(task: asyncio.Task, run_id: str | None) -> None:
+    _tasks.add(task)
+    task.add_done_callback(lambda t: _on_done(t, run_id))
+
+
+def _on_done(task: asyncio.Task, run_id: str | None) -> None:
+    _tasks.discard(task)
+    if task.cancelled():
+        log.warning("claims background stage for run %s was cancelled", run_id)
+        return
+    exc = task.exception()
+    if exc is None:
+        return
+    log.error("claims background stage for run %s died: %r", run_id, exc, exc_info=exc)
+    if not run_id:
+        return
+    db = SessionLocal()
+    try:
+        run = db.get(ClaimsRun, run_id)
+        if run is None:
+            return
+        if run.status in IN_PROGRESS_STATUSES:
+            _fail(db, run_id, f"a background stage died: {exc}", "RUN_FAILED")
+        else:
+            # A resting run (map_ready / ready) is left as it is — a stage
+            # that died after the run came to rest is a diary error, not a
+            # reason to fail a reviewed run.
+            telemetry.record(db, run_id, "run", telemetry.ERROR, "BACKGROUND_FAILED",
+                             f"A background stage died after the run was {run.status}: {str(exc)[:300]}")
+    except Exception:
+        log.exception("claims run %s: could not record the background failure", run_id)
+    finally:
+        db.close()
+
+
+def pending_background() -> int:
+    """How many background stages are still running (operators, tests)."""
+    return sum(1 for t in _tasks if not t.done())
+
+
+def wait_background(timeout: float = 30.0) -> bool:
+    """Block (from a thread that is NOT the loop) until every tracked stage
+    has ended; True when they all did within the timeout. Tests use it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not any(not t.done() for t in list(_tasks)):
+            return True
+        time.sleep(0.02)
+    return False
 
 
 INTERRUPTED_ERROR = ("The server restarted before this run finished, so it "

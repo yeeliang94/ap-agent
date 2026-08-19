@@ -37,14 +37,22 @@ or **accepted** (stated here; a warning in a log is not an accepted risk).
 | Too many files / pages for one run | 1500 files / 1500 MB / 6000 pages per run; 60 files / 200 pages per case after grouping (a case over budget fails alone) | `test_claims_inventory.py` |
 | A file silently dropped | hashed manifest before anything looks inside; every Source Artifact must reach a disposition; `ARTIFACT_UNRESOLVED` blocks output | `test_claims_inventory.py`, `test_claims_baseline.py` |
 | Macros / formulas / links / embedded objects executing | openpyxl never loads VBA; formulas are returned as text beside saved values, never computed; PDF links/scripts/embedded files are counted, never opened | `test_claims_tools.py` |
-| A file changed after the run started | Citations resolve to the hash captured at run start; the replay verifier re-checks stored hashes against the manifest | `test_claims_replay.py` |
+| A file changed after the run started | Citations resolve to the hash captured at run start; the snapshot is made read-only once the manifest is built; the replay verifier re-hashes the bytes on disk against the manifest (a missing or altered file is named) as well as the stored artifact hashes | `test_claims_replay.py` |
 
-**Accepted:** a corrupted or malicious file that crashes a parser fails that
-tool call (`TOOL_FAILED`, named, redacted) — the run continues; the file stays
-unresolved and visible. No sandboxing of the parsers themselves (pymupdf,
-openpyxl, Pillow run in-process); this is the same exposure the delivered
-module has and is accepted for the pilot. Mitigation if needed later: run the
-document tools in the sandbox runner.
+**Accepted:** a corrupted or malicious file whose parser raises fails that tool
+call (`TOOL_FAILED`, named, redacted) — the run continues; the file stays
+unresolved and visible. That containment only covers a parser that RAISES. The
+parsers run in-process (pymupdf, openpyxl, Pillow), unsandboxed, so a file that
+makes one exhaust memory or crash the interpreter takes **the whole server
+process** down, not one tool call: every run in flight on that process dies
+with it, and recovery is the restart path (`fail_interrupted_runs` marks the
+in-progress runs failed) rather than a `TOOL_FAILED` on one artifact. A
+decompression bomb is bounded before parsing by the ingestion quotas, and the
+per-run file/page caps bound how much is parsed at all; an in-parser
+allocation is not bounded. This is the same exposure the delivered module has
+and is accepted for the pilot. Mitigation if needed later: run the document
+tools in the sandbox runner (where the memory rlimit is the child's), or parse
+in a short-lived subprocess.
 
 ## 2. Prompt injection
 
@@ -52,7 +60,7 @@ document tools in the sandbox runner.
 |---|---|---|
 | Text in a cell / page / file name instructs the model | objective and tool policy sit above the data in the prompt; the instructions say file contents are DATA; the model is asked to report such text in `injection_seen`; it surfaces as a warning | `test_claims_investigator.py` |
 | Injection makes the model call a forbidden tool | the tool list IS the allowlist: `run_python` is not bound unless the sandbox switch is on; a call to a tool that does not exist is refused by the framework | `test_claims_investigator.py::test_a_real_agent_calls_the_bound_tools_and_forbidden_tools_do_not_exist` |
-| Injection makes the model approve / confirm | the model cannot: claimants are proposed only (`Claimant.state` never `confirmed` from an adapter); release is a server-side gate over flags, dispositions and claimant state | `test_investigator_contracts.py`, `test_claims_output_gates.py` |
+| Injection makes the model approve / confirm | the model cannot: claimants are proposed only (`Claimant.state` never `confirmed` from an adapter); a name the code audit could not find at a cited place is not even PROPOSED — the unverified case keys come back from the audit as STRUCTURED findings, never parsed out of its prose, so no case key the model chooses (`case 1`, `c:1`, `case one`) can make an unverified name look verified; release is a server-side gate over flags, dispositions and claimant state | `test_investigator_contracts.py`, `test_claims_output_gates.py`, `test_claims_investigator.py` |
 | Injection moves a report span / changes arithmetic | the readers' audits re-derive every value from the sheet; "same reading twice" convergence is structural | delivered `test_claims_checks.py`, `test_claims_robustness.py` |
 | Run instructions used to disable a control | instructions reach the readers as marked steering; the checks never read them; `REPORT_TOTAL_MISMATCH` toggles only through the profile | `test_investigator_contracts.py` |
 
@@ -67,11 +75,11 @@ why grouping always pauses.
 
 | Threat | Control | Pinned by |
 |---|---|---|
-| Model reads outside the snapshot | tools resolve manifest ids only; a typed path is `NOT_FOUND`; the harness refuses a resolved path outside `files/` | `test_claims_tools.py` |
-| Model writes outside the temp area | tools never write domain records; renders go to `<run>/tool_output` by handle; the snapshot's hashes are unchanged after a run | `test_claims_tools.py` |
-| Runaway cost / time | tool-call, page and byte budgets fail closed (`BUDGET`); model request caps per investigation and per worker; correction and tie-break share the worker cap; wall-time budget on the loop | `test_claims_tools.py`, `test_investigator_contracts.py` |
-| Absolute paths / secrets leaking into prompts or records | harness redacts absolute paths from every error; the sandbox environment is cleared; the sandbox record is redacted of numbers/tokens/signed URLs | `test_claims_tools.py`, `test_claims_sandbox.py` |
-| A cancelled run keeps calling tools | `cancel()` fails every later call; `POST /cancel` cancels the active harness and marks the run failed; workers do not start on a failed run; `_finish_run` never turns a failed run ready | `test_claims_replay.py` |
+| Model reads outside the snapshot | tools resolve manifest ids only; a typed path is `NOT_FOUND`; ONE containment resolver (`tools/files.snapshot_path`) serves the harness, the text index and the code audit, and refuses a manifest entry that resolves outside `files/` or whose path is a symbolic link — before the file is opened, sized or hashed | `test_claims_tools.py` |
+| Model writes outside the temp area | tools never write domain records; renders go to `<run>/tool_output` by handle; the snapshot is read-only and its hashes are unchanged after a run | `test_claims_tools.py` |
+| Runaway cost / time | tool-call, page and byte budgets fail closed (`BUDGET`) and are RESERVED before a call runs, so a batch of parallel calls cannot overshoot them; the code audit's calls have their own allowance and never spend the model's; model request caps per investigation and per worker plus a token ceiling for the whole investigation (`CLAIMS_INVESTIGATOR_TOTAL_TOKENS`); correction and tie-break share the worker cap; wall-time budget on the loop; a round that runs out of requests, tokens or time degrades to the last audited proposal with a warning instead of failing the run | `test_claims_tools.py`, `test_investigator_contracts.py` |
+| Absolute paths / secrets leaking into prompts or records | the harness redacts POSIX, Windows and UNC absolute paths from every error, plus the run workspace, the app data dir and the temp dir by name; the sandbox environment is cleared; the sandbox record is redacted of numbers/tokens/signed URLs | `test_claims_tools.py`, `test_claims_sandbox.py` |
+| A cancelled run keeps calling tools, or keeps spending on the model | `cancel()` fails every later call and kills a running sandbox child; the investigator polls the harness's cancel flag while a round runs, stops the model between requests and normalizes what the last audited round produced; `POST /cancel` cancels the active harness and marks the run failed; workers do not start on a failed run; `_finish_run` never turns a failed run ready | `test_claims_replay.py`, `test_claims_investigator.py` |
 
 ## 4. Sandboxing
 

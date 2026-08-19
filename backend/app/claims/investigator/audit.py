@@ -15,12 +15,21 @@ deterministic, run after every round and before anything is normalized:
                 or split
 
 Problems come back in the agent's own terms (artifact ids, sheets, cells)
-so the next round can fix them. Whatever remains after the last round is
+so the next round can fix them — as an AuditReport: STRUCTURED problems
+(case key, field, message), so normalize() never parses prose to learn
+which claimant failed verification, plus the prose for the feedback
+prompt, notes and warnings. Whatever remains after the last round is
 NOT discarded: normalize() turns it into unresolved artifacts, unknown
 claimants and visible warnings.
+
+The audit's own tool calls run inside `tools.audit_scope()` where the
+harness offers one: they are recorded with origin "audit" and counted
+against the audit's own allowance, never the model's tool-call budget.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import survey as survey_mod
@@ -29,6 +38,43 @@ from .contracts import InvestigationRequest
 from .proposal import CaseProposal, CiteProposal, InvestigationProposal
 
 MAX_IDENTITY_CHECKS = 60
+IDENTITY_SEARCH_LIMIT = 50
+
+
+@dataclass(frozen=True)
+class AuditProblem:
+    """One audit finding. `case_key` is the proposal's own key ("" for a
+    run-level or artifact-level problem); `field` names what failed
+    ("claimant_name", "claimant_identifier", "report_sheet", "coverage",
+    ...); `message` is the prose the model and the reviewer see."""
+    message: str
+    case_key: str = ""
+    field: str = ""
+
+
+@dataclass
+class AuditReport:
+    problems: list[AuditProblem] = field(default_factory=list)
+
+    def add(self, message: str, case_key: str = "", field_: str = "") -> None:
+        self.problems.append(AuditProblem(message=message, case_key=case_key, field=field_))
+
+    @property
+    def messages(self) -> list[str]:
+        return [p.message for p in self.problems]
+
+    @property
+    def unverified_claimant_keys(self) -> set[str]:
+        """Case keys whose claimant name or identifier the audit could not
+        find at a cited place / in the case's file names — these cases get
+        NO proposed Claimant, whatever the key looks like."""
+        return {p.case_key for p in self.problems if p.field in ("claimant_name", "claimant_identifier")}
+
+    def __bool__(self) -> bool:
+        return bool(self.problems)
+
+    def __len__(self) -> int:
+        return len(self.problems)
 
 
 def _fold(text: str) -> str:
@@ -36,8 +82,16 @@ def _fold(text: str) -> str:
 
 
 async def audit_proposal(proposal: InvestigationProposal, request: InvestigationRequest,
-                         tools: InvestigationTools) -> list[str]:
-    problems: list[str] = []
+                         tools: InvestigationTools) -> AuditReport:
+    scope = getattr(tools, "audit_scope", None)
+    with (scope() if callable(scope) else nullcontext()):
+        return await _audit(proposal, request, tools)
+
+
+async def _audit(proposal: InvestigationProposal, request: InvestigationRequest,
+                 tools: InvestigationTools) -> AuditReport:
+    report = AuditReport()
+    problems = _Appender(report)
     by_id = {m.id: m for m in request.manifest}
     files_dir = Path(request.workspace) / "files"
 
@@ -109,7 +163,7 @@ async def audit_proposal(proposal: InvestigationProposal, request: Investigation
             else:
                 from .. import mapping
 
-                ok, why = mapping.report_tab_plausible(files_dir / m.path, c.report_sheet)
+                ok, why = mapping.report_tab_plausible(_snapshot_path(files_dir, m.path), c.report_sheet)
                 if not ok:
                     problems.append(f"case {c.key}: sheet {c.report_sheet!r} of {m.path} does not look like a claim "
                                     f"summary: {why} — name the right sheet, or set no_summary=true")
@@ -141,8 +195,27 @@ async def audit_proposal(proposal: InvestigationProposal, request: Investigation
             found, why = await _verify_identity(value, c, request, tools, by_id)
             if not found:
                 problems.append(f"case {c.key}: {what} {value!r} {why} — cite where it is written (a cell or page "
-                                "of a file in the case, or a file NAME), or leave it empty")
-    return problems
+                                "of a file in the case, or a file NAME), or leave it empty",
+                                case_key=c.key, field_=what)
+    return report
+
+
+class _Appender:
+    """problems.append(message, case_key=..., field_=...) → the report."""
+
+    def __init__(self, report: AuditReport):
+        self.report = report
+
+    def append(self, message: str, case_key: str = "", field_: str = "") -> None:
+        self.report.add(message, case_key, field_)
+
+
+def _snapshot_path(files_dir: Path, rel: str) -> Path:
+    """The one containment rule for a manifest path (tools/files.py shares
+    it): resolved under files/, or refused."""
+    from ..tools.files import snapshot_path
+
+    return snapshot_path(files_dir, rel)
 
 
 async def _verify_identity(value: str, c: CaseProposal, request: InvestigationRequest, tools, by_id) -> tuple[bool, str]:
@@ -167,8 +240,9 @@ async def _verify_identity(value: str, c: CaseProposal, request: InvestigationRe
         text = await _text_at(cite, tools)
         if want in _fold(text):
             return True, ""
-    # a bounded search inside the case's own files
-    r = await tools.search_artifacts(value, limit=50)
+    # a bounded search inside the case's own files (scoped to them, so
+    # another case's hits cannot crowd the case's own out of the limit)
+    r = await tools.search_artifacts(value, limit=IDENTITY_SEARCH_LIMIT, artifact_ids=list(c.artifact_ids))
     if r.ok:
         for hit in r.data.get("hits", []):
             if hit.get("artifact_id") in c.artifact_ids:

@@ -1,6 +1,6 @@
-import { useState } from "react";
-import { ClaimsRunDetail, StaleRunError } from "../../api";
-import { ReviewUnit, retryUnit, reviewUnits, unitIdOf } from "./units";
+import { ClaimsRunDetail } from "../../api";
+import { Reload, useAction } from "../../hooks/useAction";
+import { retryUnit, reviewUnits, unitIdOf } from "./units";
 
 // Watch the workers without refreshing: one chip per case, an overall
 // bar, and a Retry for a case whose worker failed. Keyed by Claim Case
@@ -10,29 +10,16 @@ export default function VerifyingView({
   onChanged,
 }: {
   run: ClaimsRunDetail;
-  onChanged: () => void;
+  onChanged: Reload;
 }) {
-  const [busy, setBusy] = useState<string>("");
-  const [error, setError] = useState("");
+  // Retry goes through the shared action hook: the reload is awaited before
+  // the button is released; a stale run reloads, then says so.
+  const action = useAction(onChanged, "Could not retry");
   const units = reviewUnits(run);
   const total = units.length;
   const done = units.filter((e) => ["verified", "failed", "skipped"].includes(e.status)).length;
   const flagsFor = (id: string) => run.flags.filter((f) => unitIdOf(run, f) === id && f.status === "open").length;
   const notesFor = (id: string) => run.flags.filter((f) => unitIdOf(run, f) === id && f.status === "info").length;
-
-  async function retry(u: ReviewUnit) {
-    setBusy(u.id);
-    setError("");
-    try {
-      await retryUnit(run, u);
-      onChanged();
-    } catch (e) {
-      if (e instanceof StaleRunError) onChanged();
-      setError(e instanceof Error ? e.message : "Could not retry");
-    } finally {
-      setBusy("");
-    }
-  }
 
   return (
     <div>
@@ -72,8 +59,8 @@ export default function VerifyingView({
               <>
                 <span className="chip flag">failed</span>
                 <span className="sub">{e.error}</span>
-                <button className="btn warn" disabled={busy === e.id} onClick={() => retry(e)}>
-                  {busy === e.id ? "Retrying…" : "Retry"}
+                <button className="btn warn" disabled={action.busy === e.id} onClick={() => action.run(() => retryUnit(run, e), { key: e.id })}>
+                  {action.busy === e.id ? "Retrying…" : "Retry"}
                 </button>
               </>
             )}
@@ -83,7 +70,7 @@ export default function VerifyingView({
           </div>
         ))}
       </div>
-      {error && <p className="error">{error}</p>}
+      {action.error && <p className="error">{action.error}</p>}
     </div>
   );
 }

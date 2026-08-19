@@ -147,3 +147,130 @@ async def test_in_memory_sandbox_records_calls(tmp_path):
     r = await s.run("y", {}, tmp_path / "o", SandboxLimits())
     assert r.ok and r.output_hash
     assert sbx.redact("token sk-abcdefghijklmnop and 12345678901") == "<token> and <number>"
+
+
+@posix_only
+@pytest.mark.asyncio
+async def test_output_is_streamed_cancel_kills_and_failures_keep_nothing(local_runner, tmp_path):
+    """A child that floods stdout is killed once the cap is passed — the
+    host keeps at most the cap, never the flood; a running child is killed
+    by cancel() (the harness's cancel reaches it); a failed or
+    non-deterministic second run leaves nothing of the first behind."""
+    import asyncio
+    import time
+
+    # 1. flood: 200 MB would be written; the child is killed at the cap and
+    #    well inside the wall time — nothing is buffered past the cap.
+    flood = "import sys\nfor _ in range(200):\n    sys.stdout.write('x' * (1 << 20)); sys.stdout.flush()\n"
+    t0 = time.monotonic()
+    r = await local_runner.run(flood, {}, tmp_path / "f", SandboxLimits(max_output_bytes=4096, wall_seconds=30))
+    assert not r.ok and r.limit_hit == "output" and r.killed and len(r.stdout) <= 2000
+    assert time.monotonic() - t0 < 10
+    # 2. cancel: a child that would live 30 s is killed at once
+    sleeper = "import time\nopen('partial.txt','w').write('x')\ntime.sleep(30)\n"
+    task = asyncio.create_task(local_runner.run(sleeper, {}, tmp_path / "c", SandboxLimits(wall_seconds=30)))
+    for _ in range(200):
+        await asyncio.sleep(0.05)
+        if local_runner._live:
+            break
+    assert local_runner._live, "the child never started"
+    tools = ToolHarness(tmp_path, [], sandbox=local_runner, python_enabled=True)
+    tools.cancel()  # the harness cancel reaches the running sandbox child
+    t0 = time.monotonic()
+    r = await task
+    assert time.monotonic() - t0 < 10
+    assert not r.ok and "cancelled" in r.error and list((tmp_path / "c").iterdir()) == []
+    assert (await local_runner.run("print(1)", {}, tmp_path / "after", SandboxLimits())).error == "the investigation was cancelled"
+    # 3. non-determinism: the first run's files are wiped too
+    fresh = sbx.RunnerSandbox(f'"{sys.executable}"', isolated=True)
+    nondet = "import random\nopen('r.txt','w').write(str(random.random()))\n"
+    r = await fresh.run(nondet, {}, tmp_path / "n", SandboxLimits())
+    assert not r.ok and "nothing kept" in r.error and r.output_files == {} and list((tmp_path / "n").iterdir()) == []
+
+
+@posix_only
+@pytest.mark.asyncio
+async def test_a_symlink_in_the_output_directory_refuses_the_run(local_runner, tmp_path):
+    """Review #10: `out/` was walked with `p.is_file()` / `p.stat()`, which
+    FOLLOW symlinks — a script that dropped a link to any file the host can
+    read got that file stat'ed, hashed, and its sha256 handed back to the
+    model as if the sandbox had produced it. `out/` must hold regular files
+    and nothing else: a link (to a host file, to a directory, or dangling),
+    a special file, or a path escaping out/ refuses the whole run and keeps
+    nothing."""
+    secret = tmp_path / "host_secret.txt"
+    secret.write_text("an arbitrary readable file on the host")
+
+    scripts = {
+        "file link": f"import os\nos.symlink({str(secret)!r}, 'looks_like_output.txt')\n",
+        "dir link": f"import os\nos.symlink({str(tmp_path)!r}, 'peek')\n",
+        "dangling link": "import os\nos.symlink('/no/such/file', 'gone.txt')\n",
+        "fifo": "import os\nos.mkfifo('pipe')\n",
+    }
+    for what, code in scripts.items():
+        out = tmp_path / f"out-{what.replace(' ', '-')}"
+        r = await local_runner.run(code, {}, out, SandboxLimits())
+        assert not r.ok, what
+        assert r.error_code == "TOOL_FAILED" and "nothing kept" in r.error, (what, r.error)
+        assert "symbolic link" in r.error or "special file" in r.error, (what, r.error)
+        assert r.output_files == {}, what
+        assert list(out.iterdir()) == [], what
+        assert secret.read_text() == "an arbitrary readable file on the host"
+
+    # a run that writes an ordinary file is still fine
+    out = tmp_path / "ok"
+    r = await local_runner.run("open('real.txt','w').write('x')\n", {}, out, SandboxLimits())
+    assert r.ok and list(r.output_files) == ["real.txt"]
+
+
+@posix_only
+@pytest.mark.asyncio
+async def test_a_bare_sigkill_is_not_reported_as_memory(local_runner, tmp_path):
+    """A SIGKILL used to be reported as the MEMORY limit — but the OOM
+    killer, the operator, the runner and an unnamed container limit all
+    end that way. Memory is claimed only with evidence in stderr."""
+    killed = "import os, signal\nos.kill(os.getpid(), signal.SIGKILL)\n"
+    r = await local_runner.run(killed, {}, tmp_path / "k", SandboxLimits())
+    assert not r.ok and r.killed and r.limit_hit == "" and r.error_code == "TOOL_FAILED"
+    assert "no limit evidence" in r.error and "memory" not in r.error
+
+    oom = "import sys\nsys.stderr.write('MemoryError\\n')\nsys.exit(1)\n"
+    r = await local_runner.run(oom, {}, tmp_path / "m", SandboxLimits())
+    assert not r.ok and r.limit_hit == "memory" and r.error_code == "SANDBOX_LIMIT"
+
+    # a plain non-zero exit is neither a kill nor a limit — and an error
+    # message that merely CONTAINS "oom" ("boom", "room", "zoom") is not
+    # evidence of memory pressure
+    r = await local_runner.run("import sys\nsys.stderr.write('boom\\n')\nsys.exit(3)\n", {}, tmp_path / "e", SandboxLimits())
+    assert not r.ok and not r.killed and r.limit_hit == "" and "exit status 3" in r.error
+    assert sbx._limit_from_exit(-9, "boom in the zoom room") == ("killed", True)
+    assert sbx._limit_from_exit(-9, "MemoryError") == ("memory", True)
+    assert sbx._limit_from_exit(137, "Killed process 1 (python) OOM") == ("memory", True)
+    assert sbx._limit_from_exit(0, "") == ("", False)
+
+
+@posix_only
+@pytest.mark.asyncio
+async def test_the_input_tree_is_read_only(local_runner, tmp_path):
+    """`in/` holds read-only COPIES in read-only directories: a script
+    cannot rewrite an input, and cannot add, rename or delete beside it."""
+    src = tmp_path / "claim.txt"
+    src.write_text("RM 24.00")
+    code = (
+        "import os, pathlib\n"
+        "d = pathlib.Path(os.environ['CLAIMS_SANDBOX_INPUT'])\n"
+        "results = []\n"
+        "for what, fn in (('rewrite', lambda: (d/'claim.txt').write_text('RM 999.00')),\n"
+        "                 ('create', lambda: (d/'new.txt').write_text('x')),\n"
+        "                 ('delete', lambda: (d/'claim.txt').unlink())):\n"
+        "    try:\n"
+        "        fn(); results.append(what + ':ALLOWED')\n"
+        "    except OSError:\n"
+        "        results.append(what + ':refused')\n"
+        "open('r.txt','w').write(' '.join(results))\n"
+    )
+    out = tmp_path / "o"
+    r = await local_runner.run(code, {"claim.txt": src}, out, SandboxLimits())
+    assert r.ok, r.error
+    assert (out / "r.txt").read_text() == "rewrite:refused create:refused delete:refused"
+    assert src.read_text() == "RM 24.00"

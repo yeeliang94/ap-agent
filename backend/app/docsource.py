@@ -58,10 +58,7 @@ class LocalFolderSource:
             raise SourceUnavailable(
                 f"{folder_url!r} is not a folder on this machine. In local mode "
                 "the folder link must be a folder path (or upload a zip).")
-        target = (root / rel) if rel else root
-        # Containment: rel comes from our own walk, but be strict anyway.
-        if root.resolve() not in target.resolve().parents and target.resolve() != root.resolve():
-            raise SourceUnavailable(f"folder {rel!r} is outside the batch folder")
+        target = _contained(root, rel, "folder")
         entries = []
         for p in sorted(target.iterdir()):
             if p.name.startswith("."):
@@ -73,10 +70,26 @@ class LocalFolderSource:
         return entries
 
     def download(self, folder_url: str, entry: dict) -> bytes:
-        path = Path(folder_url).expanduser() / entry["path"]
+        # The SAME containment check `list_folder` makes: `entry["path"]`
+        # is normally one our own walk produced, but it arrives through
+        # the walker and must not be trusted to stay inside the batch
+        # folder — an entry naming `../../.ssh/id_rsa` (or an absolute
+        # path) is refused here, not read and ingested into a run.
+        root = Path(folder_url).expanduser()
+        path = _contained(root, str(entry.get("path") or ""), "file")
         if not path.is_file():
             raise SourceUnavailable(f"{entry['path']!r} not found under {folder_url}")
         return path.read_bytes()
+
+
+def _contained(root: Path, rel: str, what: str) -> Path:
+    """`root / rel`, required to stay inside `root` once resolved (so
+    `..`, an absolute path and a symlink out of the tree are all refused)."""
+    target = (root / rel) if rel else root
+    resolved, root_resolved = target.resolve(), root.resolve()
+    if resolved != root_resolved and root_resolved not in resolved.parents:
+        raise SourceUnavailable(f"{what} {rel!r} is outside the batch folder")
+    return target
 
 
 def folder_entry(name: str, kind: str, size, item_id: str, rel: str) -> dict:

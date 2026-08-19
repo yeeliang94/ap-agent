@@ -30,12 +30,32 @@ def _fresh_reference_caches():
     yield
 
 
-def _serve(module, monkeypatch, tmp_path):
-    """Run one fake MCP server on a free port for the duration of a test.
+@pytest.fixture(scope="session")
+def claims_sample_assets(tmp_path_factory):
+    """One read-only survey and manifest for sample-based contract tests."""
+    from app.claims import manifest as manifest_mod
+    from app.claims import source as batch_source
+    from app.claims import survey as survey_mod
+
+    archive = Path(__file__).resolve().parents[2] / "samples" / "generated" / "claims" / "demo_claims_batch.zip"
+    if not archive.is_file():
+        pytest.skip("run samples/generate_claims_sample.py first")
+    workspace = tmp_path_factory.mktemp("client-a-assets")
+    files_dir = workspace / "files"
+    entries = batch_source.unpack_zip(archive, files_dir)
+    files = [entry for entry in entries if entry["kind"] == "file"]
+    survey = survey_mod.survey_batch(files_dir, files)
+    manifest = manifest_mod.build_manifest(files_dir, files)
+    return files_dir, survey, manifest
+
+
+def _serve(module, tmp_path):
+    """Run one fake MCP server on a free port for the test session.
 
     Each test opens its OWN session inside a single `async with`: an MCP
     session holds an anyio cancel scope, which must be entered and exited
-    in the same task, so it cannot be handed across a yield fixture.
+    in the same task, so client sessions are never shared.  The stateless
+    fake HTTP server itself can be reused safely.
     """
     import threading
     import time
@@ -44,41 +64,56 @@ def _serve(module, monkeypatch, tmp_path):
 
     # Serve the real sample reference folder if it exists; otherwise a
     # temporary one, so the tests never depend on generated samples.
-    if not module.REFERENCE_DIR.is_dir():
+    original_reference_dir = module.REFERENCE_DIR
+    replaced_reference_dir = not original_reference_dir.is_dir()
+    if replaced_reference_dir:
         (tmp_path / "payment_listing.xlsx").write_bytes(b"PK\x03\x04stub")
-        monkeypatch.setattr(module, "REFERENCE_DIR", tmp_path)
+        module.REFERENCE_DIR = tmp_path
 
     # Port 0 = "any free one", so a busy port or a parallel run cannot
     # fail the tests; the OS tells us what it picked once bound.
     config = uvicorn.Config(module.mcp.streamable_http_app(),
                             host="127.0.0.1", port=0, log_level="error")
     server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    for _ in range(100):  # wait for bind
-        if server.started:
-            break
-        time.sleep(0.05)
-    assert server.started, f"fake MCP server {module.__name__} did not start"
-    port = server.servers[0].sockets[0].getsockname()[1]
+    startup_errors: list[BaseException] = []
 
-    yield f"http://127.0.0.1:{port}/mcp"
+    def run_server():
+        try:
+            server.run()
+        except (Exception, SystemExit) as exc:  # uvicorn reports bind failure as SystemExit
+            startup_errors.append(exc)
 
-    server.should_exit = True
-    thread.join(timeout=5)
+    thread = threading.Thread(target=run_server, daemon=True)
+    try:
+        thread.start()
+        deadline = time.monotonic() + 5
+        while not server.started and time.monotonic() < deadline:
+            if startup_errors or not thread.is_alive():
+                break
+            time.sleep(0.01)
+        detail = f": {startup_errors[0]}" if startup_errors else ""
+        assert server.started, f"fake MCP server {module.__name__} did not start{detail}"
+        port = server.servers[0].sockets[0].getsockname()[1]
+
+        yield f"http://127.0.0.1:{port}/mcp"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+        if replaced_reference_dir:
+            module.REFERENCE_DIR = original_reference_dir
 
 
-@pytest.fixture()
-def server_url(monkeypatch, tmp_path):
+@pytest.fixture(scope="session")
+def server_url(tmp_path_factory):
     """The fake that DOES offer a resolve-folder tool."""
     from fake_mcp import mcp_server
 
-    yield from _serve(mcp_server, monkeypatch, tmp_path)
+    yield from _serve(mcp_server, tmp_path_factory.mktemp("fake-mcp-reference"))
 
 
-@pytest.fixture()
-def gateway_url(monkeypatch, tmp_path):
+@pytest.fixture(scope="session")
+def gateway_url(tmp_path_factory):
     """The fake shaped like the enterprise gateway: no resolve tool."""
     from fake_mcp import gateway_server
 
-    yield from _serve(gateway_server, monkeypatch, tmp_path)
+    yield from _serve(gateway_server, tmp_path_factory.mktemp("fake-gateway-reference"))

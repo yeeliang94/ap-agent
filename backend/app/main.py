@@ -113,15 +113,27 @@ async def _refuse_cross_site_writes(request, call_next):
 
 
 @app.on_event("startup")
-def _startup() -> None:
+async def _startup() -> None:
     _configure_logging()
     _configure_tls()  # after logging, so its own result is visible
     init_db()
+    # The one event loop background stages run on. A SYNC route (a plain
+    # `def` handler) runs in a worker thread where no loop is running, so
+    # the loop has to be remembered here, while we are on it, or
+    # start_background has nothing to hand its coroutine to.
+    from .claims import runner as claims_runner
+    claims_runner.set_loop()
     # Runs are in-process tasks: any run still mid-stage now was orphaned
     # by the previous process and must be shown as failed, not "extracting".
     from .pipeline.runner import fail_interrupted_runs
     fail_interrupted_runs()
     # Same for claims runs: they are their own tables and their own tasks.
+    # SINGLE-PROCESS ASSUMPTION: a run in an in-progress status can only be
+    # this machine's orphan because exactly one process ever owns the
+    # database. Under two workers (uvicorn --workers 2, a second container)
+    # this would fail the OTHER process's live runs at every start. Moving
+    # to more than one process means first giving a run an owner (a process
+    # id / lease) and only reconciling runs whose owner is gone.
     from .claims.runner import fail_interrupted_runs as fail_interrupted_claims_runs
     fail_interrupted_claims_runs()
 

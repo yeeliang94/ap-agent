@@ -258,7 +258,12 @@ def _mirror(case: ClaimCase, emp: ClaimEmployee) -> None:
         case.roles = dict(emp.roles or {})
     case.status, case.error = emp.status, emp.error
     case.category, case.gl, case.category_basis = emp.category, emp.gl, emp.category_basis
-    case.reported_total = emp.report_total or ""
+    reported = emp.report_total or ""
+    if reported != (case.reported_total or ""):
+        # the cite points at the cell the OLD figure came from; a changed
+        # or cleared Reported Total leaves it pointing at nothing
+        case.reported_total_cite = {}
+    case.reported_total = reported
     case.lines_total = str((emp.summary or {}).get("rows_total") or "")
     case.summary = dict(emp.summary or {})
 

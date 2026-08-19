@@ -73,6 +73,43 @@ def build_manifest(files_dir: Path, files: list[dict]) -> list[ManifestEntry]:
     return out
 
 
+def lock_snapshot(files_dir: Path) -> int:
+    """Make every file of the snapshot read-only once it is inventoried:
+    nothing in the run (tools, workers, a careless process) rewrites the
+    bytes the manifest hashes name. Returns how many files were locked.
+    Best effort per file — a filesystem that refuses is logged, not fatal."""
+    import logging
+    import stat as stat_mod
+
+    n = 0
+    for path in files_dir.rglob("*"):
+        if path.is_file():
+            try:
+                path.chmod(stat_mod.S_IRUSR | stat_mod.S_IRGRP | stat_mod.S_IROTH)
+                n += 1
+            except OSError as exc:
+                logging.getLogger("claims.manifest").warning("could not lock %s: %s", path.name, exc)
+    return n
+
+
+def verify_snapshot(files_dir: Path, manifest: list[dict]) -> list[str]:
+    """Re-hash the bytes on disk against the manifest: every entry must be
+    present with the recorded hash. Returns the problems, plain sentences."""
+    problems: list[str] = []
+    for m in manifest:
+        rel, want = m.get("path"), m.get("sha256")
+        if not rel or not want:
+            continue
+        path = files_dir / rel
+        if not path.is_file():
+            problems.append(f"snapshot file {rel!r} is missing from disk")
+            continue
+        got = sha256_of(path)
+        if got != want:
+            problems.append(f"snapshot file {rel!r}: bytes on disk hash {got[:12]}…, the manifest recorded {want[:12]}…")
+    return problems
+
+
 def by_path(manifest: list[ManifestEntry]) -> dict[str, ManifestEntry]:
     return {m.path: m for m in manifest}
 

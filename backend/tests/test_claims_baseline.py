@@ -36,6 +36,11 @@ needs_sample = pytest.mark.skipif(not scripted.GEN.is_dir(), reason="run samples
 client = TestClient(app)
 
 
+def rev(run_id: str) -> int:
+    """The run's current revision — every mutation must carry it."""
+    return client.get(f"/api/claims-runs/{run_id}").json()["revision"]
+
+
 @pytest.fixture()
 def db(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'test.sqlite3'}", connect_args={"check_same_thread": False})
@@ -48,8 +53,12 @@ def db(tmp_path, monkeypatch):
     yield Session
 
 
-async def run_client_a(db, monkeypatch, instructions: str = "") -> str:
-    """Create, survey, map, confirm and verify the sample batch; returns the run id."""
+async def run_client_a(db, monkeypatch, instructions: str = "", verify: bool = True) -> str:
+    """Create, survey, map, confirm and verify the sample batch; returns the run id.
+
+    verify=False stops at the confirmed map (the run is `verifying`, no
+    worker has run) so a caller can drive verification itself — which is
+    what a test of cancellation mid-verification needs."""
     t = scripted.truth()
     profile.save_profile(settings_store.get_setting("client_name"), scripted.profile_from_truth(t))
     with open(scripted.GEN / "demo_claims_batch.zip", "rb") as f:
@@ -70,7 +79,8 @@ async def run_client_a(db, monkeypatch, instructions: str = "") -> str:
             assert r.status_code == 200, r.text
     r = client.post(f"/api/claims-runs/{run_id}/confirm-map", json={"map": run.map})
     assert r.status_code == 200, r.text
-    await runner.start_verification(run_id)
+    if verify:
+        await runner.start_verification(run_id)
     return run_id
 
 
@@ -134,7 +144,7 @@ async def test_structured_folder_baseline_is_pinned(db, monkeypatch):
     for f in got["flags"]:
         if f["status"] == "open":
             r = client.post(f"/api/claims-runs/{run_id}/flags/{f['id']}/decide",
-                            json={"decision": "dismissed", "note": "baseline pin"})
+                            json={"decision": "dismissed", "note": "baseline pin", "expected_revision": rev(run_id)})
             assert r.status_code == 200, r.text
     got = client.get(f"/api/claims-runs/{run_id}").json()
     out = got["outputs"]

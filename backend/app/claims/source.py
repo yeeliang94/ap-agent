@@ -185,6 +185,8 @@ def unpack_zip(zip_path: Path, dest: Path) -> list[dict]:
                 entries.append({"name": rel.rsplit("/", 1)[-1], "kind": "file",
                                 "size": info.file_size, "id": rel, "path": rel, "depth": n})
             _check_listing_quotas(entries)
+            run_limit = MAX_TOTAL_MB * 1024 * 1024
+            run_written = 0
             for info, rel, _n in listing:
                 target = _safe_join(dest, rel)
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -199,11 +201,17 @@ def unpack_zip(zip_path: Path, dest: Path) -> list[dict]:
                         if not chunk:
                             break
                         written += len(chunk)
+                        run_written += len(chunk)
                         if written > limit:
                             out.close()
                             target.unlink(missing_ok=True)
                             raise QuotaExceeded(f"{rel} unpacks to more than the {MAX_FILE_MB} MB "
                                                 "limit per file (its header said less).")
+                        if run_written > run_limit:
+                            out.close()
+                            target.unlink(missing_ok=True)
+                            raise QuotaExceeded(f"The zip's files unpack to more than the {MAX_TOTAL_MB} MB "
+                                                "limit for a run (their headers said less).")
                         out.write(chunk)
     except zipfile.BadZipFile as exc:
         raise SourceUnavailable("The uploaded file is not a valid zip.") from exc

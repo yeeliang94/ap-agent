@@ -262,3 +262,213 @@ async def test_bound_render_returns_the_image_to_the_model(workspace):
     # every result carries the id of its execution record
     ex = tools.executions()
     assert [e.id for e in ex] == ["t0001", "t0002", "t0003"]
+
+
+@pytest.mark.asyncio
+async def test_budgets_are_reserved_before_a_call_runs(workspace):
+    """The guard reserves calls, bytes and pages BEFORE the call runs and
+    without an await in between: a read that would exceed the byte budget
+    is refused up front (not after it has read), a batch of calls issued
+    together cannot all pass on the same counters, and record_proposal
+    honors the call budget like every other tool."""
+    import asyncio
+
+    ws, manifest = workspace
+    wb = next(m for m in manifest if m.path.endswith("report.xlsx"))
+    # byte budget smaller than the workbook: refused before reading, nothing consumed
+    tools = ToolHarness(ws, manifest, budget=C.Budget(bytes_read=wb.size - 1))
+    r = await tools.inspect_workbook(wb.id)
+    assert r.error_code == "BUDGET" and "would be exceeded" in r.error
+    assert tools.budget_remaining()["bytes_read"] == wb.size - 1
+    # a batch of three on a budget of two: exactly two run
+    tools = ToolHarness(ws, manifest, budget=C.Budget(tool_calls=2))
+    results = await asyncio.gather(*(tools.calculate("1+1") for _ in range(3)))
+    assert sorted(r.ok for r in results) == [False, True, True]
+    assert [r.error_code for r in results if not r.ok] == ["BUDGET"]
+    assert tools.budget_remaining()["tool_calls"] == 0
+    # proposals do not bypass the call budget
+    assert tools.record_proposal("case", {"label": "x"}).error_code == "BUDGET"
+    # a page batch on a page budget of one: exactly one render
+    pdf = next(m for m in manifest if m.path.endswith("receipts.pdf"))
+    tools = ToolHarness(ws, manifest, budget=C.Budget(pages_read=1))
+    results = await asyncio.gather(tools.render_page(pdf.id, 1), tools.render_page(pdf.id, 1))
+    assert sorted(r.ok for r in results) == [False, True]
+
+
+# ---- review 2026-08-19: redaction, containment, bounded renders, calculator ----------
+
+def test_redaction_covers_windows_posix_temp_and_data_paths(workspace, tmp_path, monkeypatch):
+    """Review #11: nothing that leaves the harness (model context, the
+    tool-execution note, the replay bundle, a TOOL_FAILED flag) may carry
+    an absolute path. The old regex only matched /Users, /home and a
+    DOUBLE-backslash Windows path, so a single-backslash Windows path, a
+    /var or /opt path, the temp dir and the app's data dir all passed
+    straight through."""
+    import tempfile
+
+    from app import config
+
+    ws, manifest = workspace
+    tools = ToolHarness(ws, manifest)
+    cases = [
+        r"C:\Users\bob\AppData\run\files\x.xlsx",
+        r"C:\\Users\\bob\\AppData\\run\\files\\x.xlsx",
+        "/var/app/data/runs/r2/files/y.pdf",
+        "/tmp/claims-sbx-1-abc/in/z",
+        "/home/svc/claims/a.pdf",
+        "/Users/someone/Desktop/b.pdf",
+        r"\\fileserver\claims\c.xlsx",
+        f"{tempfile.gettempdir()}/leftover",
+        f"{config.DATA_DIR}/runs/r9/files/d.pdf",
+    ]
+    for raw in cases:
+        got = tools._redact(f"cannot open {raw}: broken")
+        assert raw not in got, raw
+        assert "<path>" in got or "<run>" in got, raw
+        for fragment in ("bob", "AppData", "claims-sbx-1-abc", "fileserver", "svc"):
+            assert fragment not in got, (raw, got)
+    # the run's own workspace is named as <run>, not as a path
+    assert tools._redact(f"in {ws}") == "in <run>"
+    # ordinary prose survives: a date, a ratio, a sheet name are not paths
+    kept = tools._redact("sheet 'Expense Report' row 7: 24.00/2 on 02/07/2026")
+    assert kept == "sheet 'Expense Report' row 7: 24.00/2 on 02/07/2026"
+
+
+def test_snapshot_path_refuses_escapes_and_symlinks(workspace, tmp_path):
+    """One containment resolver serves the harness, the text index and the
+    code audit. A manifest entry that escapes files/ or that IS a symlink
+    (a link into the snapshot still lets one entry stand for another's
+    bytes) is refused before the file is opened."""
+    from app.claims.tools import files as files_mod
+
+    ws, manifest = workspace
+    files = ws / "files"
+    assert files_mod.snapshot_path(files, "A/report.xlsx") == (files / "A" / "report.xlsx").resolve()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("not a claim file")
+    (files / "A" / "escape.xlsx").symlink_to(secret)
+    (files / "A" / "inside.xlsx").symlink_to(files / "A" / "report.xlsx")
+    (files / "linkdir").symlink_to(files / "A")
+    for rel in ("../../secret.txt", str(secret), "A/../../secret.txt",
+                "A/escape.xlsx", "A/inside.xlsx", "linkdir/report.xlsx"):
+        with pytest.raises(PermissionError):
+            files_mod.snapshot_path(files, rel)
+
+
+@pytest.mark.asyncio
+async def test_a_manifest_entry_that_escapes_is_refused_by_the_tools(workspace, tmp_path):
+    """The refusal reaches the model as a named failure, never the file."""
+    ws, manifest = workspace
+    secret = tmp_path / "secret.xlsx"
+    shutil.copyfile(ws / "files" / "A" / "report.xlsx", secret)
+    escaped = manifest[0].model_copy(update={"path": "../../secret.xlsx"})
+    linked = manifest[0].model_copy(update={"id": "lnk", "path": "A/link.xlsx"})
+    (ws / "files" / "A" / "link.xlsx").symlink_to(secret)
+    tools = ToolHarness(ws, [escaped, linked])
+    for m in (escaped, linked):
+        r = await tools.inspect_workbook(m.id)
+        assert not r.ok and r.error_code == "TOOL_FAILED", m.path
+        assert "snapshot" in r.error or "symbolic link" in r.error
+        assert str(tmp_path) not in r.error
+    # the index refuses them too: nothing outside files/ is ever searched
+    assert (await tools.search_artifacts("Aegene")).data["hits"] == []
+
+
+@pytest.mark.asyncio
+async def test_render_page_renders_only_the_requested_page(workspace, tmp_path):
+    """Review #12: `render_page` used to rasterise EVERY page of the PDF to
+    hand back one — 200 pages × 400 tool calls of wasted work. Only the
+    requested page is rendered now; the out-of-range / unsupported-type
+    contract (IndexError / ValueError) is unchanged, and `full=True` still
+    renders at full resolution."""
+    import pymupdf
+
+    from app.claims import evidence as evidence_mod
+
+    ws, manifest = workspace
+    many = ws / "files" / "A" / "many.pdf"
+    doc = pymupdf.open()
+    for i in range(1, 13):
+        doc.new_page().insert_text((72, 72), f"page {i}")
+    doc.save(many)
+    doc.close()
+
+    rendered: list = []
+    original = pymupdf.Page.get_pixmap
+
+    def counting(self, *a, **kw):
+        rendered.append(self.number)
+        return original(self, *a, **kw)
+
+    pymupdf.Page.get_pixmap = counting
+    try:
+        png = evidence_mod.render_page(many, 7)
+        assert rendered == [6], rendered  # 0-based: page 7 alone, not all twelve
+        assert png[:8] == b"\x89PNG\r\n\x1a\n"
+        rendered.clear()
+        evidence_mod.render_page(many, 7, full=True)
+        assert rendered == [6], rendered
+        rendered.clear()
+        # through the tool, on a real manifest entry
+        entries = [{"path": "A/many.pdf", "size": many.stat().st_size}]
+        m = manifest_mod.build_manifest(ws / "files", entries)
+        tools = ToolHarness(ws, m)
+        r = await tools.render_page(m[0].id, 3)
+        assert r.ok and rendered == [2], rendered
+        rendered.clear()
+        r = await tools.crop_page(m[0].id, 11, [0, 0, 50, 50])
+        assert r.ok and rendered == [10], rendered
+        rendered.clear()
+        # the contract the HTTP layer maps to 404 / 415 is unchanged
+        for page in (0, 13, 99):
+            with pytest.raises(IndexError):
+                evidence_mod.render_page(many, page)
+            with pytest.raises(IndexError):
+                evidence_mod.render_page(many, page, full=True)
+        assert rendered == []
+        for full in (False, True):
+            with pytest.raises(ValueError):
+                evidence_mod.render_page(ws / "files" / "A" / "notes.txt", 1, full=full)
+    finally:
+        pymupdf.Page.get_pixmap = original
+
+
+@pytest.mark.asyncio
+async def test_a_calculation_that_overflows_is_bad_input_not_a_broken_tool(workspace):
+    """Decimal signals Overflow / InvalidOperation on an expression whose
+    answer it cannot represent. That is the model writing bad input — it
+    must come back as BAD_INPUT (retryable, the model is told what to fix),
+    not TOOL_FAILED (which reads as the harness being broken)."""
+    ws, manifest = workspace
+    tools = ToolHarness(ws, manifest)
+    for expression in ("1e999999999 * 1e999999999",            # Overflow
+                       "round(1e999999999 * 1e999999999, 2)",
+                       "1e999999999 * 1e999999999 - 1",
+                       "round(1e5000, 2)"):                     # InvalidOperation on the quantize
+        with pytest.raises(calculator.CalculationError):
+            calculator.calculate(expression)
+        r = await tools.calculate(expression)
+        assert not r.ok and r.error_code == "BAD_INPUT", (expression, r.error_code, r.error)
+    # the ordinary refusals still read as they did
+    assert (await tools.calculate("1/0")).error_code == "BAD_INPUT"
+    assert (await tools.calculate("__import__('os')")).error_code == "BAD_INPUT"
+
+
+@pytest.mark.asyncio
+async def test_parallel_calls_never_collide_on_a_handle_name(workspace):
+    """Handles were named from `len(self.handles) + 1`, so renders issued
+    together could claim the same name and one PNG would overwrite the
+    other. Names come from a counter under a lock now."""
+    import asyncio
+
+    ws, manifest = workspace
+    pdf = _id(manifest, "receipts.pdf")
+    tools = ToolHarness(ws, manifest, budget=C.Budget(tool_calls=40, pages_read=40))
+    results = await asyncio.gather(*(tools.render_page(pdf, 1) for _ in range(8)))
+    handles = [r.handle for r in results]
+    assert all(r.ok for r in results)
+    assert len(set(handles)) == 8, handles
+    assert sorted(p.name for p in (ws / "tool_output").iterdir()) == sorted(handles)
+    # each handle really holds its own PNG
+    for h in handles:
+        assert tools.handle_bytes(h)[:8] == b"\x89PNG\r\n\x1a\n"

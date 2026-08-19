@@ -160,9 +160,9 @@ async def prepare_listing(db, run: ClaimsRun) -> None:
 
 
 async def read_listing(path: Path, usage=None) -> dict:
-    """AI maps the header row of the CURRENT tab (the last one, or the one
-    with the fewest rows — the month being filled); code reads the past
-    ER rows from every tab."""
+    """AI maps the header row of the CURRENT tab — the last one in the
+    workbook, which is the month being filled; code reads the past ER rows
+    from every tab."""
     wb = load_workbook(path, data_only=True, read_only=True)
     try:
         sheets = wb.worksheets
@@ -342,8 +342,19 @@ def build_outputs(db, run: ClaimsRun) -> dict:
                                         ClaimFlag.code.in_(("UNCLAIMED_RECEIPT", "MILEAGE_NO_MAP"))):
         if f.status not in ("open", "info"):
             decisions[f.evidence_id] = f.status.replace("_", " ") + (f" — {f.resolution}" if f.resolution else "")
+    # A receipt two rows both claim, or one of several candidates for a
+    # row, is CONTESTED, not spare: its flag is the decision to make, and
+    # listing it again as evidence nobody used would double-count it.
+    contested: set[str] = set()
+    for f in db.query(ClaimFlag).filter(ClaimFlag.run_id == run.id,
+                                        ClaimFlag.code.in_(("DUPLICATE_RECEIPT", "RECEIPT_AMBIGUOUS"))):
+        if f.evidence_id:
+            contested.add(f.evidence_id)
+        contested.update(str(x) for x in ((f.cite or {}).get("candidates") or []))
     unused_evidence = []
     for ev in db.query(ClaimEvidence).filter(ClaimEvidence.run_id == run.id, ClaimEvidence.matched_row_id == ""):
+        if ev.id in contested:
+            continue
         v = ev.values or {}
         if ev.kind == "receipt":
             what = f"receipt from {v.get('vendor') or '?'} ({v.get('date') or 'no date'})"
@@ -362,8 +373,10 @@ def build_outputs(db, run: ClaimsRun) -> dict:
     reported_total_sum = Decimal("0")   # the independent side, where present
     lines_total_sum = Decimal("0")      # Calculated Lines Total of the lines to be paid
     reported_missing = 0
+    held_lines = 0                      # lines held out of the sum for want of a rate
     differences: list[dict] = []
-    for n, c in enumerate(sorted(cases, key=lambda x: (x.claimant_name or x.label).lower()), 1):
+    n = 0                               # the S/N counts the rows emitted, not the cases seen
+    for c in sorted(cases, key=lambda x: (x.claimant_name or x.label).lower()):
         name = c.claimant_name or c.label
         if c.state == "excluded" or c.status == "skipped":
             not_included.append({"name": name, "case_id": c.id, "why": "excluded by the reviewer at the map"})
@@ -383,9 +396,29 @@ def build_outputs(db, run: ClaimsRun) -> dict:
         if c_rows and not kept:
             not_included.append({"name": name, "case_id": c.id, "why": "every row was excluded in review"})
             continue
-        amount = sum((_money(r) for r in kept), Decimal("0")).quantize(Decimal("0.01"))
-        if not c_rows:
-            amount = Decimal(c.reported_total or "0").quantize(Decimal("0.01"))
+        # A line whose figure is not ringgit and carries no MYR total has
+        # had no rate applied: it is named and held out, never added to
+        # the sum as though its number were ringgit.
+        held, payable = [], []
+        for r in kept:
+            why = _held_why(r)
+            if why:
+                held.append(r)
+                held_lines += 1
+                not_included.append({"name": name, "case_id": c.id, "why": why})
+            else:
+                payable.append(r)
+        if not payable:
+            # the Reported Total is what the source SAYS; it never stands
+            # in for lines nobody could read (H11: the two stay apart)
+            not_included.append({"name": name, "case_id": c.id,
+                                 "why": "no lines to pay" + (
+                                     " — every line is held for want of an exchange rate" if held else
+                                     "; the case's Reported Total is not paid on its own — read the "
+                                     "lines, or exclude the case")})
+            continue
+        amount = sum((_money(r) for r in payable), Decimal("0")).quantize(Decimal("0.01"))
+        n += 1
         for r in gone:
             exclusions.append({"name": name, "case_id": c.id, "row": r.row, "amount": str(_money(r)),
                                "why": "flag accepted in review"})
@@ -394,7 +427,7 @@ def build_outputs(db, run: ClaimsRun) -> dict:
                   "gl_account": c.gl, "vendor_name": c.claimant_name, "invoice_number": c.claimant_identifier,
                   "amount": f"{amount:.2f}",
                   "remarks": "employee claim" + (f" ({len(gone)} row(s) excluded)" if gone else "")
-                             + (" — lines derived from evidence" if any(r.kind == "derived" for r in kept) else "")}
+                             + (" — lines derived from evidence" if any(r.kind == "derived" for r in payable) else "")}
         line = [""] * len(header)
         for role, idx in roles.items():
             if idx is not None and idx < len(header):
@@ -409,7 +442,7 @@ def build_outputs(db, run: ClaimsRun) -> dict:
                          "amount": f"{amount:.2f}", "category": c.category, "gl": c.gl,
                          "reported_total": f"{reported_total:.2f}" if reported_total is not None else None,
                          "lines_total": f"{amount:.2f}",
-                         "derived": any(r.kind == "derived" for r in kept)})
+                         "derived": any(r.kind == "derived" for r in payable)})
         if reported_total is None:
             # nothing independent to check against: say so rather than pretend
             reported_missing += 1
@@ -439,6 +472,7 @@ def build_outputs(db, run: ClaimsRun) -> dict:
                        "lines_total": f"{lines_total_sum:.2f}",
                        "reported_total": f"{reported_total_sum:.2f}",
                        "reported_missing": reported_missing,
+                       "held_lines": held_lines,
                        "source_total": f"{compared:.2f}",   # delivered name: reported where present, else the lines
                        "match": match,
                        "difference": f"{(emitted_total - compared):.2f}",
@@ -463,9 +497,23 @@ def _dec_or_none(text) -> Decimal | None:
 
 
 def _money(r: ClaimRow) -> Decimal:
-    v = r.values or {}
-    text = v.get("total") or v.get("amount") or "0"
-    try:
-        return Decimal(str(text))
-    except Exception:
+    """What the line pays, in MYR: its total where the source computed one,
+    else its amount. A line _held_why() names pays nothing."""
+    if _held_why(r):
         return Decimal("0")
+    v = r.values or {}
+    return _dec_or_none(v.get("total")) or _dec_or_none(v.get("amount")) or Decimal("0")
+
+
+def _held_why(r: ClaimRow) -> str:
+    """Why this line is held out of the payment, or "". A figure in a
+    foreign currency with no MYR total has had no exchange rate applied:
+    adding it to a ringgit sum would pay USD 50.00 as RM 50.00."""
+    v = r.values or {}
+    currency = (str(v.get("currency") or "MYR").strip().upper() or "MYR")
+    if currency == "MYR" or _dec_or_none(v.get("total")) is not None:
+        return ""
+    amount = _dec_or_none(v.get("amount"))
+    return (f"a line of {currency} {amount if amount is not None else '?'} carries no MYR total — no "
+            "exchange rate was applied, so it is held out of the payment; enter the rate (or the "
+            "converted total) on the source line and re-run")

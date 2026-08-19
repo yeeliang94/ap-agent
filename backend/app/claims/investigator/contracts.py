@@ -249,7 +249,10 @@ class ToolExecution(BaseModel):
     output_hash: str = ""
     truncated: bool = False
     error_code: str = ""
-    note: str = Field(default="", max_length=300)
+    # a short message — or, for `calculate`, the WHOLE "<expression> = <value>"
+    # (the calculator caps the expression at 2000 chars) so replay re-evaluates it
+    note: str = Field(default="", max_length=2400)
+    origin: str = "model"   # "model": the agent called it; "audit": the code audit did
 
 
 class InvestigationPlan(BaseModel):

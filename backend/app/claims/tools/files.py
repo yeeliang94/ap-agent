@@ -14,6 +14,43 @@ from . import workbook as wb_mod
 MAX_INDEX_ENTRIES_PER_FILE = 20000
 
 
+def snapshot_path(files_dir: Path, rel: str) -> Path:
+    """THE containment rule for a manifest path. Every place that turns a
+    manifest entry into a filesystem path goes through here — the harness,
+    the text index, the code audit — so the rule is one rule:
+
+      * the path must resolve under ``files/`` (``..`` and absolute paths
+        are refused), and
+      * no component of it, the file included, may be a SYMLINK. The
+        snapshot holds copies of the client's files and nothing else; a
+        link is either an escape or a way to make the host open a file
+        that is not in the manifest, and either way it is not a claim
+        file. (Resolving alone is not enough: a link INTO the snapshot
+        would still let one manifest entry stand for another's bytes.)
+
+    Refusal is always the same PermissionError, and the file is never
+    opened, stat'ed for size or hashed first."""
+    root = Path(files_dir).resolve()
+    p = root / str(rel)
+    resolved = p.resolve()
+    if root not in resolved.parents:
+        raise PermissionError("path escapes the snapshot")
+    # root is already resolved, so every component of the path AS WRITTEN
+    # is checked below it — a link at any level is refused before anything
+    # is opened. (Checking the RESOLVED path instead would see no link at
+    # all, which is the whole point of following one.)
+    walked = root
+    try:
+        parts = p.relative_to(root).parts
+    except ValueError:  # not lexically under root; the resolve check above stands
+        parts = ()
+    for part in parts:
+        walked = walked / part
+        if walked.is_symlink():
+            raise PermissionError("path is a symbolic link")
+    return resolved
+
+
 class TextIndex:
     """(artifact id, locator, text) triples per artifact, built on first
     use, one file at a time — never re-reads a file it has indexed."""
@@ -25,12 +62,15 @@ class TextIndex:
         self.failures: dict[str, str] = {}
         self.bytes_read = 0
 
+    def has(self, artifact_id: str) -> bool:
+        return artifact_id in self._entries
+
     def entries_for(self, m: ManifestEntry) -> list[tuple[dict, str]]:
         if m.id in self._entries:
             return self._entries[m.id]
         out: list[tuple[dict, str]] = [({"filename": True}, m.path)]
-        path = self.files_dir / m.path
         try:
+            path = snapshot_path(self.files_dir, m.path)
             if path.is_file():
                 self.bytes_read += path.stat().st_size
                 if m.media_type == "workbook":
@@ -56,11 +96,18 @@ def list_artifacts(manifest: list[ManifestEntry], query: str = "", media_type: s
     return data, len(hits) > limit
 
 
-def search_artifacts(index: TextIndex, query: str, limit: int) -> tuple[list[dict], list[Citation], bool]:
+def search_artifacts(index: TextIndex, query: str, limit: int,
+                     artifact_ids: list[str] | None = None) -> tuple[list[dict], list[Citation], bool]:
+    """Hits over the index; `artifact_ids` (when given) restricts the
+    search to those artifacts — the audit scopes a name check to the
+    case's own files — and nothing outside them is even indexed."""
     q = (query or "").lower().strip()
     hits: list[dict] = []
     cites: list[Citation] = []
+    only = set(artifact_ids) if artifact_ids is not None else None
     for m in index.manifest:
+        if only is not None and m.id not in only:
+            continue
         for where, text in index.entries_for(m):
             low = text.lower()
             pos = low.find(q)

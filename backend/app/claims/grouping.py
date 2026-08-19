@@ -26,15 +26,57 @@ from .models import ClaimCase, ClaimFlag, ClaimSourceArtifact, ClaimsRun
 
 _NAME_PREFIX = re.compile(r"^([A-Z][A-Za-z.'\-]+(?: [A-Z][A-Za-z.'\-]+){1,3})_")
 _LABELS = ("name", "employee", "claimant", "staff", "requestor", "requester")
+# 'Expense Report_July.pdf' is titled like 'Aegene Ong_receipts.pdf' and
+# means nothing about who owns it. A prefix holding one of these words is
+# a document title, never a person.
+_DOC_WORDS = {"expense", "expenses", "report", "reports", "claim", "claims", "form", "forms",
+              "mileage", "summary", "travel", "receipt", "receipts", "invoice", "invoices",
+              "statement", "statements", "listing", "scan", "scans", "copy", "attachment",
+              "supporting", "document", "documents", "bundle", "approval", "approvals",
+              "reimbursement", "batch", "folder"}
 
 
 def _fold(text: str) -> str:
     return " ".join((text or "").lower().replace("(", " ").replace(")", " ").split())
 
 
+def _is_document_title(text: str) -> bool:
+    return any(word in _DOC_WORDS for word in _fold(text).split())
+
+
+def _same_person(a: str, b: str) -> bool:
+    """Two folded names that differ only by initials or a middle name."""
+    return bool(a) and bool(b) and (a == b or a in b or b in a)
+
+
+def _stated_names(run: ClaimsRun) -> set[str]:
+    """Folded names the run's OWN files state in a header cell ('Name:
+    Aegene Ong'). A person-like file-name prefix is ownership only when
+    one of these corroborates it; alone it is a hint."""
+    return {_fold(name) for f in (run.survey or {}).get("files", [])
+            for _cite, name in _peek_names(((f.get("peek") or {}).get("tabs") or {}))}
+
+
+def _peek_names(tabs: dict) -> list[tuple[dict, str]]:
+    """(cite, name) for every value cell beside a 'Name'-like label cell."""
+    found: list[tuple[dict, str]] = []
+    for tab, rows in (tabs or {}).items():
+        for row in (rows or [])[:6]:
+            cells = [c.strip() for c in row.split(" | ")]
+            for i, cell in enumerate(cells):
+                ref, _, text = cell.partition(": ")
+                if text.rstrip(":").strip().lower() in _LABELS and i + 1 < len(cells):
+                    nref, _, ntext = cells[i + 1].partition(": ")
+                    if ntext.strip():
+                        found.append(({"sheet": tab, "row": int(re.sub(r"\D", "", nref) or 0),
+                                       "note": f"beside {text!r} in {ref}"}, ntext.strip()))
+    return found
+
+
 def signals_for(run: ClaimsRun, artifacts: list[ClaimSourceArtifact]) -> dict[str, list[dict]]:
     """artifact_id → [{kind: er_code|name|folder, value, strength, cite}]."""
     peeks = {f["path"]: f for f in (run.survey or {}).get("files", [])}
+    stated = _stated_names(run)
     out: dict[str, list[dict]] = {}
     for a in artifacts:
         sig: list[dict] = []
@@ -44,25 +86,25 @@ def signals_for(run: ClaimsRun, artifacts: list[ClaimSourceArtifact]) -> dict[st
             sig.append({"kind": "er_code", "value": code, "strength": "strong",
                         "cite": {"file": a.path, "page": 0, "note": "in the file name"}})
         m = _NAME_PREFIX.match(name)
-        if m:
-            sig.append({"kind": "name", "value": m.group(1).strip(), "strength": "strong",
-                        "cite": {"file": a.path, "page": 0, "note": "prefix of the file name"}})
+        if m and not _is_document_title(m.group(1)):
+            value = m.group(1).strip()
+            said = next((s for s in stated if _same_person(_fold(value), s)), "")
+            sig.append({"kind": "name", "value": value, "strength": "strong" if said else "weak",
+                        "cite": {"file": a.path, "page": 0,
+                                 "note": "prefix of the file name" if said else
+                                         "prefix of the file name — no header cell of this run names them"}})
         top = a.path.split("/", 1)[0] if "/" in a.path else ""
         if top:
             sig.append({"kind": "folder", "value": top, "strength": "weak",
                         "cite": {"file": a.path, "page": 0, "note": "top-level folder"}})
         tabs = ((peeks.get(a.path) or {}).get("peek") or {}).get("tabs") or {}
+        for cite, stated_name in _peek_names(tabs):
+            sig.append({"kind": "name", "value": stated_name, "strength": "strong", "cite": cite})
         for tab, rows in tabs.items():
             for row in rows[:6]:
                 cells = [c.strip() for c in row.split(" | ")]
                 for i, cell in enumerate(cells):
                     ref, _, text = cell.partition(": ")
-                    if text.rstrip(":").strip().lower() in _LABELS and i + 1 < len(cells):
-                        nref, _, ntext = cells[i + 1].partition(": ")
-                        if ntext.strip():
-                            sig.append({"kind": "name", "value": ntext.strip(), "strength": "strong",
-                                        "cite": {"sheet": tab, "row": int(re.sub(r"\D", "", nref) or 0),
-                                                 "note": f"beside {text!r} in {ref}"}})
                     c2 = survey_mod.er_code_of(text)
                     if c2:
                         sig.append({"kind": "er_code", "value": c2, "strength": "strong",
@@ -93,12 +135,38 @@ def conflict_in(case: ClaimCase, artifacts: list[ClaimSourceArtifact], signals: 
     if len(codes) > 1:
         return "the files carry different ER codes: " + "; ".join(list(codes.values())[:4])
     if len(names) > 1:
-        # a name that is a prefix of another (initials, middle names) is the same person
-        keys = sorted(names, key=len)
-        distinct = [k for k in keys if not any(k != o and (k in o or o in k) for o in keys)]
-        if len(distinct) > 1:
-            return "the files carry different names: " + "; ".join(names[k] for k in distinct[:4])
+        # A name that is a prefix of another (initials, middle names) is
+        # the same person — so the names are CLUSTERED by that relation
+        # and a conflict is more than one cluster. Eliminating every name
+        # that relates to another instead would silently drop a real
+        # third name whenever two of the three happened to be one person.
+        clusters = _clusters(list(names))
+        if len(clusters) > 1:
+            return "the files carry different names: " + "; ".join(names[c[0]] for c in clusters[:4])
     return ""
+
+
+def _clusters(keys: list[str]) -> list[list[str]]:
+    """The folded names grouped by 'one contains the other', transitively.
+    Order is the order the names were first seen."""
+    parent = {k: k for k in keys}
+
+    def find(k: str) -> str:
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            if _same_person(a, b):
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[ra] = rb
+    groups: dict[str, list[str]] = {}
+    for k in keys:
+        groups.setdefault(find(k), []).append(k)
+    return list(groups.values())
 
 
 def roles_for_case(case: ClaimCase, artifacts: list[ClaimSourceArtifact], survey: dict) -> dict:
@@ -212,8 +280,9 @@ def gate(s, run: ClaimsRun) -> dict:
     cases = s.query(ClaimCase).filter(ClaimCase.run_id == run.id).all()
     artifacts = s.query(ClaimSourceArtifact).filter(ClaimSourceArtifact.run_id == run.id).all()
     problems: list[str] = []
-    for f in s.query(ClaimFlag).filter(ClaimFlag.run_id == run.id, ClaimFlag.code == "OWNERSHIP_CONFLICT",
-                                        ClaimFlag.status == "open"):
+    open_conflicts = s.query(ClaimFlag).filter(ClaimFlag.run_id == run.id, ClaimFlag.code == "OWNERSHIP_CONFLICT",
+                                               ClaimFlag.status == "open").all()
+    for f in open_conflicts:
         problems.append(f.reason.split(". ")[0])
     # Every unresolved file shuts the gate: "potentially material" is not a
     # judgment code makes from a file type it could not read (an approval
@@ -226,10 +295,8 @@ def gate(s, run: ClaimsRun) -> dict:
         if a.case_id:
             by_case.setdefault(a.case_id, []).append(problems[-1])
     to_verify = [c for c in cases if c.state != "excluded"]
-    conflicts = 0
-    for f in s.query(ClaimFlag).filter(ClaimFlag.run_id == run.id, ClaimFlag.code == "OWNERSHIP_CONFLICT",
-                                        ClaimFlag.status == "open"):
-        conflicts += 1
+    conflicts = len(open_conflicts)
+    for f in open_conflicts:
         by_case.setdefault(f.case_id, []).append(f.reason.split(". ")[0])
     for c in to_verify:
         roles = c.roles or {}
@@ -254,5 +321,9 @@ def gate(s, run: ClaimsRun) -> dict:
                        "material_unresolved": len(material_unresolved),
                        "cases": len(cases), "to_verify": len(to_verify),
                        "claimants_confirmed": sum(1 for c in to_verify if c.claimant_state == "confirmed"),
+                       # what Confirm grouping is about to confirm, so the
+                       # button can say it before the click
+                       "claimants_to_confirm": sum(1 for c in to_verify if c.claimant_state == "proposed"
+                                                   and (c.claimant_name or "").strip()),
                        "conflicts": conflicts},
             "ok": not problems}

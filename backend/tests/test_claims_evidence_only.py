@@ -21,7 +21,7 @@ from app.claims import runner, worker
 from app.claims.models import ClaimEmployee, ClaimEvidence, ClaimFlag, ClaimRow, ClaimsRun
 
 from . import claims_scripted as scripted
-from .test_claims_baseline import client, db  # noqa: F401
+from .test_claims_baseline import client, db, rev  # noqa: F401
 from .test_claims_grouping import _flat_dump_run, _settle_stray
 
 needs_sample = pytest.mark.skipif(not scripted.GEN.is_dir(), reason="run samples/generate_claims_sample.py first")
@@ -64,10 +64,10 @@ async def test_evidence_only_lines_are_proposals_until_confirmed(db, monkeypatch
             body["disposition"] = "irrelevant"
         if f["code"] == "CATEGORY_UNCLEAR":
             r = client.put(f"/api/claims-runs/{run_id}/employees/{case['employee_id']}/category",
-                           json={"category": "Taxi", "gl": "713070", "reason": "all Grab receipts"})
+                           json={"category": "Taxi", "gl": "713070", "reason": "all Grab receipts", "expected_revision": rev(run_id)})
             assert r.status_code == 200
             continue
-        r = client.post(f"/api/claims-runs/{run_id}/flags/{f['id']}/decide", json=body)
+        r = client.post(f"/api/claims-runs/{run_id}/flags/{f['id']}/decide", json={**body, "expected_revision": rev(run_id)})
         assert r.status_code == 200, r.text
     got = client.get(f"/api/claims-runs/{run_id}").json()
     out = got["outputs"]
@@ -135,7 +135,7 @@ async def test_case_retry_reruns_the_cases_worker(db, monkeypatch):
         seen.append(emp_.id)
         emp_.summary = {"rows": 0}
     monkeypatch.setattr(worker, "_work", fake_work)
-    r = client.post(f"/api/claims-runs/rc/cases/{case.id}/retry")
+    r = client.post(f"/api/claims-runs/rc/cases/{case.id}/retry", json={"expected_revision": run.revision})
     assert r.status_code == 200, r.text
     # the route only queues; drive the worker
     await worker.retry_case("rc", case.id)

@@ -100,6 +100,17 @@ def verify_bundle(db, run: ClaimsRun) -> dict:
         m = by_id.get(a.artifact_id)
         if m is None or m.get("sha256") != a.sha256:
             problems.append(f"artifact {a.path}: stored hash differs from the manifest")
+    # 2b. the bytes on disk still hash to what the manifest recorded — the
+    #     manifest is a claim about the snapshot, so the snapshot is re-read
+    #     (not just the database compared with itself)
+    from . import manifest as manifest_mod
+    from . import runner
+
+    files_dir = runner.files_dir(run.id)
+    if bundle["manifest"] and not files_dir.is_dir():
+        problems.append("the snapshot folder is gone — the files cannot be re-hashed")
+    elif bundle["manifest"]:
+        problems.extend(manifest_mod.verify_snapshot(files_dir, bundle["manifest"]))
     # 3. the published output re-derives from the stored state, and its
     #    TSV re-sums to its total
     published = bundle["output"]
@@ -138,6 +149,7 @@ def verify_bundle(db, run: ClaimsRun) -> dict:
         problems.append("an output is published but the run is not ready")
     return {"reproduces": not problems, "problems": problems,
             "checked": {"calculations": n_calc, "flags": len(bundle["flags"]), "artifacts": len(bundle["manifest"]),
+                        "snapshot_files_rehashed": len(bundle["manifest"]) if files_dir.is_dir() else 0,
                         "output_rows": len((published or {}).get("rows", []))},
             "gates": acceptance_gates(db, run),
             "versions": bundle["versions"], "bundle_version": BUNDLE_VERSION}

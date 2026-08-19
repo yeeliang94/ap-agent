@@ -14,7 +14,7 @@ export default function OutputView({ run, onGoReview }: { run: ClaimsRunDetail; 
     return (
       <div className="card banner bad">
         <b>{open > 0 ? `Review is not complete: ${open} flag${open === 1 ? "" : "s"} open` : "The output is locked"}</b>
-        {blockers.length > 0 && <ul className="muted">{blockers.map((b) => <li key={b}>{b}</li>)}</ul>}
+        {blockers.length > 0 && <ul className="muted">{blockers.map((b, i) => <li key={`${i}-${b}`}>{b}</li>)}</ul>}
         <span className="sub">
           Nothing leaves this screen until every flag has a decision and every case has a confirmed
           claimant — that is the rule, enforced by the server, not just this button.

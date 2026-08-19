@@ -19,7 +19,7 @@ from app.claims.models import ClaimEmployee, ClaimFlag, ClaimSourceArtifact, Cla
 from app.db import Base
 
 from . import claims_scripted as scripted
-from .test_claims_baseline import client, db  # noqa: F401
+from .test_claims_baseline import client, db, rev  # noqa: F401
 
 needs_sample = pytest.mark.skipif(not scripted.GEN.is_dir(), reason="run samples/generate_claims_sample.py first")
 
@@ -119,7 +119,7 @@ def test_unresolved_artifacts_block_until_the_reviewer_settles_them(db):
     assert flag.cite == {"file": "X/notes.txt", "page": 0} and "nothing uploaded vanishes" in flag.reason.lower()
     assert profile.flag_key(flag) == ("ARTIFACT_UNRESOLVED", "a1")
     # A dismissal is refused; a disposition settles it and resolves the flag.
-    r = client.post(f"/api/claims-runs/ru/flags/{flag.id}/decide", json={"decision": "dismissed", "note": "meh"})
+    r = client.post(f"/api/claims-runs/ru/flags/{flag.id}/decide", json={"decision": "dismissed", "note": "meh", "expected_revision": rev("ru")})
     assert r.status_code == 400
     r = client.post("/api/claims-runs/ru/artifacts/a1/disposition", json={"disposition": "used", "reason": "x"})
     assert r.status_code == 400 and "expected_revision is required" in r.text   # every case route takes the revision

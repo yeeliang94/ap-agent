@@ -22,7 +22,7 @@ from app.claims.models import ClaimEmployee, ClaimSourceArtifact, ClaimToolExecu
 from app.claims.tools.fake import InMemoryTools
 
 from . import claims_scripted as scripted
-from .test_claims_baseline import client, db, run_client_a  # noqa: F401
+from .test_claims_baseline import client, db, rev, run_client_a  # noqa: F401
 
 needs_sample = pytest.mark.skipif(not scripted.GEN.is_dir(), reason="run samples/generate_claims_sample.py first")
 
@@ -34,7 +34,7 @@ async def test_bundle_reproduces_and_tampering_is_caught(db, monkeypatch):
     got = client.get(f"/api/claims-runs/{run_id}").json()
     for f in got["flags"]:
         if f["status"] == "open":
-            body = {"decision": "dismissed", "note": "x"}
+            body = {"decision": "dismissed", "note": "x", "expected_revision": rev(run_id)}
             if f["code"] == "ARTIFACT_UNRESOLVED":
                 body["disposition"] = "irrelevant"
             client.post(f"/api/claims-runs/{run_id}/flags/{f['id']}/decide", json=body)
@@ -75,6 +75,25 @@ async def test_bundle_reproduces_and_tampering_is_caught(db, monkeypatch):
     s.commit()
     report = replay.verify_bundle(s, run)
     assert any("recorded '3', re-evaluated 2" in p for p in report["problems"])
+    # Tamper 4: the bytes on disk change after the inventory. The snapshot
+    # is read-only since the manifest (a plain write is refused); forcing
+    # it is caught because the verifier re-hashes the files, not the database.
+    import os
+    import stat
+
+    assert report["checked"]["snapshot_files_rehashed"] == 44
+    target = runner.files_dir(run_id) / bundle["manifest"][0]["path"]
+    assert not (target.stat().st_mode & stat.S_IWUSR)
+    with pytest.raises(PermissionError):
+        target.open("ab")
+    os.chmod(target, 0o644)
+    with target.open("ab") as f:
+        f.write(b"tampered")
+    report = replay.verify_bundle(s, run)
+    assert any("bytes on disk" in p and bundle["manifest"][0]["path"] in p for p in report["problems"]), report["problems"]
+    target.unlink()
+    report = replay.verify_bundle(s, run)
+    assert any("missing from disk" in p for p in report["problems"])
 
 
 @pytest.mark.asyncio
@@ -138,3 +157,106 @@ async def test_finish_run_prunes_tool_output(db, tmp_path, monkeypatch):
     assert worker._finish_run("rp", 0.0) is True
     assert not d.exists()
     assert runner.workspace_for("rp") == tmp_path / "rp" / "claims"
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_survey_or_mapping_is_never_resurrected(tmp_path, monkeypatch):
+    """A cancel that lands while the conductor is inside a long stage
+    (survey, mapping) must stick: the stale run object in process_run
+    cannot write 'mapping' or 'map_ready' over 'failed'."""
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app import settings_store
+    from app.claims import profile, routes as claims_routes
+    from app.claims import source as batch_source
+    from app.claims import survey as survey_mod
+    from app.db import Base
+    from app.main import app
+
+    engine = create_engine(f"sqlite:///{tmp_path / 't.sqlite3'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    for module in (claims_routes, runner, profile, settings_store):
+        monkeypatch.setattr(module, "SessionLocal", Session)
+    monkeypatch.setattr(config, "RUNS_DIR", tmp_path / "runs")
+    client_ = TestClient(app)
+
+    async def scenario(stage: str) -> str:
+        run_id = f"cx-{stage}"
+        s = Session()
+        s.add(ClaimsRun(id=run_id, client="c", status="queued", snapshot={}, folder_url=""))
+        s.commit()
+        s.close()
+        # the batch: one file, copied from nowhere
+        monkeypatch.setattr(runner, "_fetch_batch", lambda db, run, dest: [{"path": "A/x.txt", "kind": "file", "size": 1}])
+
+        def cancel_now():
+            r = client_.post(f"/api/claims-runs/{run_id}/cancel", json={})
+            assert r.status_code == 200, r.text
+
+        def fake_survey(dest, files):
+            if stage == "survey":
+                cancel_now()
+            return {"folders": [{"path": "A"}], "files": [{"path": "A/x.txt", "type": "other"}]}
+        monkeypatch.setattr(survey_mod, "survey_batch", fake_survey)
+
+        async def fake_investigate(request):
+            if stage == "mapping":
+                cancel_now()
+            return C.InvestigationResult(map={"employees": []})
+        from app.claims import investigator as seam
+        monkeypatch.setattr(seam, "investigate", fake_investigate)
+        from app.claims import manifest as manifest_mod
+        monkeypatch.setattr(manifest_mod, "build_manifest", lambda dest, files: [])
+        await runner.process_run(run_id)
+        return run_id
+
+    for stage in ("survey", "mapping"):
+        run_id = await scenario(stage)
+        s = Session()
+        run = s.get(ClaimsRun, run_id)
+        assert run.status == "failed", (stage, run.status)
+        assert "cancelled by the reviewer" in run.error, (stage, run.error)
+        codes = [e["code"] for e in client_.get(f"/api/claims-runs/{run_id}/events").json()]
+        assert "RUN_CANCELLED" in codes and "RUN_FAILED" not in codes, (stage, codes)
+        s.close()
+
+
+@pytest.mark.asyncio
+async def test_a_long_calculation_is_recorded_whole_and_still_re_evaluates(db, tmp_path):
+    """The replay bundle re-evaluates every recorded calculation. The note
+    that carries it used to be capped at 300 characters, so a long total —
+    a case with forty lines is an ordinary one — reached the verifier
+    truncated mid-expression and was reported as "no longer evaluates":
+    a false tamper alarm on an honest run. The whole expression is
+    recorded now (the calculator bounds its length), and a note that IS
+    genuinely broken is still caught."""
+    from app.claims.tools.harness import ToolHarness
+
+    ws = tmp_path / "ws"
+    (ws / "files").mkdir(parents=True)
+    amounts = [f"{n + 1}.{n % 100:02d}" for n in range(60)]
+    expression = f"sum([{', '.join(amounts)}]) - {sum(float(a) for a in amounts):.2f}"
+    assert len(expression) > 300
+    tools = ToolHarness(ws, [])
+    r = await tools.calculate(expression)
+    assert r.ok
+    note = tools.executions()[0].note
+    assert note.startswith(expression) and len(note) > 300  # recorded WHOLE, not truncated
+
+    s = db()
+    run = ClaimsRun(id="rlong", client="c", status="ready", snapshot={}, manifest=[])
+    s.add(run)
+    s.add(ClaimToolExecution(run_id="rlong", tool="calculate", note=note, input_hashes=[]))
+    s.commit()
+    report = replay.verify_bundle(s, s.get(ClaimsRun, "rlong"))
+    assert report["checked"]["calculations"] == 1
+    assert not any("no longer evaluates" in p or "re-evaluated" in p for p in report["problems"]), report["problems"]
+
+    # a note that really does not re-evaluate is still named
+    s.add(ClaimToolExecution(run_id="rlong", tool="calculate", note="1 + 1 = 3", input_hashes=[]))
+    s.commit()
+    report = replay.verify_bundle(s, s.get(ClaimsRun, "rlong"))
+    assert any("recorded '3', re-evaluated 2" in p for p in report["problems"])

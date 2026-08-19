@@ -17,10 +17,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
 import logging
 import re
+import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +42,28 @@ log = logging.getLogger("claims.tools")
 PROPOSAL_KINDS = ("case", "assignment", "line", "assumption", "artifact_role", "question", "flag")
 MAX_PROPOSALS = 2000
 OUTPUT_DIR = "tool_output"
+# The audit's own tool calls (identity checks after every round) have their
+# own allowance, so they can never use up the MODEL's tool-call budget and
+# the model's calls can never starve the audit.
+AUDIT_TOOL_CALLS = 400
+# A calculation's note carries the WHOLE expression and value, so the
+# replay verifier can re-evaluate it; every other note is a short message.
+MAX_NOTE_CHARS = 300
+
+# Absolute paths that must never leave the harness (model context, the
+# tool-execution record, the replay bundle, flag text): POSIX absolute
+# paths of at least two segments, Windows drive paths with one or two
+# backslashes, UNC paths — plus the run workspace, the temp dir and the
+# app's data dir by name.
+_PATH_PATTERNS = [
+    re.compile(r"[A-Za-z]:\\{1,2}[^\s'\"<>|]+"),         # C:\Users\bob\x.xlsx  /  C:\\Users\\bob
+    re.compile(r"\\\\[^\s'\"<>|]+\\[^\s'\"<>|]+"),       # \\server\share\x
+    re.compile(r"(?<![\w/.:-])/(?:[^\s'\"<>|/]+/)+[^\s'\"<>|/]*"),  # /var/app/data/x.pdf, /tmp/claims-sbx-1/in/z
+]
+
+
+def _size(m: ManifestEntry | None) -> int:
+    return int(m.size or 0) if m is not None else 0
 
 
 def _hash(obj: Any) -> str:
@@ -62,8 +88,22 @@ class ToolHarness:
         self._cancelled = False
         self._bytes_read = 0
         self._pages_read = 0
+        self._inflight = 0  # calls past the guard but not yet recorded (a batch runs concurrently)
+        self._origin = "model"        # who is calling: the model, or the code audit (audit_scope)
+        self._model_calls = 0         # recorded calls of each origin — the two budgets
+        self._audit_calls = 0
         self._index = files_mod.TextIndex(self.files_dir, self.manifest)
         self.handles: dict[str, Path] = {}
+        self._names = itertools.count(1)   # handle / sandbox-output names: unique under concurrency
+        self._names_lock = threading.Lock()
+        self._redact_literals = [str(self.workspace.resolve()), str(self.workspace)]
+        try:
+            from ... import config
+
+            self._redact_literals += [str(Path(config.DATA_DIR).resolve()), str(config.DATA_DIR)]
+        except Exception:  # the harness is usable without the app config (tests, tools)
+            pass
+        self._redact_literals += [tempfile.gettempdir(), str(Path(tempfile.gettempdir()).resolve())]
 
     # ---- bookkeeping ------------------------------------------------------------
 
@@ -74,47 +114,94 @@ class ToolHarness:
         return list(self._proposals)
 
     def budget_remaining(self) -> dict[str, int]:
-        return {"tool_calls": max(0, self.budget.tool_calls - len(self._executions)),
+        return {"tool_calls": max(0, self.budget.tool_calls - self._model_calls - self._inflight),
                 "bytes_read": max(0, self.budget.bytes_read - self._bytes_read),
-                "pages_read": max(0, self.budget.pages_read - self._pages_read)}
+                "pages_read": max(0, self.budget.pages_read - self._pages_read),
+                "audit_calls": max(0, AUDIT_TOOL_CALLS - self._audit_calls)}
+
+    @contextmanager
+    def audit_scope(self):
+        """Calls made inside are the CODE AUDIT's: recorded with origin
+        "audit" and counted against the audit's own allowance, not the
+        model's tool-call budget. The audit runs after a model round, never
+        beside it, so one flag on the harness is enough."""
+        before = self._origin
+        self._origin = "audit"
+        try:
+            yield self
+        finally:
+            self._origin = before
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
 
     def cancel(self) -> None:
         self._cancelled = True
+        stop = getattr(self.sandbox, "cancel", None)  # a running sandbox child is killed, not waited for
+        if callable(stop):
+            try:
+                stop()
+            except Exception as exc:  # cancelling must never raise
+                log.warning("sandbox cancel failed: %s", exc)
 
     def _redact(self, text: str) -> str:
-        """No absolute paths leave the harness."""
-        text = str(text).replace(str(self.workspace.resolve()), "<run>").replace(str(self.workspace), "<run>")
-        return re.sub(r"(/Users/[^\s'\"]+|/home/[^\s'\"]+|[A-Za-z]:\\\\[^\s'\"]+)", "<path>", text)[:500]
+        """No absolute paths leave the harness: the run workspace, the data
+        dir and the temp dir by name, then any POSIX / Windows / UNC
+        absolute path by shape."""
+        text = str(text)
+        run_names = (str(self.workspace.resolve()), str(self.workspace))
+        for literal in self._redact_literals:
+            if literal and len(literal) > 3 and Path(literal).is_absolute():
+                text = text.replace(literal, "<run>" if literal in run_names else "<path>")
+        for pattern in _PATH_PATTERNS:
+            text = pattern.sub("<path>", text)
+        return text[:500]
 
     def _entry(self, artifact_id: str) -> ManifestEntry | None:
         return self._by_id.get(str(artifact_id or ""))
 
     def _path(self, m: ManifestEntry) -> Path:
-        p = (self.files_dir / m.path).resolve()
-        if self.files_dir.resolve() not in p.parents:
-            raise PermissionError("path escapes the snapshot")
-        return p
+        return files_mod.snapshot_path(self.files_dir, m.path)
 
     def _prov(self, *ms: ManifestEntry) -> dict:
         return {"artifact_ids": [m.id for m in ms], "hashes": [m.sha256 for m in ms]}
 
-    async def _call(self, tool: str, args: tuple, fn, *, pages: int = 0) -> ToolResult:
-        """Guard → run fn (sync, in a thread) → record. fn returns a ToolResult."""
+    def _guard(self, *, pages: int = 0, nbytes: int = 0) -> ToolResult | None:
+        """The budget check, then the RESERVATION — both before anything
+        runs, and synchronously (no await between), so a batch of calls the
+        model issues together cannot all pass on the same counters, and a
+        read is refused when it WOULD exceed the budget, not after it has.
+        Returns the failure, or None when the call may go ahead."""
+        if self._cancelled:
+            return ToolResult.failure("TOOL_FAILED", "the investigation was cancelled")
+        if self._origin == "audit":
+            if self._audit_calls + self._inflight >= AUDIT_TOOL_CALLS:
+                return ToolResult.failure("BUDGET", f"audit tool-call allowance of {AUDIT_TOOL_CALLS} used up")
+        elif self._model_calls + self._inflight >= self.budget.tool_calls:
+            return ToolResult.failure("BUDGET", f"tool-call budget of {self.budget.tool_calls} used up")
+        if self._pages_read + pages > self.budget.pages_read:
+            return ToolResult.failure("BUDGET", f"page budget of {self.budget.pages_read} would be exceeded")
+        if self._bytes_read + nbytes > self.budget.bytes_read:
+            return ToolResult.failure("BUDGET", f"byte budget of {self.budget.bytes_read} would be exceeded")
+        self._inflight += 1
+        self._pages_read += pages
+        self._bytes_read += nbytes
+        return None
+
+    async def _call(self, tool: str, args: tuple, fn, *, pages: int = 0, nbytes: int = 0) -> ToolResult:
+        """Guard + reserve → run fn (sync, in a thread) → record. fn returns
+        a ToolResult. `pages`/`nbytes` are what the call will consume, known
+        from the manifest before it runs."""
         assert tool in TOOL_NAMES, tool
         started = time.monotonic()
         result: ToolResult
-        if self._cancelled:
-            result = ToolResult.failure("TOOL_FAILED", "the investigation was cancelled")
-        elif len(self._executions) >= self.budget.tool_calls:
-            result = ToolResult.failure("BUDGET", f"tool-call budget of {self.budget.tool_calls} used up")
-        elif self._pages_read + pages > self.budget.pages_read:
-            result = ToolResult.failure("BUDGET", f"page budget of {self.budget.pages_read} would be exceeded")
-        elif self._bytes_read > self.budget.bytes_read:
-            result = ToolResult.failure("BUDGET", f"byte budget of {self.budget.bytes_read} used up")
+        refused = self._guard(pages=pages, nbytes=nbytes)
+        if refused is not None:
+            result = refused
         else:
             try:
                 result = await asyncio.to_thread(fn) if not asyncio.iscoroutinefunction(fn) else await fn()
-                self._pages_read += pages
             except FileNotFoundError:
                 result = ToolResult.failure("NOT_FOUND", "the file is missing from the snapshot")
             except (KeyError, ValueError, tables_mod.TableError, calc_mod.CalculationError) as exc:
@@ -124,26 +211,41 @@ class ToolHarness:
             except Exception as exc:  # a broken file, a library error: named, never a stack trace
                 log.warning("tool %s failed: %s", tool, self._redact(repr(exc)))
                 result = ToolResult.failure("TOOL_FAILED", f"{type(exc).__name__}: {self._redact(str(exc))}")
+            finally:
+                self._inflight -= 1
         result.elapsed_ms = int((time.monotonic() - started) * 1000)
         result.provenance.setdefault("artifact_ids", [])
         result.provenance.setdefault("hashes", [])
-        note = (result.error or "")[:300]
+        note = (result.error or "")[:MAX_NOTE_CHARS]
         if result.ok and tool == "calculate":
-            # the calculation itself, so the replay bundle can re-evaluate it
-            note = f"{result.data.get('expression', '')} = {result.data.get('value', '')}"[:300]
+            # the calculation itself — WHOLE, so the replay bundle can
+            # re-evaluate it (the calculator bounds the expression length)
+            note = f"{result.data.get('expression', '')} = {result.data.get('value', '')}"
         elif result.ok and tool == "compare_tables":
-            note = f"op {args[0] if args else ''}"[:300]
-        result.call_id = f"t{len(self._executions) + 1:04d}"
-        self._executions.append(ToolExecution(
-            id=result.call_id, tool=tool, elapsed_ms=result.elapsed_ms,
-            input_hashes=[_hash(args), *result.provenance.get("hashes", [])],
-            output_hash=_hash(result.data) if result.ok else "",
-            truncated=result.truncated, error_code=result.error_code, note=note))
+            note = f"op {args[0] if args else ''}"[:MAX_NOTE_CHARS]
+        self._record(tool, result, input_hashes=[_hash(args), *result.provenance.get("hashes", [])], note=note)
         return result
+
+    def _record(self, tool: str, result: ToolResult, *, input_hashes: list[str], note: str) -> None:
+        result.call_id = f"t{len(self._executions) + 1:04d}"
+        origin = self._origin
+        self._executions.append(ToolExecution(
+            id=result.call_id, tool=tool, elapsed_ms=result.elapsed_ms, input_hashes=input_hashes,
+            output_hash=_hash(result.data) if result.ok else "",
+            truncated=result.truncated, error_code=result.error_code, note=note, origin=origin))
+        if result.error_code != "BUDGET":
+            if origin == "audit":
+                self._audit_calls += 1
+            else:
+                self._model_calls += 1
+
+    def _next_name(self, prefix: str, suffix: str = "") -> str:
+        with self._names_lock:
+            return f"{prefix}{next(self._names):04d}{suffix}"
 
     def _write_handle(self, data: bytes, suffix: str) -> str:
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        name = f"h{len(self.handles) + 1:04d}{suffix}"
+        name = self._next_name("h", suffix)
         target = self.out_dir / name
         target.write_bytes(data)
         self.handles[name] = target
@@ -175,11 +277,10 @@ class ToolHarness:
             if m.media_type != "workbook":
                 return ToolResult.failure("BAD_INPUT", f"{m.path} is a {m.media_type}, not a workbook")
             path = self._path(m)
-            self._bytes_read += m.size
             data = wb_mod.inspect_workbook(path)
             data["path"] = m.path
             return ToolResult(data=data, provenance=self._prov(m), citations=[Citation(artifact_id=m.id, path=m.path)])
-        return await self._call("inspect_workbook", (artifact_id,), run)
+        return await self._call("inspect_workbook", (artifact_id,), run, nbytes=_size(m))
 
     async def read_cells(self, artifact_id: str, sheet: str, cell_range: str) -> ToolResult:
         m = self._entry(artifact_id)
@@ -189,11 +290,10 @@ class ToolHarness:
                 return ToolResult.failure("NOT_FOUND", "no such artifact id in the manifest")
             if m.media_type != "workbook":
                 return ToolResult.failure("BAD_INPUT", f"{m.path} is a {m.media_type}, not a workbook")
-            self._bytes_read += m.size
             data = wb_mod.read_cells(self._path(m), sheet, cell_range)
             return ToolResult(data=data, provenance=self._prov(m),
                               citations=[Citation(artifact_id=m.id, path=m.path, sheet=sheet, cell=data["range"])])
-        return await self._call("read_cells", (artifact_id, sheet, cell_range), run)
+        return await self._call("read_cells", (artifact_id, sheet, cell_range), run, nbytes=_size(m))
 
     async def inspect_document(self, artifact_id: str) -> ToolResult:
         m = self._entry(artifact_id)
@@ -202,12 +302,12 @@ class ToolHarness:
             if m is None:
                 return ToolResult.failure("NOT_FOUND", "no such artifact id in the manifest")
             path = self._path(m)
-            self._bytes_read += m.size
             data = docs_mod.inspect_document(path)
             data["path"] = m.path
             return ToolResult(data=data, provenance=self._prov(m), truncated=bool(data.get("text_truncated")),
                               citations=[Citation(artifact_id=m.id, path=m.path)])
-        return await self._call("inspect_document", (artifact_id,), run, pages=min(m.pages or 1, 200) if m else 0)
+        return await self._call("inspect_document", (artifact_id,), run,
+                                pages=min(m.pages or 1, 200) if m else 0, nbytes=_size(m))
 
     async def render_page(self, artifact_id: str, page: int) -> ToolResult:
         m = self._entry(artifact_id)
@@ -225,7 +325,7 @@ class ToolHarness:
             handle = self._write_handle(png, ".png")
             return ToolResult(data={"handle": handle, "width": w, "height": h, "page": int(page)}, handle=handle,
                               provenance=self._prov(m), citations=[Citation(artifact_id=m.id, path=m.path, page=int(page))])
-        return await self._call("render_page", (artifact_id, page), run, pages=1)
+        return await self._call("render_page", (artifact_id, page), run, pages=1, nbytes=_size(m))
 
     async def crop_page(self, artifact_id: str, page: int, region: list[int]) -> ToolResult:
         m = self._entry(artifact_id)
@@ -243,22 +343,28 @@ class ToolHarness:
             handle = self._write_handle(png, ".png")
             return ToolResult(data={"handle": handle, "width": w, "height": h}, handle=handle, provenance=self._prov(m),
                               citations=[Citation(artifact_id=m.id, path=m.path, page=int(page), region=[int(v) for v in region])])
-        return await self._call("crop_page", (artifact_id, page, tuple(region) if isinstance(region, (list, tuple)) else region), run, pages=1)
+        return await self._call("crop_page", (artifact_id, page, tuple(region) if isinstance(region, (list, tuple)) else region), run,
+                                pages=1, nbytes=_size(m))
 
-    async def search_artifacts(self, query: str, limit: int = MAX_SEARCH_HITS) -> ToolResult:
+    async def search_artifacts(self, query: str, limit: int = MAX_SEARCH_HITS,
+                               artifact_ids: list[str] | None = None) -> ToolResult:
         limit = max(1, min(int(limit or MAX_SEARCH_HITS), MAX_SEARCH_HITS))
+        only = [str(i) for i in artifact_ids] if artifact_ids is not None else None
+        # The bytes this search WILL read (files not yet indexed, from the
+        # manifest) are guarded and reserved before anything is opened.
+        pending = sum(_size(m) for m in self.manifest
+                      if not self._index.has(m.id) and (only is None or m.id in only))
 
         def run():
             if not (query or "").strip():
                 return ToolResult.failure("BAD_INPUT", "empty query")
-            before = self._index.bytes_read
-            hits, cites, truncated = files_mod.search_artifacts(self._index, query, limit)
-            self._bytes_read += self._index.bytes_read - before
+            hits, cites, truncated = files_mod.search_artifacts(self._index, query, limit, artifact_ids=only)
             ids = sorted({h["artifact_id"] for h in hits})
             return ToolResult(data={"hits": hits, "unindexed": [self._by_id[i].path for i in self._index.failures if i in self._by_id]},
                               citations=cites, truncated=truncated,
                               provenance={"artifact_ids": ids, "hashes": [self._by_id[i].sha256 for i in ids]})
-        return await self._call("search_artifacts", (query, limit), run)
+        return await self._call("search_artifacts", (query, limit, tuple(only) if only is not None else None), run,
+                                nbytes=pending)
 
     async def calculate(self, expression: str) -> ToolResult:
         def run():
@@ -288,7 +394,7 @@ class ToolHarness:
                     return ToolResult.failure("NOT_FOUND", f"no such artifact id {i}")
                 inputs[m.path] = self._path(m)
             self.out_dir.mkdir(parents=True, exist_ok=True)
-            out = self.out_dir / f"py{len(self._executions) + 1:04d}"
+            out = self.out_dir / self._next_name("py")
             out.mkdir(parents=True, exist_ok=True)
             res = await self.sandbox.run(code, inputs, out, self.sandbox_limits)
             if not res.ok:
@@ -296,12 +402,15 @@ class ToolHarness:
             return ToolResult(data={"stdout": res.stdout, "output_files": res.output_files, "output_hash": res.output_hash,
                                     "versions": res.versions, "elapsed_ms": res.elapsed_ms},
                               provenance={"artifact_ids": list(ids), "hashes": [self._by_id[i].sha256 for i in ids if i in self._by_id]})
-        return await self._call("run_python", (_hash(code), ids), run)
+        return await self._call("run_python", (_hash(code), ids), run,
+                                nbytes=sum(_size(self._entry(i)) for i in ids))
 
     def record_proposal(self, kind: str, payload: dict[str, Any]) -> ToolResult:
         started = time.monotonic()
         if self._cancelled:
             result = ToolResult.failure("TOOL_FAILED", "the investigation was cancelled")
+        elif self._model_calls + self._inflight >= self.budget.tool_calls:
+            result = ToolResult.failure("BUDGET", f"tool-call budget of {self.budget.tool_calls} used up")
         elif kind not in PROPOSAL_KINDS:
             result = ToolResult.failure("BAD_INPUT", f"unknown proposal kind {kind!r} (one of {', '.join(PROPOSAL_KINDS)})")
         elif not isinstance(payload, dict):
@@ -309,13 +418,9 @@ class ToolHarness:
         elif len(self._proposals) >= MAX_PROPOSALS:
             result = ToolResult.failure("BUDGET", f"more than {MAX_PROPOSALS} proposals")
         else:
-            self._proposals.append({"kind": kind, **payload})
+            self._proposals.append({**payload, "kind": kind})  # the kind is the harness's, never the payload's
             result = ToolResult(data={"recorded": len(self._proposals)})
         result.elapsed_ms = int((time.monotonic() - started) * 1000)
         result.provenance = {"artifact_ids": [], "hashes": []}
-        result.call_id = f"t{len(self._executions) + 1:04d}"
-        self._executions.append(ToolExecution(id=result.call_id, tool="record_proposal",
-                                              elapsed_ms=result.elapsed_ms, input_hashes=[_hash((kind, payload))],
-                                              output_hash=_hash(result.data) if result.ok else "",
-                                              error_code=result.error_code, note=(result.error or "")[:300]))
+        self._record("record_proposal", result, input_hashes=[_hash((kind, payload))], note=(result.error or "")[:MAX_NOTE_CHARS])
         return result

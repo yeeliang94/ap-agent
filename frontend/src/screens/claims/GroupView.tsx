@@ -1,11 +1,10 @@
-import { useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState, type FocusEvent } from "react";
 import {
   ArtifactRole,
   ClaimArtifact,
   ClaimCase,
   ClaimsRunDetail,
   Disposition,
-  StaleRunError,
   claimsFileUrl,
   confirmClaimant,
   confirmGrouping,
@@ -18,13 +17,18 @@ import {
   splitCase,
   updateCase,
 } from "../../api";
+import { InlineConfirm, InlineReason } from "../../components/Inline";
+import { Reload, useAction } from "../../hooks/useAction";
 
 // Map & Group (hardening H6): the ONE map screen for every input shape.
 // The investigation proposed Claim Cases (a structured folder arrives with
 // its grouping pre-proposed on a folder basis); the reviewer confirms,
 // merges, splits, moves files, sets or confirms claimants and settles the
 // files nobody placed. Every action is applied on the server at once
-// (audited, revision-checked); the screen reloads after each one.
+// (audited, revision-checked); the screen reloads after each one. The
+// view is keyed by the run's STATUS only (not its revision): a reload
+// updates it in place, so what the reviewer is typing, which rows are
+// open and a stale-run message all survive the reload.
 // The delivered MapView is the fallback while CLAIMS_CASE_MODEL is off.
 
 const ROLE_LABEL: Record<ArtifactRole, string> = {
@@ -51,23 +55,64 @@ function fileName(path: string): string {
   return path.split("/").pop() ?? path;
 }
 
+/** The reviewer's unsaved text for a case, with the server values it was
+ *  typed over: when the server's values move on (our save landed, or
+ *  another screen changed them) the draft is stale and the server wins. */
+interface Draft {
+  name: string;
+  identifier: string;
+  label: string;
+  base: { name: string; identifier: string; label: string };
+}
+
+function serverValues(c: ClaimCase): Draft["base"] {
+  return { name: c.claimant.name, identifier: c.claimant.identifier, label: c.label };
+}
+
+function sameValues(a: Draft["base"], b: Draft["base"]): boolean {
+  return a.name === b.name && a.identifier === b.identifier && a.label === b.label;
+}
+
+/** The one thing the screen is asking the reviewer right now: a reason
+ *  for settling a file, a name for a new / split case, or a yes to a
+ *  merge — asked inline, never through window.prompt/confirm. */
+type Pending =
+  | { kind: "settle"; artifactId: string; disposition: Disposition }
+  | { kind: "split"; caseId: string }
+  | { kind: "create" }
+  | { kind: "merge"; caseId: string; into: string };
+
 export default function GroupView({
   run,
   onChanged,
   onConfirmed,
 }: {
   run: ClaimsRunDetail;
-  onChanged: () => void;
+  onChanged: Reload;
   onConfirmed: () => void;
 }) {
   const cases = run.cases ?? [];
   const artifacts = run.artifacts ?? [];
   const grouping = run.grouping;
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const action = useAction(onChanged);
+  const busy = !!action.busy;
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [selected, setSelected] = useState<Record<string, boolean>>({});
-  const [drafts, setDrafts] = useState<Record<string, { name: string; identifier: string; label: string }>>({});
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
+  const [pending, setPending] = useState<Pending | null>(null);
+  // Drafts are reconciled against the server on every reload: one typed
+  // over values the server has since changed is dropped (the server wins),
+  // as is one for a case that no longer exists.
+  useEffect(() => {
+    setDrafts((ds) => {
+      const byId = new Map(cases.map((c) => [c.id, c]));
+      const kept = Object.entries(ds).filter(([id, d]) => {
+        const c = byId.get(id);
+        return c && sameValues(d.base, serverValues(c));
+      });
+      return kept.length === Object.keys(ds).length ? ds : Object.fromEntries(kept);
+    });
+  }, [cases]);
   const survey = "files" in run.survey ? run.survey : null;
   const tabsOf = useMemo(() => {
     const m = new Map<string, string[]>();
@@ -88,35 +133,34 @@ export default function GroupView({
   const openConflicts = run.flags.filter((f) => f.code === "OWNERSHIP_CONFLICT" && f.status === "open");
   const inv = run.investigation;
 
-  async function act(fn: () => Promise<unknown>) {
-    setBusy(true);
-    setError("");
-    try {
-      await fn();
-      onChanged();
-    } catch (e) {
-      if (e instanceof StaleRunError) {
-        setError(e.message);
-        onChanged();
-      } else {
-        setError(e instanceof Error ? e.message : "The action failed");
-      }
-    } finally {
-      setBusy(false);
-    }
+  /** Run one server action: awaited, then the run is reloaded (awaited too)
+   *  before the buttons are released; a stale run reloads, then says so. */
+  const act = (fn: () => Promise<unknown>) => action.run(fn);
+
+  function draftOf(c: ClaimCase): Draft["base"] {
+    const d = drafts[c.id];
+    const server = serverValues(c);
+    return d && sameValues(d.base, server) ? d : server;
   }
 
-  function draftOf(c: ClaimCase) {
-    return drafts[c.id] ?? { name: c.claimant.name, identifier: c.claimant.identifier, label: c.label };
+  function setDraft(c: ClaimCase, patch: Partial<Draft["base"]>) {
+    setDrafts({ ...drafts, [c.id]: { ...draftOf(c), ...patch, base: serverValues(c) } });
   }
 
-  function setDraft(c: ClaimCase, patch: Partial<{ name: string; identifier: string; label: string }>) {
-    setDrafts({ ...drafts, [c.id]: { ...draftOf(c), ...patch } });
-  }
-
-  function saveClaimant(c: ClaimCase) {
+  function claimantDirty(c: ClaimCase) {
     const d = draftOf(c);
-    if (d.name === c.claimant.name && d.identifier === c.claimant.identifier) return;
+    return d.name !== c.claimant.name || d.identifier !== c.claimant.identifier;
+  }
+
+  /** Name and identifier are saved TOGETHER, once, when focus leaves the
+   *  claimant cell — not on each input's blur: one audited change per
+   *  claimant, and the inputs are disabled while it is in flight, so
+   *  saving the first field never interrupts typing the second. */
+  function leaveClaimant(c: ClaimCase, ev: FocusEvent<HTMLElement>) {
+    const next = ev.relatedTarget as HTMLElement | null;
+    if (next?.dataset?.claimantOf === c.id) return; // moving between the two inputs
+    if (!claimantDirty(c)) return;
+    const d = draftOf(c);
     act(() => setClaimant(run.id, run.revision, c.id, d.name, d.identifier));
   }
 
@@ -125,19 +169,36 @@ export default function GroupView({
     if (d.label.trim() && d.label !== c.label) act(() => updateCase(run.id, run.revision, c.id, { label: d.label }));
   }
 
+  /** Settle a file: asks for the reason inline (in the file's row); the
+   *  round-trip is made only once a non-empty reason is typed. */
   function settle(a: ClaimArtifact, disposition: Disposition) {
-    const reason = window.prompt(`Why is ${fileName(a.path)} ${DISPOSITION_LABEL[disposition]}? (goes in the audit trail)`);
-    if (reason === null) return;
-    act(() => setArtifactDisposition(run.id, run.revision, a.id, disposition, reason));
+    setPending({ kind: "settle", artifactId: a.id, disposition });
   }
 
-  function splitSelected(c: ClaimCase) {
+  async function settleWith(a: ClaimArtifact, disposition: Disposition, reason: string) {
+    if (await act(() => setArtifactDisposition(run.id, run.revision, a.id, disposition, reason))) setPending(null);
+  }
+
+  async function splitSelected(c: ClaimCase, label: string) {
     const ids = (byCase.get(c.id) ?? []).filter((a) => selected[a.id]).map((a) => a.id);
     if (!ids.length) return;
-    const label = window.prompt("Name for the new case:", `${c.label} (split)`);
-    if (label === null) return;
-    setSelected({});
-    act(() => splitCase(run.id, run.revision, c.id, ids, label));
+    if (await act(() => splitCase(run.id, run.revision, c.id, ids, label))) {
+      setSelected({});
+      setPending(null);
+    }
+  }
+
+  async function createFromSelected(label: string) {
+    const ids = pool.filter((a) => selected[a.id]).map((a) => a.id);
+    if (!ids.length) return;
+    if (await act(() => createCase(run.id, run.revision, label, ids))) {
+      setSelected({});
+      setPending(null);
+    }
+  }
+
+  async function mergeInto(c: ClaimCase, into: string) {
+    if (await act(() => mergeCase(run.id, run.revision, c.id, into))) setPending(null);
   }
 
   return (
@@ -213,7 +274,7 @@ export default function GroupView({
               const open = !!expanded[c.id];
               const problems = grouping?.by_case?.[c.id] ?? [];
               return (
-                <RowGroup key={c.id}>
+                <Fragment key={c.id}>
                   <tr className={conflict || unresolved.length || problems.length ? "attention" : c.state === "excluded" ? "detail" : ""}>
                     <td>
                       <button className="btn" aria-label={open ? "Hide files" : "Show files"} title={c.reason}
@@ -229,16 +290,19 @@ export default function GroupView({
                       {conflict && <span className="pill warn" title={conflict.reason}>ownership conflict</span>}
                     </td>
                     <td>
-                      <input aria-label={`${c.label} claimant name`} value={d.name} disabled={readOnly} style={{ width: 130 }}
-                        placeholder="name" onChange={(ev) => setDraft(c, { name: ev.target.value })} onBlur={() => saveClaimant(c)} />
-                      <input aria-label={`${c.label} identifier`} value={d.identifier} disabled={readOnly} style={{ width: 140 }}
-                        placeholder="ER code / id" onChange={(ev) => setDraft(c, { identifier: ev.target.value })} onBlur={() => saveClaimant(c)} />
+                      <span onBlur={(ev) => leaveClaimant(c, ev)}>
+                        <input aria-label={`${c.label} claimant name`} value={d.name} disabled={readOnly || busy} style={{ width: 130 }}
+                          data-claimant-of={c.id} placeholder="name" onChange={(ev) => setDraft(c, { name: ev.target.value })} />
+                        <input aria-label={`${c.label} identifier`} value={d.identifier} disabled={readOnly || busy} style={{ width: 140 }}
+                          data-claimant-of={c.id} placeholder="ER code / id" onChange={(ev) => setDraft(c, { identifier: ev.target.value })} />
+                      </span>
                       <span className={`chip ${c.claimant.state === "confirmed" ? "ok" : c.claimant.state === "proposed" ? "review" : "flag"}`}
                         title={c.claimant.basis}>
                         {c.claimant.state}
                       </span>
                       {c.claimant.state === "proposed" && !readOnly && (
-                        <button className="btn" disabled={busy} title={c.claimant.basis}
+                        <button className="btn" disabled={busy || claimantDirty(c)}
+                          title={claimantDirty(c) ? "The edited name is saved when you leave the field; confirm after that." : c.claimant.basis}
                           onClick={() => act(() => confirmClaimant(run.id, run.revision, c.id))}>
                           Confirm name
                         </button>
@@ -290,16 +354,20 @@ export default function GroupView({
                         onChange={(ev) => act(() => updateCase(run.id, run.revision, c.id, { state: ev.target.checked ? "excluded" : "proposed" }))} />
                     </td>
                     <td>
-                      {canRegroup && cases.length > 1 && (
+                      {canRegroup && cases.length > 1 && (pending?.kind === "merge" && pending.caseId === c.id ? (
+                        <InlineConfirm
+                          question={`Merge ${c.label} into ${cases.find((x) => x.id === pending.into)?.label ?? "that case"}? Its files move over; this case is removed.`}
+                          confirmLabel="Merge" busy={busy}
+                          onConfirm={() => mergeInto(c, pending.into)} onCancel={() => setPending(null)} />
+                      ) : (
                         <select aria-label={`merge ${c.label} into`} value="" disabled={busy}
-                          onChange={(ev) => ev.target.value && window.confirm(`Merge ${c.label} into ${cases.find((x) => x.id === ev.target.value)?.label}?`) &&
-                            act(() => mergeCase(run.id, run.revision, c.id, ev.target.value))}>
+                          onChange={(ev) => ev.target.value && setPending({ kind: "merge", caseId: c.id, into: ev.target.value })}>
                           <option value="">— merge —</option>
                           {cases.filter((x) => x.id !== c.id).map((x) => (
                             <option key={x.id} value={x.id}>{x.label}</option>
                           ))}
                         </select>
-                      )}
+                      ))}
                     </td>
                   </tr>
                   {open && (
@@ -309,18 +377,24 @@ export default function GroupView({
                         <p className="basis">Why this case: {c.reason || c.grouping_basis}
                           {c.claimant.basis ? ` · claimant: ${c.claimant.basis}` : ""}</p>
                         <FileTable files={files} run={run} cases={cases} readOnly={readOnly} canRegroup={canRegroup} busy={busy}
-                          selected={selected} setSelected={setSelected} act={act} settle={settle} tabsOf={tabsOf} />
-                        {canRegroup && files.length > 1 && (
+                          selected={selected} setSelected={setSelected} act={act} settle={settle} tabsOf={tabsOf}
+                          pending={pending} settleWith={settleWith} cancelPending={() => setPending(null)} />
+                        {canRegroup && files.length > 1 && (pending?.kind === "split" && pending.caseId === c.id ? (
+                          <InlineReason prompt="Name for the new case" placeholder="e.g. Alicia — second claim" initial={`${c.label} (split)`}
+                            confirmLabel="Split into a new case" busy={busy}
+                            onConfirm={(label) => splitSelected(c, label)} onCancel={() => setPending(null)} />
+                        ) : (
                           <div className="actions">
-                            <button className="btn" disabled={busy || !files.some((a) => selected[a.id])} onClick={() => splitSelected(c)}>
+                            <button className="btn" disabled={busy || !files.some((a) => selected[a.id])}
+                              onClick={() => setPending({ kind: "split", caseId: c.id })}>
                               Split selected files into a new case
                             </button>
                           </div>
-                        )}
+                        ))}
                       </td>
                     </tr>
                   )}
-                </RowGroup>
+                </Fragment>
               );
             })}
             {cases.length === 0 && (
@@ -344,21 +418,22 @@ export default function GroupView({
       ) : (
         <div className="card" style={{ padding: 0, overflowX: "auto" }}>
           <FileTable files={pool} run={run} cases={cases} readOnly={readOnly} canRegroup={canRegroup} busy={busy}
-            selected={selected} setSelected={setSelected} act={act} settle={settle} tabsOf={tabsOf} pool />
-          {canRegroup && (
+            selected={selected} setSelected={setSelected} act={act} settle={settle} tabsOf={tabsOf} pool
+            pending={pending} settleWith={settleWith} cancelPending={() => setPending(null)} />
+          {canRegroup && (pending?.kind === "create" ? (
+            <div style={{ padding: 10 }}>
+              <InlineReason prompt="Name for the new case" placeholder="e.g. the claimant's name" initial=""
+                confirmLabel="Create the case" busy={busy}
+                onConfirm={createFromSelected} onCancel={() => setPending(null)} />
+            </div>
+          ) : (
             <div className="actions" style={{ padding: 10 }}>
               <button className="btn" disabled={busy || !pool.some((a) => selected[a.id])}
-                onClick={() => {
-                  const ids = pool.filter((a) => selected[a.id]).map((a) => a.id);
-                  const label = window.prompt("Name for the new case:", "");
-                  if (label === null) return;
-                  setSelected({});
-                  act(() => createCase(run.id, run.revision, label, ids));
-                }}>
+                onClick={() => setPending({ kind: "create" })}>
                 New case from selected files
               </button>
             </div>
-          )}
+          ))}
         </div>
       )}
 
@@ -378,13 +453,14 @@ export default function GroupView({
         </div>
       )}
       {readOnly && <p className="sub">This grouping was confirmed; verification has started.</p>}
-      {error && <p className="error">{error}</p>}
+      {action.error && <p className="error">{action.error}</p>}
     </div>
   );
 }
 
 function FileTable({
   files, run, cases, readOnly, canRegroup, busy, selected, setSelected, act, settle, tabsOf, pool,
+  pending, settleWith, cancelPending,
 }: {
   files: ClaimArtifact[];
   run: ClaimsRunDetail;
@@ -394,10 +470,13 @@ function FileTable({
   busy: boolean;
   selected: Record<string, boolean>;
   setSelected: (s: Record<string, boolean>) => void;
-  act: (fn: () => Promise<unknown>) => void;
+  act: (fn: () => Promise<unknown>) => Promise<boolean>;
   settle: (a: ClaimArtifact, d: Disposition) => void;
   tabsOf: Map<string, string[]>;
   pool?: boolean;
+  pending: Pending | null;
+  settleWith: (a: ClaimArtifact, d: Disposition, reason: string) => Promise<void>;
+  cancelPending: () => void;
 }) {
   return (
     <table className="table inner">
@@ -449,13 +528,18 @@ function FileTable({
                     {!pool && <option value="__out">out of every case</option>}
                   </select>
                   )}
-                  {a.disposition !== "used" && (
+                  {a.disposition !== "used" && (pending?.kind === "settle" && pending.artifactId === a.id ? (
+                    <InlineReason
+                      prompt={`Why is ${fileName(a.path)} ${DISPOSITION_LABEL[pending.disposition]}? (goes in the audit trail)`}
+                      placeholder="reason — required" initial="" confirmLabel={`Mark ${pending.disposition}`} busy={busy}
+                      onConfirm={(reason) => settleWith(a, pending.disposition, reason)} onCancel={cancelPending} />
+                  ) : (
                     <>
                       <button className="btn" disabled={busy} onClick={() => settle(a, "irrelevant")}>irrelevant</button>
                       <button className="btn" disabled={busy} onClick={() => settle(a, "duplicate")}>duplicate</button>
                       <button className="btn" disabled={busy} onClick={() => settle(a, "unreadable")}>unreadable</button>
                     </>
-                  )}
+                  ))}
                 </>
               )}
               {(a.media_type === "pdf" || a.media_type === "image") && (
@@ -467,8 +551,4 @@ function FileTable({
       </tbody>
     </table>
   );
-}
-
-function RowGroup({ children }: { children: React.ReactNode }) {
-  return <>{children}</>;
 }

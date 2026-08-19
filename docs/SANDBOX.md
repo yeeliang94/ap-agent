@@ -24,18 +24,37 @@ security boundary. The adapter (`backend/app/claims/tools/sandbox.py`,
 wrapper — and only ADDS belt-and-braces controls of its own:
 
 - environment cleared (no API keys, no SharePoint tokens, no proxy secrets);
-- inputs copied read-only into a scratch `in/` directory; one EMPTY writable
-  `out/` directory; the snapshot itself is never mounted writable;
+- inputs copied read-only into a scratch `in/` directory — the copies AND the
+  directories holding them (`0555`), so a script cannot add, rename or delete
+  anything beside them; one EMPTY writable `out/` directory, which must hold
+  nothing but regular files (a symlink, a special file or a path escaping
+  `out/` refuses the whole run, so the host never follows a link into a file
+  of its own and hands the model its hash); the snapshot itself is never
+  mounted writable;
 - wall-time kill of the whole process group; CPU / address-space / open-file /
-  process rlimits where the OS has them; stdout and output-file byte caps;
-  input byte cap;
+  process / file-size rlimits where the OS has them; stdout and output-file
+  byte caps — stdout is STREAMED into a capped buffer (never buffered whole
+  on the host) and a child past the cap is killed at once; output files are
+  sized with `stat` before any byte is read and hashed by streaming; input
+  byte cap;
+- a cancelled investigation kills a running child (the harness's `cancel()`
+  reaches the adapter's live process handles) and no further child starts;
 - every successful script is run a SECOND time and its output hash compared;
   a difference fails the call (`TOOL_FAILED`, non-deterministic);
-- nothing produced by a run that failed or hit a limit is kept;
-- the record (code hash, versions, stdout/stderr redacted of account-number
-  and token-looking strings, output-file hashes, exit status, limit hit) goes
-  into the tool-execution table; a limit becomes the `SANDBOX_LIMIT` Flag on
-  the run, never a run failure.
+- nothing produced by a run that failed or hit a limit is kept — including
+  the FIRST run's output when the second run fails or disagrees;
+- everything the adapter returns — code hash, runner/library versions,
+  stdout and stderr redacted of account-number and token-looking strings,
+  output-file hashes, exit status, limit hit — is redacted BEFORE it reaches
+  the model or any record. What is PERSISTED of it (2026-08-19, corrected
+  against the code) is the tool-execution row: the tool name, elapsed ms, the
+  input hashes (the code hash and the input artifacts' hashes), the output
+  hash, the error code and a short redacted note. The stdout/stderr text,
+  the versions, the exit status and the limit hit are **not** columns of
+  `ClaimToolExecution` — they live in the call's result (the model sees
+  stdout) and, when the call failed, in the note and the Flag text. Storing
+  the streams themselves would need a schema migration and is not done; a
+  limit becomes the `SANDBOX_LIMIT` Flag on the run, never a run failure.
 
 ## Runner contract
 
@@ -57,6 +76,17 @@ to `PATH`, `PYTHONIOENCODING`, `PYTHONDONTWRITEBYTECODE`, `LANG`,
 - give each execution an ephemeral identity (fresh container / user);
 - honour or tighten the limits the adapter passes (30 s wall, 20 s CPU,
   512 MB, 1 process, 64 files, 50 MB in, 2 MB out — `SandboxLimits`);
+- **die with its client.** The adapter kills the process GROUP it started
+  (and, on POSIX, applies the rlimits in that group through an exec'd
+  launcher rather than `preexec_fn`, which is unsafe from the server's
+  worker threads). A runner that only *talks to* a daemon — `docker run`
+  against the Docker daemon is the obvious one — leaves the real workload
+  alive when its client is killed: the container keeps running after the
+  wall-time kill and after a cancel. Such a runner MUST pass its own
+  hard timeout to the engine (`--stop-timeout`, an in-image `timeout`, a
+  `--rm` job with a deadline) so the workload dies on its own; the
+  adapter's tree kill cannot do it for you. This is a requirement on the
+  operator's wrapper, not a control the adapter provides;
 - exit non-zero when it cannot provide any of the above.
 
 Example (Linux, container):

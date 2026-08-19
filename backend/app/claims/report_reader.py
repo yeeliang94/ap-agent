@@ -40,6 +40,14 @@ log = logging.getLogger("claims.report_reader")
 
 MAX_ROUNDS = 3
 CENT = Decimal("0.01")
+# The last row an .xlsx sheet can hold, and the widest span of lines this
+# reader will walk. A reading that names a row beyond the first is
+# refused by the model; one that names a span beyond the second is
+# refused before a single cell is touched — reading a cell that does not
+# exist CREATES it, so an unbounded span rewrites the workbook in memory
+# and walks a million empty rows to say nothing.
+MAX_ROW = 1048576
+MAX_SHEET_ROWS = 20000
 _COL = r"^[A-Za-z]{1,3}$"
 _CELL = r"^[A-Za-z]{1,3}[0-9]{1,7}$"
 
@@ -80,9 +88,9 @@ class ReportColumns(BaseModel):
 class ReportReading(BaseModel):
     """The AI's structural answer for a report tab."""
     columns: ReportColumns
-    header_row: int = Field(ge=1, description="the row holding the column headings")
-    first_row: int = Field(ge=1, description="first expense line")
-    last_row: int = Field(ge=1, description="last expense line (blank rows inside are fine)")
+    header_row: int = Field(ge=1, le=MAX_ROW, description="the row holding the column headings")
+    first_row: int = Field(ge=1, le=MAX_ROW, description="first expense line")
+    last_row: int = Field(ge=1, le=MAX_ROW, description="last expense line (blank rows inside are fine)")
     total_cell: str | None = Field(default=None, pattern=_CELL, description="the cell holding the report total")
     name_cell: str | None = Field(default=None, pattern=_CELL, description="the cell holding the employee's name")
     period_cell: str | None = Field(default=None, pattern=_CELL)
@@ -118,9 +126,9 @@ class KMReading(BaseModel):
     """The AI's structural answer for a mileage (KM) tab."""
     has_trips: bool = Field(description="False when the tab holds no trip rows at all")
     columns: KMColumns | None = None
-    header_row: int | None = Field(default=None, ge=1)
-    first_row: int | None = Field(default=None, ge=1)
-    last_row: int | None = Field(default=None, ge=1)
+    header_row: int | None = Field(default=None, ge=1, le=MAX_ROW)
+    first_row: int | None = Field(default=None, ge=1, le=MAX_ROW)
+    last_row: int | None = Field(default=None, ge=1, le=MAX_ROW)
     total_cell: str | None = Field(default=None, pattern=_CELL)
     skip_rows: list[int] = Field(default_factory=list, max_length=40,
                                  description="rows inside first_row..last_row that are not trips (a subtotal, a heading)")
@@ -233,15 +241,50 @@ def item_name(item: str) -> str:
     return _GL_IN_ITEM.sub("", item or "").strip()
 
 
+def row_of(ref: str | None) -> int:
+    """The row number of a cell reference ('H11' → 11), 0 when there is none."""
+    return int("".join(ch for ch in (ref or "") if ch.isdigit()) or 0)
+
+
+def _at(ws, ref: str | None):
+    """One cell's value, or None when the reference sits below the sheet's
+    last row — asking openpyxl for a cell that is not there CREATES it."""
+    if not ref or row_of(ref) > (ws.max_row or 0):
+        return None
+    return ws[ref].value
+
+
 def _text(ws, ref: str | None) -> str:
-    if not ref:
-        return ""
-    v = ws[ref].value
+    v = _at(ws, ref)
     return str(v).strip() if v is not None else ""
 
 
 def _val(ws, col: str | None, row: int):
-    return ws[f"{col}{row}"].value if col else None
+    if not col or row > (ws.max_row or 0):
+        return None
+    return ws[f"{col}{row}"].value
+
+
+def _too_wide(first_row: int, last_row: int) -> str:
+    """The reason a span is refused, or "" — checked before any cell is read."""
+    if last_row - first_row + 1 > MAX_SHEET_ROWS:
+        return (f"first_row..last_row spans rows {first_row}..{last_row} — wider than the "
+                f"{MAX_SHEET_ROWS} rows one tab may hold; name the rows the lines are actually on")
+    return ""
+
+
+def _span(ws, first_row: int, last_row: int, total_cell: str | None = None) -> range:
+    """The rows to walk: refused when the reading's span is wider than the
+    reader supports, and never past the sheet's own last row or the total
+    row (a total is not a line)."""
+    why = _too_wide(first_row, last_row)
+    if why:
+        raise ValueError(why)
+    last = min(last_row, ws.max_row or last_row)
+    total_row = row_of(total_cell)
+    if total_row and total_row <= last:
+        last = total_row - 1
+    return range(first_row, last + 1)
 
 
 def _norm_currency(text: str) -> str:
@@ -265,7 +308,7 @@ def total_check(ws, reading: ReportReading, rows: list[dict]) -> dict | None:
     when the total cell holds no number: {"lines", "cell", "column"}."""
     if not reading.total_cell:
         return None
-    total = money(ws[reading.total_cell].value)
+    total = money(_at(ws, reading.total_cell))
     if total is None:
         return None
     col = "total" if reading.columns.total else "amount"
@@ -306,7 +349,7 @@ def extract_rows(ws, reading: ReportReading) -> list[dict]:
     cols = reading.columns
     rows = []
     skip = set(reading.skip_rows or [])
-    for r in range(reading.first_row, reading.last_row + 1):
+    for r in _span(ws, reading.first_row, reading.last_row, reading.total_cell):
         if r in skip:
             continue
         d = cell_date(_val(ws, cols.date, r)) if _val(ws, cols.date, r) is not None else None
@@ -335,6 +378,9 @@ def audit_report(ws, reading: ReportReading, rows: list[dict], employee_name: st
     the reading cannot be trusted; SOFT ones (dates outside the period)
     are fed back but do not, on their own, make the report unreadable."""
     problems: list[tuple[str, str]] = []
+    wide = _too_wide(reading.first_row, reading.last_row)
+    if wide:
+        return [(STRUCTURE, wide)]
     cols = reading.columns
     for role in ("date", "item", "amount"):
         if getattr(cols, role) is None:
@@ -380,7 +426,7 @@ def audit_report(ws, reading: ReportReading, rows: list[dict], employee_name: st
     # headings and first_row, or between last_row and the total — is a
     # line the reading missed. That is what tells a short span from a
     # mistyped total: with it, the total mismatch below stays structural.
-    total_row = int("".join(ch for ch in (reading.total_cell or "") if ch.isdigit()) or 0)
+    total_row = min(row_of(reading.total_cell), ws.max_row or 0)
     outside = list(range(reading.header_row + 1, reading.first_row))
     if total_row > reading.last_row:
         outside += list(range(reading.last_row + 1, total_row))
@@ -412,7 +458,12 @@ def audit_report(ws, reading: ReportReading, rows: list[dict], employee_name: st
         problems.append((STRUCTURE, "total_cell is missing — name the cell holding the report total"))
     if reading.name_cell:
         name = _text(ws, reading.name_cell)
-        if employee_name and employee_name.strip().lower() not in name.lower() \
+        if not name.strip():
+            # an empty cell is inside every name: without this it passes
+            # the comparison below and the reading is never checked
+            problems.append((STRUCTURE, f"name_cell {reading.name_cell} is empty — point at the cell "
+                                        "holding the employee's name"))
+        elif employee_name and employee_name.strip().lower() not in name.lower() \
                 and name.lower() not in employee_name.strip().lower():
             problems.append((STRUCTURE, f"name_cell {reading.name_cell} holds {name!r}, not the "
                                         f"employee {employee_name!r} — point at the name cell"))
@@ -510,7 +561,7 @@ def extract_trips(ws, reading: KMReading) -> list[dict]:
         return []
     trips = []
     skip = set(reading.skip_rows or [])
-    for r in range(reading.first_row, reading.last_row + 1):
+    for r in _span(ws, reading.first_row, reading.last_row, reading.total_cell):
         if r in skip:
             continue
         km = money(_val(ws, cols.km, r))
@@ -538,6 +589,10 @@ def audit_km(ws, reading: KMReading, trips: list[dict]) -> list[str]:
         return []
     cols = reading.columns
     problems = []
+    if reading.first_row is not None and reading.last_row is not None:
+        wide = _too_wide(reading.first_row, reading.last_row)
+        if wide:
+            return [wide]
     if cols is None or cols.km is None or cols.amount is None or cols.date is None:
         return ["name the date, km and amount columns (or answer has_trips=false)"]
     if not trips:
@@ -558,7 +613,7 @@ def audit_km(ws, reading: KMReading, trips: list[dict]) -> list[str]:
     if off and len(off) > max(1, len(trips) // 2):
         problems.append(f"km × rate ≠ amount on {len(off)} of {len(trips)} rows — the columns are probably wrong")
     if reading.total_cell:
-        total = money(ws[reading.total_cell].value)
+        total = money(_at(ws, reading.total_cell))
         summed = sum((Decimal(t["amount"]) for t in trips if t["amount"]), Decimal("0"))
         if total is None or cents(summed) != cents(total):
             problems.append(f"the trips' amounts sum to {cents(summed)} but {reading.total_cell} holds {total}")

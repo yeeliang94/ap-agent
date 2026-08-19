@@ -177,12 +177,8 @@ async def test_process_run_surveys_then_maps_then_waits(db, monkeypatch):
 
 
 @needs_sample
-def test_survey_text_and_peeks(tmp_path):
-    from app.claims import source as batch_source
-
-    dest = tmp_path / "files"
-    entries = batch_source.unpack_zip(GEN / "demo_claims_batch.zip", dest)
-    s = survey_mod.survey_batch(dest, [e for e in entries if e["kind"] == "file"])
+def test_survey_text_and_peeks(claims_sample_assets):
+    _, s, _ = claims_sample_assets
     text = survey_mod.survey_text(s)
     assert "## Folder: Aegene Ong_1" in text
     assert "ER code in name: ER(01JUL26-21JUL26)" in text
@@ -195,12 +191,8 @@ def test_survey_text_and_peeks(tmp_path):
 
 @needs_sample
 @pytest.mark.asyncio
-async def test_map_audit_sends_a_wrong_map_back_and_accepts_the_correction(tmp_path, monkeypatch):
-    from app.claims import source as batch_source
-
-    dest = tmp_path / "files"
-    entries = batch_source.unpack_zip(GEN / "demo_claims_batch.zip", dest)
-    s = survey_mod.survey_batch(dest, [e for e in entries if e["kind"] == "file"])
+async def test_map_audit_sends_a_wrong_map_back_and_accepts_the_correction(claims_sample_assets, monkeypatch):
+    dest, s, _ = claims_sample_assets
     good = _good_map(s)
     # Wrong in four ways: a folder missing, two employees sharing an ER
     # code, the KM tab called the report, a file with no role.
@@ -224,12 +216,8 @@ async def test_map_audit_sends_a_wrong_map_back_and_accepts_the_correction(tmp_p
 
 @needs_sample
 @pytest.mark.asyncio
-async def test_map_leftovers_become_warnings_not_failures(tmp_path, monkeypatch):
-    from app.claims import source as batch_source
-
-    dest = tmp_path / "files"
-    entries = batch_source.unpack_zip(GEN / "demo_claims_batch.zip", dest)
-    s = survey_mod.survey_batch(dest, [e for e in entries if e["kind"] == "file"])
+async def test_map_leftovers_become_warnings_not_failures(claims_sample_assets, monkeypatch):
+    dest, s, _ = claims_sample_assets
     bad = _good_map(s)
     bad.employees = bad.employees[1:]  # one folder never placed
     agent = _ScriptedAgent([bad] * mapping.MAX_ROUNDS)
@@ -256,12 +244,8 @@ def test_report_tab_plausibility():
 
 @needs_sample
 @pytest.mark.asyncio
-async def test_playbook_line_reaches_the_prompt_and_role_patterns_override(tmp_path, monkeypatch):
-    from app.claims import source as batch_source
-
-    dest = tmp_path / "files"
-    entries = batch_source.unpack_zip(GEN / "demo_claims_batch.zip", dest)
-    s = survey_mod.survey_batch(dest, [e for e in entries if e["kind"] == "file"])
+async def test_playbook_line_reaches_the_prompt_and_role_patterns_override(claims_sample_assets, monkeypatch):
+    dest, s, _ = claims_sample_assets
     good = _good_map(s)
     # The AI wrongly calls the approval a receipts file; the client's
     # remembered pattern must win.
@@ -334,6 +318,9 @@ async def test_confirm_map_records_changes_and_remembers(db, monkeypatch):
                 output = _good_map(db().get(ClaimsRun, run_id).survey)
             return R()
     monkeypatch.setattr(mapping, "create_agent", lambda *a, **k: Lazy())
+    # Confirmation is under test here; real thumbnail rendering is covered by
+    # test_process_run_surveys_then_maps_then_waits.
+    monkeypatch.setattr(survey_mod, "thumbnail", lambda _path: b"\x89PNG\r\n\x1a\n")
     await runner.process_run(run_id)
     run = db().get(ClaimsRun, run_id)
     edited = json.loads(json.dumps(run.map))

@@ -1,10 +1,16 @@
 # Claims Agent Hardening Plan — Tool-Using Investigation and Full-Folder Dumps
 
 **Status:** H0–H12 implemented 2026-08-19 behind the switches below (all
-automated checks green: backend 317 passed, frontend build clean). Open items
-are the owner's: the live structured run that reproduces the RM10 example
-(H0), the Windows sandbox feasibility spike (H8), the anonymized full-dump
-pilot and the default-on decision after two clean shadow cycles (H12).
+automated checks green: backend 322 passed, frontend build clean). What is ON
+by default: the Claim Case model (`CLAIMS_CASE_MODEL`, the approved H2
+behaviour — case fields and routes, the case-keyed Map & Group screen, file
+dispositions and the `ARTIFACT_UNRESOLVED` gate). What is OFF by default: the
+tool-using investigator, shadow mode, flat-dump regrouping actions and the
+Python sandbox — new runs still go through the delivered structured-folder
+mapper. "Default-on" in H12 refers to the investigator, not the case model.
+Open items are the owner's: the live structured run that reproduces the RM10
+example (H0), the Windows sandbox feasibility spike (H8), the anonymized
+full-dump pilot and the default-on decision after two clean shadow cycles (H12).
 
 **Written:** 2026-08-19
 
@@ -557,6 +563,50 @@ The orchestration loop is bounded:
 - Record model, prompt version, tool versions, budgets, and output hashes for
   reproducibility without storing unnecessary raw prompt copies.
 
+### Fixed in the AI-loop slice after the 2026-08-19 review
+
+- The code audit hands `normalize()` STRUCTURED findings (case key + field).
+  It used to reverse-parse its own prose (`p.split(":")[0]`), so a model-chosen
+  case key containing `:` or starting with `case ` made an unverified claimant
+  name look verified. No case key can do that now.
+- A cancel reaches the model loop: the investigator polls the harness's cancel
+  flag while a round runs, stops between requests, and normalizes what the last
+  audited round produced. A cancel also kills a running sandbox child.
+- A round that runs out of requests, tokens or wall time (or times out)
+  degrades to `normalize` with a warning instead of failing the run as
+  `MAP_FAILED`. `CLAIMS_INVESTIGATOR_TOTAL_TOKENS` caps the whole
+  investigation's tokens (`UsageLimits.total_tokens_limit`).
+- Budgets are reserved before a call runs, so parallel calls cannot overshoot
+  them; handle and sandbox output-dir names come from a locked counter, so
+  they cannot collide; the audit's tool calls have their own allowance and are
+  recorded with `origin="audit"`, never spending the model's budget; the
+  audit's identity search is scoped to the case's own artifacts.
+- One containment resolver (`tools/files.snapshot_path`) serves the harness,
+  the text index and the audit, and refuses a manifest entry that escapes
+  `files/` or is a symlink. `LocalFolderSource.download` makes the same check
+  `list_folder` did.
+- Redaction covers single-backslash Windows paths, UNC paths, any POSIX
+  absolute path, the temp dir and `DATA_DIR` — not just `/Users` and `/home`.
+- A single-page render rasterises ONE page (`document_page_png`), not the whole
+  PDF; `IndexError` (out of range) / `ValueError` (unsupported type) is the
+  stable contract the HTTP layer maps to 404 / 415.
+- The calculator turns Decimal `Overflow` / `InvalidOperation` into `BAD_INPUT`
+  rather than letting them reach the harness's catch-all as `TOOL_FAILED`, and
+  the replay note carries the WHOLE expression (a >300-char calculation used to
+  be truncated and then reported as "no longer evaluates" — a false alarm).
+- The sandbox refuses any symlink, special file or escaping path in `out/`
+  (they were followed, so the host hashed arbitrary readable files for the
+  model); the input tree is read-only; rlimits are applied by an exec'd
+  launcher instead of `preexec_fn` from a server thread; a bare SIGKILL is
+  reported as "killed", and memory is claimed only on evidence in stderr.
+- `defusedxml` is pinned so openpyxl keeps refusing entity-expansion attacks.
+- Doc corrections: `SANDBOX.md` said the redacted stdout/stderr is persisted in
+  the tool-execution table — it is not (hashes plus a short note; storing the
+  streams needs a migration), and it now states the runner's own obligation to
+  kill a detached workload (`docker run` does not die with its client).
+  `THREAT-MODEL-CLAIMS.md` §1 now says an in-process parser OOM takes the whole
+  process, not one tool call.
+
 ## Testing and evaluation matrix
 
 ### Deterministic tests
@@ -816,8 +866,10 @@ and rollback switch.
   (rows/flags/exclusions/unused evidence carry `case_id`; run-wide controls
   re-run after corrections, H7).
 - [x] Add expected-revision checks to the existing correction, decision,
-  category, retry, and confirm-map routes (optional `expected_revision` → 409
-  when stale; the server-side output gate `output_blockers` names what locks
+  category, retry, and confirm-map routes (`expected_revision` required on
+  correction, decision, category and retry since 2026-08-19 — 400 without, 409
+  when stale; optional only on confirm-map and cancel, which no current screen
+  sends it for; the server-side output gate `output_blockers` names what locks
   the listing; `CLAIMANT_UNKNOWN` / `OWNERSHIP_CONFLICT` are settled by actions,
   not notes; the claimant can be set at review time;
   `tests/test_claims_output_gates.py`).

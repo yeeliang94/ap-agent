@@ -176,7 +176,8 @@ export interface RunEvent {
   code: string;
   message: string;
   detail: string;
-  document_id: string;
+  /** The invoice pipeline sets this; a claims run's diary has no document. */
+  document_id?: string;
 }
 
 export async function getRunEvents(
@@ -220,6 +221,14 @@ export function documentFileUrl(runId: string, docId: string): string {
 
 // ---------------------------------------------------------------------------
 // Claims module — a second run type with its own routes (/api/claims-runs).
+
+/** The statuses in which the server is still working on a run (mirrors the
+ *  backend's IN_PROGRESS_STATUSES): the screens poll while one is in
+ *  progress, and only such a run can be cancelled. */
+export const CLAIMS_IN_PROGRESS = ["queued", "surveying", "mapping", "verifying"] as const;
+export function claimsRunWorking(r: { status: string }): boolean {
+  return (CLAIMS_IN_PROGRESS as readonly string[]).includes(r.status);
+}
 
 export interface ClaimsRunSummary {
   id: string;
@@ -597,18 +606,21 @@ export async function createClaimsRun(input: NewClaimsRun): Promise<{ run_id: st
   return r.json();
 }
 
-export async function confirmClaimMap(
+export function confirmClaimMap(
   runId: string,
   map: ClaimMap,
-  remember: { pattern: string; role: string }[]
+  remember: { pattern: string; role: string }[],
+  revision?: number
 ): Promise<{ ok: boolean; employees: number; changes: string[] }> {
-  const r = await fetch(`/api/claims-runs/${runId}/confirm-map`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ map, remember }),
-  });
-  if (!r.ok) return fail(r, "Could not confirm the map");
-  return r.json();
+  return mutate(`/api/claims-runs/${runId}/confirm-map`, "POST",
+    { map, remember, expected_revision: revision }, "Could not confirm the map");
+}
+
+/** Stop a run that is still working (H11): the workers stop, nothing partial
+ *  becomes ready, the run is marked failed with the reason. Only a run in
+ *  progress can be cancelled; the server refuses the rest. */
+export function cancelClaimsRun(runId: string, revision?: number): Promise<{ ok: boolean; status: string; tools_cancelled: number }> {
+  return mutate(`/api/claims-runs/${runId}/cancel`, "POST", { expected_revision: revision }, "Could not cancel the run");
 }
 
 /** A page of one of the run's files as an image; highlight names the
@@ -673,27 +685,46 @@ export async function saveClaimsSettings(body: {
   return r.json();
 }
 
-// Every review mutation sends the revision the screen last saw (H9/H10);
-// the server answers 409 when the run moved on — the screen reloads.
-function staleOr(r: Response, fallback: string): Promise<never> {
+// Every review mutation sends the revision the screen last saw (H9/H10;
+// expected_revision); the server answers 409 when the run moved on. ONE
+// helper turns that into a StaleRunError so every screen handles it the
+// same way (useAction: reload, then show the message) — no per-call
+// status checks to get wrong.
+
+export class StaleRunError extends Error {
+  constructor() {
+    super("This run changed since your screen loaded — it has been reloaded; please try again.");
+    this.name = "StaleRunError";
+  }
+}
+
+/** A JSON mutation: 409 → StaleRunError, any other failure → Error with
+ *  the server's detail (or the fallback), success → the parsed body
+ *  (an empty / non-JSON body reads as {}). */
+export async function mutate<T = Record<string, unknown>>(
+  url: string,
+  method: "POST" | "PUT" | "DELETE",
+  body: Record<string, unknown>,
+  fallback: string
+): Promise<T> {
+  const r = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (r.status === 409) throw new StaleRunError();
-  return fail(r, fallback);
+  if (!r.ok) return fail(r, fallback);
+  try {
+    return (await r.json()) as T;
+  } catch {
+    return {} as T;
+  }
 }
 
 export async function retryClaimEmployee(runId: string, employeeId: string, revision?: number): Promise<void> {
-  const r = await fetch(`/api/claims-runs/${runId}/employees/${employeeId}/retry`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ expected_revision: revision }),
-  });
-  if (!r.ok) return staleOr(r, "Could not retry this employee");
+  await mutate(`/api/claims-runs/${runId}/employees/${employeeId}/retry`, "POST",
+    { expected_revision: revision }, "Could not retry this employee");
 }
 
 export async function retryCase(runId: string, caseId: string, revision?: number): Promise<void> {
-  const r = await fetch(`/api/claims-runs/${runId}/cases/${caseId}/retry`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ expected_revision: revision }),
-  });
-  if (!r.ok) return staleOr(r, "Could not re-verify this case");
+  await mutate(`/api/claims-runs/${runId}/cases/${caseId}/retry`, "POST",
+    { expected_revision: revision }, "Could not re-verify this case");
 }
 
 export async function decideClaimFlag(
@@ -704,12 +735,9 @@ export async function decideClaimFlag(
   revision?: number,
   disposition?: Disposition
 ): Promise<void> {
-  const r = await fetch(`/api/claims-runs/${runId}/flags/${flagId}/decide`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ decision, note, expected_revision: revision, ...(disposition ? { disposition } : {}) }),
-  });
-  if (!r.ok) return staleOr(r, "Could not record the decision");
+  await mutate(`/api/claims-runs/${runId}/flags/${flagId}/decide`, "POST",
+    { decision, note, expected_revision: revision, ...(disposition ? { disposition } : {}) },
+    "Could not record the decision");
 }
 
 export async function correctClaimRow(
@@ -719,12 +747,8 @@ export async function correctClaimRow(
   reason: string,
   revision?: number
 ): Promise<void> {
-  const r = await fetch(`/api/claims-runs/${runId}/rows/${rowId}/correct`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fields, reason, expected_revision: revision }),
-  });
-  if (!r.ok) return staleOr(r, "Correction failed");
+  await mutate(`/api/claims-runs/${runId}/rows/${rowId}/correct`, "POST",
+    { fields, reason, expected_revision: revision }, "Correction failed");
 }
 
 export async function setEmployeeCategory(
@@ -735,98 +759,70 @@ export async function setEmployeeCategory(
   reason: string,
   revision?: number
 ): Promise<void> {
-  const r = await fetch(`/api/claims-runs/${runId}/employees/${employeeId}/category`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ category, gl, reason, expected_revision: revision }),
-  });
-  if (!r.ok) return staleOr(r, "Could not set the category");
-}
-
-
-// ---- Map & Group actions (hardening H6). Every one sends the revision the
-// screen last saw; a 409 means someone (or another tab) changed the run —
-// reload and try again.
-
-async function groupingCall(url: string, method: string, body: Record<string, unknown>, fallback: string) {
-  const r = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (r.status === 409) throw new StaleRunError();
-  if (!r.ok) return fail(r, fallback);
-  return r.json() as Promise<{ ok: boolean; revision: number; grouping?: Grouping }>;
-}
-
-export class StaleRunError extends Error {
-  constructor() {
-    super("This run changed since your screen loaded — it has been reloaded; please try again.");
-    this.name = "StaleRunError";
-  }
-}
-
-export function createCase(runId: string, revision: number, label: string, artifactIds: string[]) {
-  return groupingCall(`/api/claims-runs/${runId}/cases`, "POST",
-    { label, artifact_ids: artifactIds, expected_revision: revision }, "Could not create the case");
-}
-
-export function updateCase(runId: string, revision: number, caseId: string,
-  patch: { label?: string; roles?: Partial<ClaimEmployee["roles"]>; state?: "excluded" | "proposed" }) {
-  return groupingCall(`/api/claims-runs/${runId}/cases/${caseId}`, "PUT",
-    { ...patch, expected_revision: revision }, "Could not update the case");
-}
-
-export function setClaimant(runId: string, revision: number, caseId: string, name: string, identifier: string) {
-  return groupingCall(`/api/claims-runs/${runId}/cases/${caseId}/claimant`, "PUT",
-    { name, identifier, expected_revision: revision }, "Could not set the claimant");
-}
-
-export function confirmClaimant(runId: string, revision: number, caseId: string) {
-  return groupingCall(`/api/claims-runs/${runId}/cases/${caseId}/claimant`, "PUT",
-    { confirm: true, expected_revision: revision }, "Could not confirm the claimant");
-}
-
-export function mergeCase(runId: string, revision: number, caseId: string, into: string) {
-  return groupingCall(`/api/claims-runs/${runId}/cases/${caseId}/merge`, "POST",
-    { into, expected_revision: revision }, "Could not merge the cases");
-}
-
-export function splitCase(runId: string, revision: number, caseId: string, artifactIds: string[], label: string) {
-  return groupingCall(`/api/claims-runs/${runId}/cases/${caseId}/split`, "POST",
-    { artifact_ids: artifactIds, label, expected_revision: revision }, "Could not split the case");
-}
-
-export function moveArtifact(runId: string, revision: number, artifactId: string, caseId: string) {
-  return groupingCall(`/api/claims-runs/${runId}/artifacts/${artifactId}/move`, "POST",
-    { case_id: caseId, expected_revision: revision }, "Could not move the file");
-}
-
-export function setArtifactRole(runId: string, revision: number, artifactId: string, role: ArtifactRole, remember: boolean) {
-  return groupingCall(`/api/claims-runs/${runId}/artifacts/${artifactId}/role`, "PUT",
-    { role, remember, expected_revision: revision }, "Could not set the file's role");
-}
-
-export async function setArtifactDisposition(runId: string, revision: number, artifactId: string, disposition: Disposition, reason: string) {
-  const r = await fetch(`/api/claims-runs/${runId}/artifacts/${artifactId}/disposition`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ disposition, reason, expected_revision: revision }),
-  });
-  if (r.status === 409) throw new StaleRunError();
-  if (!r.ok) return fail(r, "Could not settle the file");
+  await mutate(`/api/claims-runs/${runId}/employees/${employeeId}/category`, "PUT",
+    { category, gl, reason, expected_revision: revision }, "Could not set the category");
 }
 
 export async function setCaseCategory(
   runId: string, caseId: string, category: string, gl: string, reason: string, revision?: number
 ): Promise<void> {
-  const r = await fetch(`/api/claims-runs/${runId}/cases/${caseId}/category`, {
-    method: "PUT", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ category, gl, reason, expected_revision: revision }),
-  });
-  if (!r.ok) return staleOr(r, "Could not set the category");
+  await mutate(`/api/claims-runs/${runId}/cases/${caseId}/category`, "PUT",
+    { category, gl, reason, expected_revision: revision }, "Could not set the category");
 }
 
-export async function confirmGrouping(runId: string, revision: number): Promise<{ ok: boolean; cases: number; revision: number }> {
-  const r = await fetch(`/api/claims-runs/${runId}/confirm-grouping`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected_revision: revision }),
-  });
-  if (r.status === 409) throw new StaleRunError();
-  if (!r.ok) return fail(r, "Could not confirm the grouping");
-  return r.json();
+// ---- Map & Group actions (hardening H6). Every one sends the revision the
+// screen last saw; a 409 means someone (or another tab) changed the run —
+// reload and try again.
+
+type GroupingReply = { ok: boolean; revision: number; grouping?: Grouping };
+
+export function createCase(runId: string, revision: number, label: string, artifactIds: string[]) {
+  return mutate<GroupingReply>(`/api/claims-runs/${runId}/cases`, "POST",
+    { label, artifact_ids: artifactIds, expected_revision: revision }, "Could not create the case");
+}
+
+export function updateCase(runId: string, revision: number, caseId: string,
+  patch: { label?: string; roles?: Partial<ClaimEmployee["roles"]>; state?: "excluded" | "proposed" }) {
+  return mutate<GroupingReply>(`/api/claims-runs/${runId}/cases/${caseId}`, "PUT",
+    { ...patch, expected_revision: revision }, "Could not update the case");
+}
+
+export function setClaimant(runId: string, revision: number, caseId: string, name: string, identifier: string) {
+  return mutate<GroupingReply>(`/api/claims-runs/${runId}/cases/${caseId}/claimant`, "PUT",
+    { name, identifier, expected_revision: revision }, "Could not set the claimant");
+}
+
+export function confirmClaimant(runId: string, revision: number, caseId: string) {
+  return mutate<GroupingReply>(`/api/claims-runs/${runId}/cases/${caseId}/claimant`, "PUT",
+    { confirm: true, expected_revision: revision }, "Could not confirm the claimant");
+}
+
+export function mergeCase(runId: string, revision: number, caseId: string, into: string) {
+  return mutate<GroupingReply>(`/api/claims-runs/${runId}/cases/${caseId}/merge`, "POST",
+    { into, expected_revision: revision }, "Could not merge the cases");
+}
+
+export function splitCase(runId: string, revision: number, caseId: string, artifactIds: string[], label: string) {
+  return mutate<GroupingReply>(`/api/claims-runs/${runId}/cases/${caseId}/split`, "POST",
+    { artifact_ids: artifactIds, label, expected_revision: revision }, "Could not split the case");
+}
+
+export function moveArtifact(runId: string, revision: number, artifactId: string, caseId: string) {
+  return mutate<GroupingReply>(`/api/claims-runs/${runId}/artifacts/${artifactId}/move`, "POST",
+    { case_id: caseId, expected_revision: revision }, "Could not move the file");
+}
+
+export function setArtifactRole(runId: string, revision: number, artifactId: string, role: ArtifactRole, remember: boolean) {
+  return mutate<GroupingReply>(`/api/claims-runs/${runId}/artifacts/${artifactId}/role`, "PUT",
+    { role, remember, expected_revision: revision }, "Could not set the file's role");
+}
+
+export async function setArtifactDisposition(runId: string, revision: number, artifactId: string, disposition: Disposition, reason: string): Promise<void> {
+  await mutate(`/api/claims-runs/${runId}/artifacts/${artifactId}/disposition`, "POST",
+    { disposition, reason, expected_revision: revision }, "Could not settle the file");
+}
+
+export function confirmGrouping(runId: string, revision: number): Promise<{ ok: boolean; cases: number; revision: number }> {
+  return mutate(`/api/claims-runs/${runId}/confirm-grouping`, "POST",
+    { expected_revision: revision }, "Could not confirm the grouping");
 }

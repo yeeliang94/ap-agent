@@ -86,3 +86,43 @@ CLAIMS_SANDBOX_ISOLATED = _flag("CLAIMS_SANDBOX_ISOLATED", "0")
 def ensure_dirs() -> None:
     """Create the data folders on first start so nothing crashes on a fresh clone."""
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# --- Claims investigator limits (review 2026-08-19, AI loop) ---
+# Token ceiling for ONE investigation (all rounds together), passed to the
+# agent as UsageLimits.total_tokens_limit; a round that reaches it stops
+# and the last audited proposal is normalized with a warning — never a
+# run failure. 0 or less means "no token cap" (the request cap still holds).
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)).strip() or default)
+    except ValueError:
+        return default
+
+
+CLAIMS_INVESTIGATOR_TOTAL_TOKENS = _int_env("CLAIMS_INVESTIGATOR_TOTAL_TOKENS", 1_500_000)
+
+
+# --- Claims local-mode ingestion (review 2026-08-19, HTTP) ---
+# With DOC_SOURCE=local a claims run may be started from a FOLDER PATH on
+# this machine instead of a SharePoint link. That is a development
+# convenience, and an arbitrary-file-read if it is left open: the server
+# would copy any folder the process can read into a run workspace and put
+# its pages on screen for anyone who can reach the API. So it is OFF unless
+# an operator names the one tree it may read.
+CLAIMS_LOCAL_ROOT = os.getenv("CLAIMS_LOCAL_ROOT", "")
+
+
+def local_ingestion_root() -> Path | None:
+    """The folder a local-mode run may be started from, or None (off).
+
+    None is the safe default: without it a folder path is refused exactly
+    like any other non-https link, and zip upload remains the local way in.
+    """
+    value = CLAIMS_LOCAL_ROOT.strip()
+    if not value:
+        return None
+    try:
+        return Path(value).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None

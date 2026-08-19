@@ -24,8 +24,6 @@ from pydantic import ValidationError
 from app.claims import evidence as evidence_mod
 from app.claims import manifest as manifest_mod
 from app.claims import mapping, worker
-from app.claims import source as batch_source
-from app.claims import survey as survey_mod
 from app.claims.investigator import contracts as C
 from app.claims.investigator import investigate, legacy
 from app.claims.tools.contracts import ToolResult
@@ -38,14 +36,11 @@ from .test_claims_baseline import client
 needs_sample = pytest.mark.skipif(not scripted.GEN.is_dir(), reason="run samples/generate_claims_sample.py first")
 
 
-def _client_a_request(tmp_path) -> C.InvestigationRequest:
-    ws = tmp_path / "ws"
-    dest = ws / "files"
-    entries = batch_source.unpack_zip(scripted.GEN / "demo_claims_batch.zip", dest)
-    files = [e for e in entries if e["kind"] == "file"]
-    survey = survey_mod.survey_batch(dest, files)
-    manifest = manifest_mod.build_manifest(dest, files)
-    return C.InvestigationRequest(run_id="runA", workspace=str(ws), manifest=manifest, survey=survey,
+@pytest.fixture(scope="module")
+def client_a_request(claims_sample_assets) -> C.InvestigationRequest:
+    """The immutable sample request shared by adapter contract tests."""
+    files_dir, survey, manifest = claims_sample_assets
+    return C.InvestigationRequest(run_id="runA", workspace=str(files_dir.parent), manifest=manifest, survey=survey,
                                   instructions="", objective="check everything")
 
 
@@ -53,8 +48,8 @@ def _client_a_request(tmp_path) -> C.InvestigationRequest:
 
 @needs_sample
 @pytest.mark.asyncio
-async def test_legacy_adapter_normalizes_client_a(tmp_path, monkeypatch):
-    req = _client_a_request(tmp_path)
+async def test_legacy_adapter_normalizes_client_a(client_a_request, monkeypatch):
+    req = client_a_request
     monkeypatch.setattr(mapping, "create_agent",
                         lambda *a, **k: scripted.ScriptedAgent([scripted.good_map(req.survey)]))
     tools = InMemoryTools(req.manifest)
@@ -96,8 +91,8 @@ async def test_legacy_adapter_normalizes_client_a(tmp_path, monkeypatch):
 
 @needs_sample
 @pytest.mark.asyncio
-async def test_confirmed_map_marks_cases_and_claimants_confirmed(tmp_path, monkeypatch):
-    req = _client_a_request(tmp_path)
+async def test_confirmed_map_marks_cases_and_claimants_confirmed(client_a_request, monkeypatch):
+    req = client_a_request
     m = scripted.good_map(req.survey).model_dump()
     next(e for e in m["employees"] if e["folder"] == "Nick Goh_2")["skip"] = True
     result = legacy.from_map(req, m, confirmed=True)

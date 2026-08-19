@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { explainFailure, Reload } from "../hooks/useAction";
 
 // A generic inline editor: a list of fields with current values, a
 // required reason, and a save callback. Saving records an audited
@@ -9,6 +10,7 @@ export default function FieldEditor({
   notes,
   onSave,
   onCancel,
+  onStale,
   hint,
 }: {
   fields: { name: string; label?: string }[];
@@ -17,6 +19,10 @@ export default function FieldEditor({
   notes?: Record<string, string>;
   onSave: (changed: Record<string, string>, reason: string) => Promise<void>;
   onCancel: () => void;
+  /** Called (and awaited) when the save hits a stale run (409), BEFORE the
+   *  "it has been reloaded; please try again" message is shown — the
+   *  screen's reload, so the retry carries the new revision. */
+  onStale?: Reload;
   hint?: string;
 }) {
   const [values, setValues] = useState<Record<string, string>>({ ...initial });
@@ -34,7 +40,7 @@ export default function FieldEditor({
       const send = changed.length > 0 ? changed : fields;
       await onSave(Object.fromEntries(send.map((f) => [f.name, values[f.name]])), reason);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Correction failed");
+      setError(await explainFailure(e, "Correction failed", onStale));
       setBusy(false);
     }
   }
@@ -56,6 +62,7 @@ export default function FieldEditor({
       ))}
       <div className="actions">
         <input
+          aria-label="Reason for the correction (required)"
           placeholder="Reason (required) — e.g. 'digits misread, read from the receipt'"
           value={reason}
           onChange={(e) => setReason(e.target.value)}

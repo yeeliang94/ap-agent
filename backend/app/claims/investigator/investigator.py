@@ -15,16 +15,18 @@ is discarded to make the run pass, and no claimant is ever confirmed here.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
 
+from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.usage import UsageLimits
 
 from ... import config
 from ...model_layer import create_agent
 from .. import survey as survey_mod
-from ..evidence import Usage, ai_call
+from ..evidence import BudgetExceeded, Usage, ai_call
 from ..tools.binding import bind_tools
 from ..tools.contracts import InvestigationTools
 from . import audit as audit_mod
@@ -40,6 +42,13 @@ ADAPTER = "investigator"
 MAX_ROUNDS = 3
 PROMPT_VERSION = "h5.1"
 TOOLS_VERSION = "h4.1"
+# How often a model round looks at the harness's cancel flag while the
+# agent is running (between model requests a cancel stops the round).
+CANCEL_POLL_SECONDS = 0.25
+
+
+class InvestigationCancelled(Exception):
+    """The harness was cancelled while a model round was running."""
 
 # The harness of every investigation in flight, by run id, so a cancel or
 # a run failure stops its outstanding tool calls (H11).
@@ -139,29 +148,58 @@ async def _investigate(request: InvestigationRequest, tools: InvestigationTools,
     hint, facts = strategies.choose_hint(request.manifest)
     prompt = _prompt(request, hint, facts)
     usage = Usage(cap=request.budget.model_requests)
-    limits = UsageLimits(request_limit=min(config.MAX_AGENT_REQUESTS, max(1, request.budget.model_requests)))
     agent = create_agent("judge", InvestigationProposal, INSTRUCTIONS, temperature=0,
                          tools=bind_tools(tools, python_enabled=config.CLAIMS_PYTHON_SANDBOX))
     feedback = ""
     notes: list[tuple[str, str]] = []
     problems: list[str] = []
+    unverified: set[str] = set()
     proposal: InvestigationProposal | None = None
     rounds = 0
     for round_no in range(1, MAX_ROUNDS + 1):
-        rounds = round_no
+        if _cancelled(tools):
+            notes.append(("WARNING", f"Investigation cancelled before round {round_no}."))
+            problems.append("the investigation was cancelled before it converged")
+            break
         if time.monotonic() - started > request.budget.wall_seconds:
             notes.append(("WARNING", f"Investigation stopped at the wall-time budget after round {round_no - 1}."))
             problems.append("wall-time budget reached before the investigation converged")
             break
-        usage.reserve()
-        result = await ai_call(agent.run(prompt + feedback, usage_limits=limits), "the investigator")
+        rounds = round_no
+        # Each round gets what is LEFT of the investigation's request and
+        # token budgets (never more than one run's own ceiling) — a repair
+        # round cannot start over with the full allowance. A round that
+        # runs out (requests, tokens, time) or is cancelled does not fail
+        # the run: what the last audited round produced is normalized,
+        # with a warning that says so.
+        try:
+            usage.reserve()
+            remaining = max(1, request.budget.model_requests - usage.requests)
+            token_cap = int(getattr(config, "CLAIMS_INVESTIGATOR_TOTAL_TOKENS", 0) or 0)
+            limits = UsageLimits(request_limit=min(config.MAX_AGENT_REQUESTS, remaining),
+                                 total_tokens_limit=max(1, token_cap - usage.tokens) if token_cap > 0 else None)
+            result = await _model_round(agent, prompt + feedback, limits, tools)
+        except InvestigationCancelled:
+            notes.append(("WARNING", f"Investigation cancelled during round {round_no}; the model was stopped."))
+            problems.append("the investigation was cancelled before it converged")
+            break
+        except (TimeoutError, UsageLimitExceeded, BudgetExceeded) as exc:
+            why = ("did not answer in time" if isinstance(exc, TimeoutError) else
+                   "used up its AI request/token budget")
+            notes.append(("WARNING", f"Investigation round {round_no}: the model {why}; stopping with what the last "
+                                     f"audited round produced ({type(exc).__name__})."))
+            problems.append(f"round {round_no} {why} before the investigation converged")
+            break
         usage.add(result)
         proposal = result.output
         try:
-            problems = await audit_mod.audit_proposal(proposal, request, tools)
+            report = await audit_mod.audit_proposal(proposal, request, tools)
+            problems, unverified = list(report.messages), set(report.unverified_claimant_keys)
         except Exception as exc:  # the audit itself must never take the run down
             log.exception("audit failed")
             problems = [f"applying your proposal failed: {type(exc).__name__}"]
+            # nothing was verified: no name of this proposal may become a Claimant
+            unverified = {c.key for c in proposal.cases if (c.claimant_name or c.claimant_identifier).strip()}
         if not problems:
             notes.append(("INFO", f"Investigation confirmed by the audit on round {round_no}."))
             break
@@ -173,10 +211,37 @@ async def _investigate(request: InvestigationRequest, tools: InvestigationTools,
     if proposal is None:
         proposal = InvestigationProposal()
         problems = problems or ["no proposal was produced"]
-    result_ = normalize(proposal, request, tools, problems, hint, rounds, usage)
+    result_ = normalize(proposal, request, tools, problems, hint, rounds, usage, unverified=unverified)
     result_.notes = notes + result_.notes
     result_.tool_executions = list(tools.executions())
     return result_
+
+
+def _cancelled(tools) -> bool:
+    return bool(getattr(tools, "cancelled", False))
+
+
+async def _model_round(agent, prompt: str, limits: UsageLimits, tools):
+    """One agent run, watched: while the model works (several requests and
+    tool calls), the harness's cancel flag is polled; a cancel stops the
+    run between requests instead of letting the model spend on until its
+    tool calls all fail. Re-raises what the run raises."""
+    task = asyncio.ensure_future(ai_call(agent.run(prompt, usage_limits=limits), "the investigator"))
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=CANCEL_POLL_SECONDS)
+            if done:
+                return task.result()
+            if _cancelled(tools):
+                task.cancel()
+                try:
+                    await task
+                except BaseException:  # the cancelled run's own error is not the story
+                    pass
+                raise InvestigationCancelled()
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
 
 
 def _sandbox():
@@ -190,7 +255,10 @@ def _sandbox():
 # ---- proposal → normalized result ---------------------------------------------------
 
 def normalize(proposal: InvestigationProposal, request: InvestigationRequest, tools, problems: list[str],
-              hint: str, rounds: int, usage: Usage | None = None) -> InvestigationResult:
+              hint: str, rounds: int, usage: Usage | None = None, unverified: set[str] | None = None) -> InvestigationResult:
+    """`unverified`: the case keys whose claimant the audit could NOT verify
+    (AuditReport.unverified_claimant_keys) — structured, never parsed out
+    of the prose problems — so those cases get no proposed Claimant."""
     by_id: dict[str, ManifestEntry] = {m.id: m for m in request.manifest}
     proposed_art: dict[str, ArtifactProposal] = {}
     for a in proposal.artifacts:
@@ -209,7 +277,7 @@ def normalize(proposal: InvestigationProposal, request: InvestigationRequest, to
         for aid in arts:
             in_case.setdefault(aid, c.key)
         valid_cases.append(c.model_copy(update={"artifact_ids": arts}))
-    unverifiable = {p.split(":")[0].replace("case ", "") for p in problems if "claimant_" in p and p.startswith("case ")}
+    unverifiable = set(unverified or ())
 
     artifacts: list[SourceArtifact] = []
     for m in request.manifest:

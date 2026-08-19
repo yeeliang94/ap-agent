@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ClaimsRunDetail, getClaimsRun, getClaimsRunEvents } from "../api";
+import { ClaimsRunDetail, cancelClaimsRun, getClaimsRun, getClaimsRunEvents } from "../api";
 import ActivityLog from "../components/ActivityLog";
+import { InlineConfirm } from "../components/Inline";
+import { useAction } from "../hooks/useAction";
 import MapView from "./claims/MapView";
 import GroupView from "./claims/GroupView";
 import VerifyingView from "./claims/VerifyingView";
@@ -19,11 +21,16 @@ const STAGE_LABEL: Record<string, string> = {
 
 type Tab = "map" | "verifying" | "review" | "output" | "activity";
 
+/** The run is still working (the server's IN_PROGRESS_STATUSES): the
+ *  screen polls, and only such a run can be cancelled. */
+const WORKING_STATUSES = ["queued", "surveying", "mapping", "verifying"];
+
 // One claims run: Map & Rules → Verifying → Review → Output, plus Activity.
 export default function ClaimsRunDetailScreen({ runId }: { runId: string }) {
   const [run, setRun] = useState<ClaimsRunDetail | null>(null);
   const [chosenTab, setTab] = useState<Tab | null>(null);
   const [error, setError] = useState("");
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
   // Each poll is numbered; a reply from an older poll that lands after a
   // newer one is dropped, so the screen never steps backwards.
   const seq = useRef(0);
@@ -44,15 +51,36 @@ export default function ClaimsRunDetailScreen({ runId }: { runId: string }) {
   useEffect(() => {
     reload();
   }, [reload]);
+  // Cancelling goes through the shared action hook like every other
+  // mutation: the run is re-read (and the re-read awaited) before the
+  // button is released, and a stale run reloads before it says so.
+  const cancel = useAction(reload, "Could not cancel the run");
 
-  // Poll every 3 s while the system is working (mapping, verifying), so
-  // chips move without a refresh; stop once the run is at rest.
-  const working = !!run && ["queued", "surveying", "mapping", "verifying"].includes(run.status);
+  // Poll while the system is working (mapping, verifying) so the chips
+  // move without a refresh; stop once the run is at rest. A long run backs
+  // off — every 3 s for the first minute (when steps land quickly), every
+  // 5 s after that — so an hour-long batch is not re-read 1200 times.
+  const working = !!run && WORKING_STATUSES.includes(run.status);
   useEffect(() => {
     if (!working) return;
-    const t = setInterval(reload, 3000);
-    return () => clearInterval(t);
+    const startedAt = Date.now();
+    let timer = 0;
+    const tick = () => {
+      reload();
+      timer = window.setTimeout(tick, Date.now() - startedAt > 60_000 ? 5000 : 3000);
+    };
+    timer = window.setTimeout(tick, 3000);
+    return () => clearTimeout(timer);
   }, [working, reload]);
+
+  // Review and Output only exist while the run is `ready`. A re-verify
+  // takes it back to `verifying`: the tab that was chosen is dropped so
+  // the screen falls back to the default for the new status, instead of
+  // leaving an active-but-empty tab behind a disabled button.
+  const status = run?.status;
+  useEffect(() => {
+    if (status && status !== "ready" && (chosenTab === "review" || chosenTab === "output")) setTab(null);
+  }, [status, chosenTab]);
 
   // A failed poll shows a notice above the last good screen; only when
   // nothing has ever loaded does it replace the screen.
@@ -114,6 +142,29 @@ export default function ClaimsRunDetailScreen({ runId }: { runId: string }) {
           <div className="skeleton" aria-hidden />
         </div>
       )}
+      {/* Stopping a run that is still working (H11). It is destructive —
+          the run is marked failed and nothing from it may be used — so it
+          is asked in place, never on the first click. */}
+      {working && (
+        <div className="actions">
+          {confirmingCancel ? (
+            <InlineConfirm
+              question="Stop this run? The workers stop where they are, the run is marked failed, and nothing from it may be used. Starting again means a new run."
+              confirmLabel="Yes — stop this run"
+              busy={!!cancel.busy}
+              onConfirm={async () => {
+                if (await cancel.run(() => cancelClaimsRun(run.id, run.revision))) setConfirmingCancel(false);
+              }}
+              onCancel={() => setConfirmingCancel(false)}
+            />
+          ) : (
+            <button className="btn warn" disabled={!!cancel.busy} onClick={() => setConfirmingCancel(true)}>
+              Stop this run
+            </button>
+          )}
+        </div>
+      )}
+      {cancel.error && <p className="error">{cancel.error}</p>}
       <div className="tabs">
         <button className={tab === "map" ? "tab active" : "tab"} disabled={!mapExists && !caseModel} onClick={() => setTab("map")}
           title={mapExists || caseModel ? "" : "The map is not ready yet"}>
@@ -137,7 +188,7 @@ export default function ClaimsRunDetailScreen({ runId }: { runId: string }) {
       </div>
       {tab === "map" && caseModel && (
         <GroupView
-          key={`${run.status}-${run.revision}`}
+          key={run.status}
           run={run}
           onChanged={reload}
           onConfirmed={() => {
@@ -150,6 +201,7 @@ export default function ClaimsRunDetailScreen({ runId }: { runId: string }) {
         <MapView
           key={run.status}
           run={run}
+          onChanged={reload}
           onConfirmed={() => {
             setTab("verifying");
             reload();

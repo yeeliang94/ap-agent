@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Literal
 
@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import BinaryContent
 
 from ..model_layer import USAGE_LIMITS, create_agent
-from ..pipeline.images import MAX_EDGE, document_to_pngs
+from ..pipeline.images import IMAGE_SUFFIXES, MAX_EDGE, document_page_png, document_to_pngs
 from ..schemas_ai import CURRENCY_PATTERN, DATE_PATTERN
 
 log = logging.getLogger("claims.evidence")
@@ -76,7 +76,9 @@ Position = Literal["left", "middle", "right"]
 class ReceiptRead(BaseModel):
     vendor: str = Field(min_length=1, max_length=120)
     date: str = Field(default="", description="YYYY-MM-DD, or empty if not printed / unreadable")
-    amount: float = Field(gt=0, allow_inf_nan=False, description="the receipt TOTAL")
+    # Money is Decimal end to end (a JSON number or a quoted figure both
+    # arrive as Decimal); it is never carried through a binary float.
+    amount: Decimal = Field(gt=0, allow_inf_nan=False, description="the receipt TOTAL")
     currency: str = Field(pattern=CURRENCY_PATTERN, description="3-letter code; RM means MYR")
     position: Position = Field(description="where on the page: left / middle / right third")
     # field -> note, ONLY for fields that were hard to read
@@ -89,8 +91,8 @@ class TripRead(BaseModel):
     from_: str = Field(default="", max_length=200, alias="from")
     to: str = Field(default="", max_length=200)
     return_trip: bool = Field(description="True when the narrative says 'and back' / return")
-    km_printed: float | None = Field(default=None, ge=0, allow_inf_nan=False,
-                                     description="the km printed on the map; null if it cannot be read")
+    km_printed: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False,
+                                       description="the km printed on the map; null if it cannot be read")
     low_confidence: dict[str, str] = Field(default_factory=dict)
 
     model_config = {"populate_by_name": True}
@@ -130,18 +132,18 @@ _INSTRUCTIONS = (
 # ---- rendering -----------------------------------------------------------------
 
 def render_page(path: Path, page: int = 1, highlight: str = "", full: bool = False) -> bytes:
-    """One page as PNG. page is 1-based; raises IndexError when out of range.
-    highlight shades everything BUT the named third of the page, so a
-    receipt's cited position stands out in the preview."""
+    """One page as PNG. page is 1-based; raises IndexError when out of
+    range and ValueError for a file type that cannot be rendered (the
+    callers map those to 404 / 415). ONLY the requested page is
+    rasterised — a single-page request on a 200-page bundle used to
+    render all 200. highlight shades everything BUT the named third of
+    the page, so a receipt's cited position stands out in the preview."""
     from PIL import Image, ImageDraw
 
     if full:
         img = _render_full(path, page)
     else:
-        pngs = document_to_pngs(path)
-        if page < 1 or page > len(pngs):
-            raise IndexError(page)
-        img = Image.open(io.BytesIO(pngs[page - 1])).convert("RGB")
+        img = Image.open(io.BytesIO(document_page_png(path, page))).convert("RGB")
     if highlight in ("left", "middle", "right"):
         w, h = img.size
         thirds = {"left": (0, w // 3), "middle": (w // 3, 2 * w // 3), "right": (2 * w // 3, w)}
@@ -158,9 +160,13 @@ def render_page(path: Path, page: int = 1, highlight: str = "", full: bool = Fal
 
 
 def _render_full(path: Path, page: int):
+    """The requested page ALONE at FULL_DPI — same contract as
+    render_page: IndexError out of range, ValueError for a type that
+    cannot be rendered."""
     from PIL import Image
 
-    if path.suffix.lower() == ".pdf":
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
         import pymupdf
 
         with pymupdf.open(path) as pdf:
@@ -168,10 +174,12 @@ def _render_full(path: Path, page: int):
                 raise IndexError(page)
             pix = pdf[page - 1].get_pixmap(dpi=FULL_DPI)
             img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
-    else:
+    elif suffix in IMAGE_SUFFIXES:
         if page != 1:
             raise IndexError(page)
         img = Image.open(path).convert("RGB")
+    else:
+        raise ValueError(f"Unsupported document type: {path.name}")
     if max(img.size) > FULL_MAX_EDGE:
         img.thumbnail((FULL_MAX_EDGE, FULL_MAX_EDGE))
     return img
@@ -341,13 +349,23 @@ async def _read_map_bands(agent, path: Path, page_no: int, usage: Usage) -> Page
                 trips.append(t)
             elif same.km_printed is None and t.km_printed is not None:
                 trips[trips.index(same)] = t
-            elif t.km_printed is not None and same.km_printed is not None and abs(t.km_printed - same.km_printed) > 0.05:
+            elif t.km_printed is not None and same.km_printed is not None and abs(t.km_printed - same.km_printed) > Decimal("0.05"):
                 same.low_confidence["km_printed"] = f"two bands read {same.km_printed} and {t.km_printed}"
     return PageRead(kind="map", trips=trips, why="full-resolution bands")
 
 
-def _money_text(value: float) -> str:
-    return str(Decimal(repr(value)).quantize(Decimal("0.01")))
+def _money_text(value) -> str:
+    """A read amount as a cent string. Half a cent rounds UP (the way a
+    till prints it), never to the nearest even cent."""
+    return str(_dec(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _dec(value) -> Decimal:
+    return value if isinstance(value, Decimal) else Decimal(repr(value))
+
+
+def _km_text(value) -> str:
+    return str(_dec(value).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
 
 
 def _merge_receipt_reads(a: PageRead, b: PageRead) -> tuple[list[dict], list[str]]:
@@ -381,19 +399,19 @@ def _merge_receipt_reads(a: PageRead, b: PageRead) -> tuple[list[dict], list[str
         out.append({"vendor": r.vendor, "date": r.date if _iso(r.date) else "",
                     "amount": _money_text(r.amount), "currency": r.currency,
                     "position": r.position, "confidence": conf, **alt})
-    if b.kind == "receipts" and len(b.receipts) > len(a.receipts):
+    # Whatever the second read saw and the first did not is kept — two
+    # receipts can share a position, so the leftovers of a position that
+    # already paired are extra receipts, not duplicates of one.
+    extras = [r for pos in list(by_pos_b) for r in by_pos_b[pos]]
+    if b.kind == "receipts" and extras:
         notes.append(f"second read saw {len(b.receipts)} receipts, first saw {len(a.receipts)} — "
                      "the extra one(s) were added as low-confidence")
-        seen = {r["position"] for r in out}
-        for pos, extra in by_pos_b.items():
-            for r in extra:
-                if pos in seen and any(o["position"] == pos for o in out):
-                    continue
-                out.append({"vendor": r.vendor, "date": r.date if _iso(r.date) else "",
-                            "amount": _money_text(r.amount), "currency": r.currency,
-                            "position": r.position,
-                            "confidence": {**r.low_confidence,
-                                           "receipt": "only one of two reads saw this receipt"}})
+        for r in extras:
+            out.append({"vendor": r.vendor, "date": r.date if _iso(r.date) else "",
+                        "amount": _money_text(r.amount), "currency": r.currency,
+                        "position": r.position,
+                        "confidence": {**r.low_confidence,
+                                       "receipt": "only one of two reads saw this receipt"}})
     return out, notes
 
 
@@ -412,7 +430,7 @@ def _merge_trip_reads(a: PageRead, b: PageRead) -> tuple[list[dict], list[str]]:
         if twin is not None:
             b_trips = [x for x in b_trips if x is not twin]
             if twin.km_printed is not None:
-                if km is not None and abs(twin.km_printed - km) > 0.05:
+                if km is not None and abs(twin.km_printed - km) > Decimal("0.05"):
                     # a resolved disagreement (the full-resolution read wins by
                     # design) — noted, but not a doubt about the figure used
                     conf["km_normal_read"] = (f"normal read {km}, full-resolution read {twin.km_printed} — "
@@ -423,7 +441,7 @@ def _merge_trip_reads(a: PageRead, b: PageRead) -> tuple[list[dict], list[str]]:
             conf.setdefault("km_printed", "km unreadable on the map")
         out.append({"date": t.date if _iso(t.date) else "", "purpose": t.purpose, "from": t.from_,
                     "to": t.to, "return_trip": bool(t.return_trip),
-                    "km_printed": None if km is None else str(Decimal(repr(km)).quantize(Decimal("0.1"))),
+                    "km_printed": None if km is None else _km_text(km),
                     "confidence": conf})
     return out, notes
 

@@ -287,6 +287,11 @@ def test_a_missing_reference_file_is_a_warning_not_silence(db):
 
 # --- abandoning a run that cannot succeed -----------------------------------
 
+async def _listing_ready(*_args, **_kwargs):
+    """Keep sort-stage tests off the unrelated listing-model path."""
+    return []
+
+
 def test_a_run_whose_every_document_fails_sorting_stops_there(db, monkeypatch):
     """The 401 case, end to end.
 
@@ -306,6 +311,7 @@ def test_a_run_whose_every_document_fails_sorting_stops_there(db, monkeypatch):
     monkeypatch.setattr(runner.reference, "snapshot_references",
                         lambda *a, **k: {"payment_listing": "listing.xlsx",
                                          "policy_sheet": None, "bank_template": None})
+    monkeypatch.setattr(runner.reference, "load_listing_notes", _listing_ready)
     monkeypatch.setattr(runner, "document_to_pngs", lambda *a, **k: [b"png"])
 
     async def always_401(*a, **k):
@@ -347,6 +353,7 @@ def test_a_run_where_only_some_documents_fail_still_finishes(db, monkeypatch):
     monkeypatch.setattr(runner.reference, "snapshot_references",
                         lambda *a, **k: {"payment_listing": "listing.xlsx",
                                          "policy_sheet": None, "bank_template": None})
+    monkeypatch.setattr(runner.reference, "load_listing_notes", _listing_ready)
     monkeypatch.setattr(runner, "document_to_pngs", lambda *a, **k: [b"png"])
 
     async def fails_only_the_first(path, png):

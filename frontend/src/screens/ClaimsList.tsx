@@ -40,30 +40,62 @@ function chipClass(r: ClaimsRunSummary): string {
   return "chip wait";
 }
 
+/** A run the server is still working on — the only reason to keep asking. */
+const WORKING_STATUSES = ["queued", "surveying", "mapping", "verifying"];
+
 // The Claims tab: start a new claims run, and see past batches.
 export default function ClaimsList({ onOpen }: { onOpen: (id: string) => void }) {
   const [runs, setRuns] = useState<ClaimsRunSummary[] | null>(null);
   const [error, setError] = useState("");
+  const [polling, setPolling] = useState(true);
+  // `refresh` re-arms the loop: on mount, and when the reviewer asks for
+  // it after the list has come to rest.
+  const [refresh, setRefresh] = useState(0);
 
-  // Poll every 3 s so status chips move while a run is working.
+  // Poll every 3 s WHILE a run is working, and stop once every run is at
+  // rest (map_ready / ready / failed change only when someone acts, and
+  // acting happens on the run's own screen). A list left open overnight
+  // then costs nothing instead of 28,800 requests.
   useEffect(() => {
     let alive = true;
-    const tick = () =>
+    let timer = 0;
+    const tick = () => {
       listClaimsRuns()
-        .then((r) => alive && setRuns(r))
-        .catch(() => alive && setError("Backend not reachable"));
+        .then((rs) => {
+          if (!alive) return;
+          setRuns(rs);
+          setError("");
+          const working = rs.some((r) => WORKING_STATUSES.includes(r.status));
+          setPolling(working);
+          if (working) timer = window.setTimeout(tick, 3000);
+        })
+        .catch(() => {
+          if (!alive) return;
+          setError("Backend not reachable");
+          // Keep trying, more slowly, so the list heals by itself.
+          timer = window.setTimeout(tick, 5000);
+        });
+    };
+    setPolling(true);
     tick();
-    const t = setInterval(tick, 3000);
     return () => {
       alive = false;
-      clearInterval(t);
+      clearTimeout(timer);
     };
-  }, []);
+  }, [refresh]);
 
   return (
     <section>
       <NewClaimsRunCard onStarted={onOpen} />
       {error && <p className="error">{error}</p>}
+      {runs && !polling && !error && (
+        <p className="sub">
+          Nothing is running — this list is no longer refreshing itself.{" "}
+          <button className="btn" style={{ padding: "1px 8px", fontSize: 12 }} onClick={() => setRefresh((n) => n + 1)}>
+            Refresh
+          </button>
+        </p>
+      )}
       {runs && runs.length === 0 && (
         <p className="sub">No claims runs yet — start one above.</p>
       )}

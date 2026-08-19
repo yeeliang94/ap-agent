@@ -100,6 +100,7 @@ class _Agent:
 
     async def run(self, prompt, **kw):
         self.prompts.append(prompt)
+        self.limits = getattr(self, "limits", []) + [kw.get("usage_limits")]
 
         class R:
             output = self._outputs.pop(0)
@@ -155,7 +156,7 @@ async def test_audit_sends_problems_back_and_a_corrected_proposal_passes(dump, m
 @needs_sample
 @pytest.mark.asyncio
 async def test_what_never_converges_stays_visible_never_dropped(dump, monkeypatch):
-    req = dump
+    req = dump.model_copy(update={"budget": C.Budget(model_requests=5)})
     bad = _good_proposal(req)
     bad.artifacts = [a for a in bad.artifacts if not a.artifact_id == _by_name(req, "readme.txt").id]  # never placed
     bad.cases[0].claimant_name = "Somebody Else"
@@ -165,6 +166,9 @@ async def test_what_never_converges_stays_visible_never_dropped(dump, monkeypatc
     result = await inv.investigate(req, ToolHarness(req.workspace, req.manifest))
     assert len(agent.prompts) == inv.MAX_ROUNDS and result.plan.rounds == 3
     assert any("Somebody Else" in w for w in result.warnings)
+    # Each repair round is given what is LEFT of the investigation's request
+    # budget, never the full allowance again (one scripted request per round).
+    assert [l.request_limit for l in agent.limits] == [5, 4, 3]
     stray = next(a for a in result.artifacts if a.path == "readme.txt")
     assert stray.disposition == "unresolved" and stray.role_reason == "not placed by the investigation"
     aeg = next(c for c in result.cases if "Aegene" in c.label)
@@ -308,3 +312,172 @@ async def test_client_a_through_the_agentic_path_matches_the_baseline(db, monkey
     assert len(nr) == 1 and "RM 10.00 more" in nr[0]["reason"]
     assert aeg["report_total"] == "258.70"
     assert next(a for a in got["artifacts"] if a["path"].endswith("notes.txt"))["disposition"] == "irrelevant"
+
+
+# ---- review 2026-08-19: structured audit, cancel, degraded rounds ------------------
+
+def _small_workspace(tmp_path):
+    """Three one-sheet workbooks; only the first carries a name (B1)."""
+    from openpyxl import Workbook
+
+    ws = tmp_path / "ws"
+    files = ws / "files"
+    files.mkdir(parents=True)
+    for n, name in ((1, "Aegene Ong"), (2, ""), (3, "")):
+        wb = Workbook()
+        sh = wb.active
+        sh.title = "S"
+        sh["A1"] = "Name:"
+        if name:
+            sh["B1"] = name
+        sh["A3"] = "2026-07-02"
+        sh["C3"] = 24
+        sh["C4"] = 24
+        wb.save(files / f"report{n}.xlsx")
+    entries = [{"path": p.name, "size": p.stat().st_size} for p in sorted(files.iterdir())]
+    manifest = manifest_mod.build_manifest(files, entries)
+    return ws, manifest
+
+
+def _proposal_for(manifest, keyed_names: list[tuple[str, str]]) -> InvestigationProposal:
+    arts = [ArtifactProposal(artifact_id=m.id, role="report", disposition="used", reason="a report") for m in manifest]
+    cases = [CaseProposal(key=key, label=key, claimant_name=name, claimant_basis="explicit_name",
+                          identity_citations=[CiteProposal(artifact_id=m.id, sheet="S", cell="B1", quote=name)],
+                          grouping_basis="explicit_name", artifact_ids=[m.id], no_summary=True, reason="x")
+             for (key, name), m in zip(keyed_names, manifest)]
+    return InvestigationProposal(artifacts=arts, cases=cases)
+
+
+@pytest.mark.asyncio
+async def test_unverified_names_never_become_claimants_whatever_the_case_key(tmp_path, monkeypatch):
+    """Review #7: the audit's verdict on a claimant is STRUCTURED (case key
+    + field), never parsed back out of prose — so a model-chosen key that
+    contains ':' or starts with 'case ' cannot smuggle an unverified name
+    into a proposed Claimant. The one verified name is still proposed."""
+    ws, manifest = _small_workspace(tmp_path)
+    req = C.InvestigationRequest(run_id="keys", workspace=str(ws), manifest=manifest)
+    prop = _proposal_for(manifest, [("c:2", "Aegene Ong"), ("case 1", "Somebody Else"), ("case one: x", "Nobody Here")])
+    agent = _Agent([prop] * inv.MAX_ROUNDS)
+    monkeypatch.setattr(inv, "create_agent", lambda *a, **k: agent)
+    tools = ToolHarness(ws, manifest)
+    result = await inv.investigate(req, tools)
+    by_label = {c.label: c for c in result.cases}
+    assert by_label["c:2"].claimant.state == "proposed" and by_label["c:2"].claimant.name == "Aegene Ong"
+    for key in ("case 1", "case one: x"):
+        c = by_label[key]
+        assert c.claimant.state == "unknown" and c.claimant.name == "" and "could not verify" in c.claimant.basis, key
+    assert any("Somebody Else" in w for w in result.warnings) and any("Nobody Here" in w for w in result.warnings)
+    # the audit's own calls are marked and do not spend the model's tool budget
+    audit_calls = [t for t in result.tool_executions if t.origin == "audit"]
+    assert audit_calls and all(t.origin == "audit" for t in result.tool_executions)
+    assert tools.budget_remaining()["tool_calls"] == req.budget.tool_calls
+
+
+@pytest.mark.asyncio
+async def test_audit_report_is_structured(tmp_path):
+    from app.claims.investigator import audit as audit_mod
+
+    ws, manifest = _small_workspace(tmp_path)
+    req = C.InvestigationRequest(run_id="keys", workspace=str(ws), manifest=manifest)
+    prop = _proposal_for(manifest, [("case 1", "Somebody Else"), ("c:1", "Aegene Ong"), ("k3", "")])
+    # the verified name sits in report1 (manifest[0]) — point case "c:1" at it instead
+    prop.cases[1].artifact_ids = [manifest[0].id]
+    prop.cases[1].identity_citations = [CiteProposal(artifact_id=manifest[0].id, sheet="S", cell="B1", quote="Aegene Ong")]
+    prop.cases[0].artifact_ids = [manifest[1].id]
+    prop.cases[0].identity_citations = [CiteProposal(artifact_id=manifest[1].id, sheet="S", cell="B1", quote="x")]
+    report = await audit_mod.audit_proposal(prop, req, ToolHarness(ws, manifest))
+    assert report.unverified_claimant_keys == {"case 1"}
+    assert [p.field for p in report.problems if p.case_key == "case 1"] == ["claimant_name"]
+    assert any("Somebody Else" in m for m in report.messages)
+    # an audit-scoped search is restricted to the case's own files
+    tools = ToolHarness(ws, manifest)
+    with tools.audit_scope():
+        r = await tools.search_artifacts("Aegene", artifact_ids=[manifest[1].id])
+    assert r.ok and r.data["hits"] == []
+    r = await tools.search_artifacts("Aegene")
+    assert r.ok and [h["artifact_id"] for h in r.data["hits"]] == [manifest[0].id]
+    assert [t.origin for t in tools.executions()] == ["audit", "model"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_stops_the_model_loop(tmp_path, monkeypatch):
+    """Review #8: a cancel reaches the investigator's loop — a running
+    round is stopped between model requests, no further round starts, and
+    what exists is normalized with a warning (never an exception)."""
+    import asyncio
+
+    ws, manifest = _small_workspace(tmp_path)
+    req = C.InvestigationRequest(run_id="cancel", workspace=str(ws), manifest=manifest)
+    tools = ToolHarness(ws, manifest)
+
+    class Slow:
+        prompts: list = []
+
+        async def run(self, prompt, **kw):
+            self.prompts.append(prompt)
+            await asyncio.sleep(30)  # a model that would keep working
+
+    monkeypatch.setattr(inv, "create_agent", lambda *a, **k: Slow())
+    monkeypatch.setattr(inv, "CANCEL_POLL_SECONDS", 0.05)
+    task = asyncio.create_task(inv.investigate(req, tools))
+    await asyncio.sleep(0.2)
+    assert inv.cancel_run("cancel")
+    result = await asyncio.wait_for(task, timeout=5)
+    assert len(Slow.prompts) == 1
+    assert any("cancelled" in n[1] for n in result.notes) and any("cancelled" in w for w in result.warnings)
+    assert all(a.disposition == "unresolved" for a in result.artifacts) and result.cases == []
+
+    # a cancel that lands while round 1 is being audited: no round 2 starts
+    prop = _proposal_for(manifest, [("k1", "Somebody Else")])
+
+    class CancelsItself(_Agent):
+        async def run(self, prompt, **kw):
+            tools2.cancel()
+            return await super().run(prompt, **kw)
+
+    tools2 = ToolHarness(ws, manifest)
+    agent = CancelsItself([prop] * inv.MAX_ROUNDS)
+    monkeypatch.setattr(inv, "create_agent", lambda *a, **k: agent)
+    result = await inv.investigate(req, tools2)
+    assert len(agent.prompts) == 1 and result.plan.rounds == 1
+    assert any("cancelled" in w for w in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_a_round_that_runs_out_degrades_to_normalize(tmp_path, monkeypatch):
+    """A timeout / usage-limit / budget error inside a repair round does not
+    fail the run: the last audited proposal is normalized with a warning."""
+    from pydantic_ai.exceptions import UsageLimitExceeded
+
+    ws, manifest = _small_workspace(tmp_path)
+    req = C.InvestigationRequest(run_id="limits", workspace=str(ws), manifest=manifest)
+    prop = _proposal_for(manifest, [("k1", "Aegene Ong"), ("k2", "Somebody Else")])
+
+    class Flaky(_Agent):
+        async def run(self, prompt, **kw):
+            if len(self.prompts) == 1:
+                self.prompts.append(prompt)
+                self.limits = self.limits + [kw.get("usage_limits")]
+                raise UsageLimitExceeded("the next request would exceed the total_tokens_limit")
+            return await super().run(prompt, **kw)
+
+    agent = Flaky([prop])
+    monkeypatch.setattr(inv, "create_agent", lambda *a, **k: agent)
+    monkeypatch.setattr(config, "CLAIMS_INVESTIGATOR_TOTAL_TOKENS", 5000)
+    result = await inv.investigate(req, ToolHarness(ws, manifest))
+    assert len(agent.prompts) == 2 and result.plan.rounds == 2
+    assert agent.limits[0].total_tokens_limit == 5000 and agent.limits[1].total_tokens_limit == 4990
+    assert any("token budget" in n[1] or "request/token" in n[1] for n in result.notes)
+    assert any("before the investigation converged" in w for w in result.warnings)
+    by_label = {c.label: c for c in result.cases}
+    assert by_label["k1"].claimant.state == "proposed" and by_label["k2"].claimant.state == "unknown"
+
+    class TimesOut(_Agent):
+        async def run(self, prompt, **kw):
+            self.prompts.append(prompt)
+            raise TimeoutError("the investigator did not answer within 180s")
+
+    agent = TimesOut([])
+    monkeypatch.setattr(inv, "create_agent", lambda *a, **k: agent)
+    result = await inv.investigate(req, ToolHarness(ws, manifest))
+    assert len(agent.prompts) == 1 and result.cases == [] and any("did not answer" in n[1] for n in result.notes)

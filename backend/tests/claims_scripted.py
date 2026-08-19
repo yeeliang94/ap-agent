@@ -27,11 +27,22 @@ from app.claims import evidence as evidence_mod
 from app.claims import listing as listing_mod
 from app.claims import mapping, report_reader
 from app.claims import source as batch_source
+from app.claims import survey as survey_mod
 from app.claims.mapping import ClaimMap, FileRole, FolderMap
 from app.claims.report_reader import KMColumns, KMReading, ReportColumns, ReportReading
 
 GEN = Path(__file__).resolve().parents[2] / "samples" / "generated" / "claims"
 LISTING = Path(__file__).resolve().parents[2] / "samples" / "generated" / "Summary of Invoices JUL26.xlsx"
+
+# The scripted end-to-end runs assert that every document is surveyed and
+# that thumbnail parts reach the mapping prompt.  They do not inspect image
+# rendering itself; test_claims_runs covers that seam with the real sample.
+# Avoid rasterising the same 35 first pages in every control/gate test.
+_ONE_PIXEL_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDAT\x08\xd7c\xf8\xcf\xc0\x00\x00"
+    b"\x03\x01\x01\x00\x18\xdd\x8d\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+)
 
 
 def truth() -> dict:
@@ -129,6 +140,10 @@ def install(monkeypatch, survey_of, t: dict | None = None) -> dict:
     Returns a dict of the scripted agents/hooks for assertions."""
     t = t or truth()
     holder: dict = {"map_prompts": []}
+
+    # The map is scripted from ground truth, so decoding every PDF into an
+    # otherwise-ignored thumbnail only makes repeated whole-run tests slow.
+    monkeypatch.setattr(survey_mod, "thumbnail", lambda _path: _ONE_PIXEL_PNG)
 
     class MapAgent:
         async def run(self, prompt, **kw):

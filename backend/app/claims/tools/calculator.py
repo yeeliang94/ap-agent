@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import ast
 import re
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Decimal, DecimalException, InvalidOperation, localcontext
 
 from .contracts import MAX_CALC_OPS
 
@@ -34,13 +34,24 @@ def calculate(expression: str, places: int | None = None) -> Decimal:
     counter = {"ops": 0}
     with localcontext() as ctx:
         ctx.prec = 34
-        value = _eval(tree.body, counter)
-        if not isinstance(value, Decimal):
-            raise CalculationError("the expression is not a number")
-        if not value.is_finite():
-            raise CalculationError("the result is not finite")
-        if places is not None:
-            value = value.quantize(Decimal(1).scaleb(-int(places)))
+        # Decimal signals its own failures (Overflow on 1e999999 * 1e999999,
+        # Underflow, InvalidOperation on quantizing a huge value) as
+        # DecimalException. They are BAD INPUT — the model wrote an
+        # expression the arithmetic cannot answer — not a broken tool, so
+        # they become CalculationError (BAD_INPUT) instead of reaching the
+        # harness's catch-all as TOOL_FAILED.
+        try:
+            value = _eval(tree.body, counter)
+            if not isinstance(value, Decimal):
+                raise CalculationError("the expression is not a number")
+            if not value.is_finite():
+                raise CalculationError("the result is not finite")
+            if places is not None:
+                value = value.quantize(Decimal(1).scaleb(-int(places)))
+        except CalculationError:
+            raise
+        except DecimalException as exc:
+            raise CalculationError(f"the arithmetic does not have an answer: {type(exc).__name__}") from exc
     return value
 
 

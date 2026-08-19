@@ -6,6 +6,7 @@ system does is in the run diary (RunEvent, via telemetry).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -22,6 +23,11 @@ from .. import config
 from . import cases as cases_mod
 from . import profile as profile_mod
 from . import runner
+from .review_gate import (bump_revision as _bump_revision, output_blockers, outputs_if_unlocked,
+                          pending_retry as _pending_retry, set_disposition as _set_disposition,
+                          store_outputs)
+from . import schemas as S
+from .investigator.contracts import IGNORABLE_ROLES, REVIEWER_DISPOSITIONS
 from .models import (ClaimCase, ClaimEmployee, ClaimEvidence, ClaimEvidenceAssignment, ClaimFlag,
                      ClaimInvestigation, ClaimRow, ClaimSourceArtifact, ClaimToolExecution, ClaimsRun)
 
@@ -37,8 +43,9 @@ def _local_mode() -> bool:
 
 
 async def _read_upload(upload: UploadFile | None, max_mb: int, what: str) -> bytes:
-    """The upload's bytes, read in chunks and refused as soon as it passes
-    the limit — never the whole body into memory first."""
+    """The upload's bytes, read a megabyte at a time and refused the moment
+    it passes the limit, so at most `max_mb` is ever held — the body is
+    never taken in whole first and only then measured."""
     if upload is None or not upload.filename:
         return b""
     limit = max_mb * 1024 * 1024
@@ -53,6 +60,29 @@ async def _read_upload(upload: UploadFile | None, max_mb: int, what: str) -> byt
             raise HTTPException(413, f"{what} is over the {max_mb} MB limit.")
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _local_ingestion_path(value: str, kind: str) -> bool:
+    """Is `value` a filesystem path this server may ingest from?
+
+    A path on this machine stands in for a SharePoint link only in local
+    mode AND only under the one tree an operator named
+    (CLAIMS_LOCAL_ROOT). Without that root any folder the process can read
+    could be copied into a run workspace and put on screen by anyone who
+    can reach the API, so the answer is a plain no and the zip upload
+    stays the local way in."""
+    if not _local_mode():
+        return False
+    root = config.local_ingestion_root()
+    if root is None:
+        return False
+    try:
+        target = Path(value).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    if target != root and root not in target.parents:
+        return False
+    return target.is_dir() if kind == "dir" else target.is_file()
 
 
 @router.post("")
@@ -88,14 +118,12 @@ async def create_claims_run(
         raise HTTPException(400, "Give the batch folder link, or upload a zip of the folder.")
     if zip_bytes and folder_url:
         raise HTTPException(400, "Give either the folder link or a zip, not both.")
-    if folder_url and not folder_url.startswith("https://") and not (
-            _local_mode() and Path(folder_url).expanduser().is_dir()):
+    if folder_url and not folder_url.startswith("https://") and not _local_ingestion_path(folder_url, "dir"):
         raise HTTPException(400, "The folder link must start with https:// — copy it from "
                                  "the browser's address bar."
-                                 + (" (In local mode a folder path on this machine also works.)"
+                                 + (" (In local mode a folder path under CLAIMS_LOCAL_ROOT also works.)"
                                     if _local_mode() else ""))
-    if listing_url and not listing_url.startswith("https://") and not (
-            _local_mode() and Path(listing_url).expanduser().is_file()):
+    if listing_url and not listing_url.startswith("https://") and not _local_ingestion_path(listing_url, "file"):
         raise HTTPException(400, "The listing link must start with https://.")
     if listing_bytes and listing_url:
         raise HTTPException(400, "Give either the listing link or a listing file, not both.")
@@ -103,6 +131,21 @@ async def create_claims_run(
         raise HTTPException(400, "The listing must be an Excel workbook (.xlsx).")
 
     client = settings_store.get_setting("client_name")
+    # Creating the run is a workbook-sized file write plus several
+    # synchronous database round trips. This handler is async — it has to
+    # be, to read the upload — so that work goes to a thread instead of
+    # stalling the one event loop every other request and every background
+    # stage shares.
+    run_id = await asyncio.to_thread(_store_new_run, client, folder_url, listing_url, received_date,
+                                     instructions, zip_bytes, listing_bytes)
+    runner.start_background(runner.process_run(run_id))
+    return {"run_id": run_id}
+
+
+def _store_new_run(client: str, folder_url: str, listing_url: str, received_date: str,
+                   instructions: str, zip_bytes: bytes, listing_bytes: bytes) -> str:
+    """The blocking half of starting a run: the row, the workspace and the
+    uploaded bytes. Runs in a worker thread (see create_claims_run)."""
     db = SessionLocal()
     try:
         run = ClaimsRun(client=client, folder_url=folder_url, listing_url=listing_url,
@@ -122,8 +165,7 @@ async def create_claims_run(
                                  + f"; received date {received_date}"
                                  + (f"; instructions: {instructions[:200]}" if instructions else "")))
         db.commit()
-        runner.start_background(runner.process_run(run.id))
-        return {"run_id": run.id}
+        return run.id
     finally:
         db.close()
 
@@ -151,6 +193,10 @@ def get_claims_run(run_id: str) -> dict:
         rows = db.query(ClaimRow).filter(ClaimRow.run_id == run_id).all()
         evidence = db.query(ClaimEvidence).filter(ClaimEvidence.run_id == run_id).all()
         open_flags = [f for f in flags if f.status == "open"]
+        # Computed ONCE and handed to both fields: the gate is two passes
+        # over the run's cases and artifacts, and the screen polls this
+        # route every three seconds.
+        blockers = output_blockers(db, run, open_flags)
         return {
             **_summary(run, _tallies(db, [run_id]).get(run_id, {})),
             "folder_url": run.folder_url, "listing_url": run.listing_url,
@@ -167,18 +213,20 @@ def get_claims_run(run_id: str) -> dict:
             # The case model (H2): cases, artifacts, assignments and the
             # investigation record. Hidden while CLAIMS_CASE_MODEL is off
             # (the employee fields above stay authoritative for the UI).
-            **(_case_model_payload(db, run_id) if config.CLAIMS_CASE_MODEL else {}),
+            **(_case_model_payload(db, run_id, evidence) if config.CLAIMS_CASE_MODEL else {}),
             # The human gate, enforced server-side: no output leaves while
             # any flag is undecided. Built fresh from the reviewed state
-            # (code only, Decimal) and kept on the run for the record.
-            "outputs": _outputs_if_unlocked(db, run, open_flags),
-            "output_blockers": output_blockers(db, run, open_flags),
+            # (code only, Decimal) — and NOT stored: a read does not write.
+            # The copy kept on the run is refreshed where the state changes
+            # (every review action, and the end of verification).
+            "outputs": outputs_if_unlocked(db, run, blockers),
+            "output_blockers": blockers,
         }
     finally:
         db.close()
 
 
-def _case_model_payload(db, run_id: str) -> dict:
+def _case_model_payload(db, run_id: str, evidence: list) -> dict:
     cases = db.query(ClaimCase).filter(ClaimCase.run_id == run_id).order_by(ClaimCase.label).all()
     artifacts = db.query(ClaimSourceArtifact).filter(ClaimSourceArtifact.run_id == run_id) \
         .order_by(ClaimSourceArtifact.path).all()
@@ -207,7 +255,7 @@ def _case_model_payload(db, run_id: str) -> dict:
             # Evidence Items (the normalized name): the worker's page inventory
             # keyed by artifact, for callers that speak the new contract.
             "evidence_items": [_evidence_item_dict(e, {a.path: a.artifact_id for a in artifacts})
-                               for e in db.query(ClaimEvidence).filter(ClaimEvidence.run_id == run_id).all()],
+                               for e in evidence],
             "assignments": [cases_mod.assignment_dict(a) for a in assignments],
             "investigation": cases_mod.investigation_dict(inv),
             "shadow_investigation": cases_mod.investigation_dict(shadow),
@@ -215,44 +263,6 @@ def _case_model_payload(db, run_id: str) -> dict:
             "artifact_counts": {"total": len(artifacts),
                                 "unresolved": sum(1 for a in artifacts if a.disposition == "unresolved"),
                                 "needs_review": sum(1 for a in artifacts if a.needs_confirmation)}}
-
-
-def output_blockers(db, run: ClaimsRun, open_flags: list) -> list[str]:
-    """Universal control 11 (H9), server-side: what keeps the Payment
-    Listing locked. Named, so the screen can show it, and enforced here
-    regardless of what a screen asks for."""
-    why: list[str] = []
-    if run.status != "ready":
-        why.append(f"the run is {run.status}, not ready")
-    if open_flags:
-        codes: dict[str, int] = {}
-        for f in open_flags:
-            codes[f.code] = codes.get(f.code, 0) + 1
-        why.append("open flags: " + ", ".join(f"{c} ×{n}" for c, n in sorted(codes.items())))
-    for c in db.query(ClaimCase).filter(ClaimCase.run_id == run.id):
-        if c.state != "excluded" and c.status == "verified" and c.claimant_state != "confirmed":
-            why.append(f"case {c.label}: claimant {c.claimant_state} — set the claimant on the case")
-    for a in db.query(ClaimSourceArtifact).filter(ClaimSourceArtifact.run_id == run.id,
-                                                  ClaimSourceArtifact.disposition == "unresolved"):
-        if not any(f.code == "ARTIFACT_UNRESOLVED" and f.artifact_id == a.artifact_id for f in open_flags):
-            why.append(f"{a.path}: no disposition")
-    return why
-
-
-def _outputs_if_unlocked(db, run: ClaimsRun, open_flags: list) -> dict:
-    from . import listing as listing_mod
-
-    if output_blockers(db, run, open_flags):
-        return {}
-    outputs = listing_mod.build_outputs(db, run)
-    if outputs != run.outputs:
-        run.outputs = outputs
-        db.commit()
-        if not outputs["totals"]["match"]:
-            telemetry.record(db, run.id, "output", telemetry.WARNING, "RECONCILIATION_MISMATCH",
-                             f"Emitted total {outputs['totals']['total_myr']} differs from the source "
-                             f"total {outputs['totals']['source_total']} by {outputs['totals']['difference']}.")
-    return outputs
 
 
 @router.get("/{run_id}/replay")
@@ -275,7 +285,7 @@ def get_replay_bundle(run_id: str, verify: bool = False) -> dict:
 
 
 @router.post("/{run_id}/cancel")
-def cancel_claims_run(run_id: str, body: dict | None = None) -> dict:
+def cancel_claims_run(run_id: str, body: S.RevisionBody | None = None) -> dict:
     """Stop a run that is still working (H11): outstanding tool calls are
     cancelled, the workers stop at their next step, and the run is marked
     failed with the reason — nothing partial becomes 'ready'. A resting
@@ -290,10 +300,10 @@ def cancel_claims_run(run_id: str, body: dict | None = None) -> dict:
             raise HTTPException(404, "No such claims run.")
         if run.status not in IN_PROGRESS_STATUSES:
             raise HTTPException(400, f"Only a run that is still working can be cancelled (this one is {run.status}).")
-        _revision_check(run, body or {})
+        _revision_check(db, run, body or {}, required=False)
         cancelled_tools = agentic.cancel_run(run_id)
         run.status, run.error = "failed", "cancelled by the reviewer"
-        cases_mod.bump_revision(run)
+        _bump_revision(run)
         db.add(AuditEvent(run_id=run_id, actor="reviewer", action="run_cancelled",
                           detail="cancelled while " + (run.progress or {}).get("what", "working")))
         db.commit()
@@ -334,7 +344,7 @@ def get_claims_run_audit(run_id: str) -> list[dict]:
 
 
 @router.post("/{run_id}/confirm-map")
-async def confirm_map(run_id: str, body: dict) -> dict:
+async def confirm_map(run_id: str, body: S.ConfirmMapBody) -> dict:
     """Save the reviewer's (possibly corrected) map, audit what changed,
     remember it as the client's last confirmed map, start verification.
 
@@ -343,10 +353,8 @@ async def confirm_map(run_id: str, body: dict) -> dict:
     """
     from . import mapping
 
-    new_map = body.get("map")
-    if not isinstance(new_map, dict) or not isinstance(new_map.get("employees"), list):
-        raise HTTPException(400, "map must hold an 'employees' list.")
-    remember = body.get("remember") or []
+    new_map = body.map.model_dump()
+    remember = body.remember
     db = SessionLocal()
     try:
         run = db.get(ClaimsRun, run_id)
@@ -355,7 +363,7 @@ async def confirm_map(run_id: str, body: dict) -> dict:
         if run.status != "map_ready":
             raise HTTPException(400, f"The map can only be confirmed while the run is waiting "
                                      f"at the map (it is {run.status}).")
-        _revision_check(run, body)
+        _revision_check(db, run, body, required=False)
         problems = mapping.validate_confirmed_map(new_map, run.survey)
         if problems:
             raise HTTPException(400, "The map is not ready to confirm: " + "; ".join(problems))
@@ -366,20 +374,7 @@ async def confirm_map(run_id: str, body: dict) -> dict:
             raise HTTPException(400, f"{n_cases} cases to verify — more than the {source_mod.MAX_CASES_PER_RUN} "
                                      "one run may hold. Skip some at the map and run them in a second batch.")
         changes = _map_changes(run.map, new_map)
-        # File-role patterns the reviewer ticked "remember" on go into the
-        # client profile — the map AI is shown them next time and code
-        # applies them over its guess.
         client = (run.snapshot or {}).get("client_name") or run.client
-        if remember:
-            profile = profile_mod.get_profile(client)
-            patterns = list(profile.get("file_role_patterns") or [])
-            for r in remember:
-                pattern, role = str(r.get("pattern", "")).strip(), str(r.get("role", "")).strip()
-                if pattern and role in mapping.ROLES and \
-                        not any(p["pattern"] == pattern and p["role"] == role for p in patterns):
-                    patterns.append({"pattern": pattern, "role": role})
-            profile["file_role_patterns"] = patterns
-            profile_mod.save_profile(client, profile, evidence=f"map correction on run {run_id}")
         clean = {"employees": new_map["employees"], "root_files": new_map.get("root_files", []),
                  "notes": new_map.get("notes", []), "rounds": run.map.get("rounds"),
                  "confirmed": True}
@@ -407,6 +402,15 @@ async def confirm_map(run_id: str, body: dict) -> dict:
                           detail=(f"{n} employee(s); " + ("; ".join(changes) if changes
                                   else "no changes to the proposed map"))[:2000]))
         db.commit()
+        # File-role patterns the reviewer ticked "remember" on go into the
+        # client profile — the map AI is shown them next time and code
+        # applies them over its guess. AFTER the commit, in the profile's
+        # own transaction: the profile is a different store, and writing it
+        # from inside the run's transaction both half-records a refused
+        # confirm and deadlocks SQLite's single writer against ourselves.
+        for r in remember:
+            _remember_file_role(client, r.pattern.strip(), r.role.strip(),
+                                f"map correction on run {run_id}")
         profile_mod.save_last_map(client, clean, run_id)
         telemetry.record(db, run_id, "map", telemetry.INFO, "MAP_CONFIRMED",
                          f"Map confirmed by the reviewer with {len(changes)} change(s); "
@@ -415,6 +419,27 @@ async def confirm_map(run_id: str, body: dict) -> dict:
         return {"ok": True, "employees": n, "changes": changes}
     finally:
         db.close()
+
+
+def _remember_file_role(client: str, pattern: str, role: str, evidence: str) -> None:
+    """Remember "files named like this are <role>" for the client.
+
+    Called only AFTER the run's own transaction has committed. The profile
+    lives in another table behind its own session: writing it while the
+    run's transaction is open would record a preference for an action that
+    may still be refused, and — SQLite having exactly one writer — makes
+    the request wait on a lock it is holding itself."""
+    from . import mapping
+
+    if not pattern or role not in mapping.ROLES:
+        return
+    profile = profile_mod.get_profile(client)
+    patterns = list(profile.get("file_role_patterns") or [])
+    if any(p["pattern"] == pattern and p["role"] == role for p in patterns):
+        return
+    patterns.append({"pattern": pattern, "role": role})
+    profile["file_role_patterns"] = patterns
+    profile_mod.save_profile(client, profile, evidence=evidence)
 
 
 def _map_changes(old: dict, new: dict) -> list[str]:
@@ -459,10 +484,18 @@ def get_claims_file(run_id: str, path: str, page: int = 1, highlight: str = "",
         raise HTTPException(404, "No such file in this run.")
     if target.suffix.lower() in (".xlsx", ".xlsm"):
         return FileResponse(target, filename=target.name)
+    if page < 1:
+        raise HTTPException(404, "No such page.")
     try:
         png = render_page(target, page, highlight=highlight, full=full)
     except IndexError:
+        # The file is here, that page of it is not.
         raise HTTPException(404, "No such page.")
+    except ValueError as exc:
+        # A real file of a kind nothing can rasterise (.txt, .msg, .docx).
+        # 415, not 500: the request is well formed and the answer is that
+        # this type has no page image — the screen offers the download.
+        raise HTTPException(415, f"{target.name} cannot be shown as a page image ({exc}).")
     return Response(content=png, media_type="image/png")
 
 
@@ -479,22 +512,54 @@ def _case_routes_on() -> None:
         raise HTTPException(404, "The case model is switched off on this server.")
 
 
-def _revision_check(run: ClaimsRun, body: dict, required: bool = False) -> None:
-    """Every mutation carries the revision the screen last saw. The new
-    case routes REQUIRE it; the delivered routes accept its absence (an
-    older screen keeps working) but refuse a stale value."""
-    expected = body.get("expected_revision")
+def _revision_check(db, run: ClaimsRun, body, required: bool = True) -> None:
+    """Every mutation carries the revision the screen last saw, and is
+    refused (400) without it, (409) with a stale one. The only routes that
+    still accept its absence are the ones no current screen sends it for:
+    confirm-map (the delivered MapView, the fallback while CLAIMS_CASE_MODEL
+    is off) and cancel (API only).
+
+    COMPARE-AND-SET, not read-compare-write. Reading the revision into
+    Python and comparing it there is not a control: two reviewers' requests
+    run in separate threadpool threads, both read revision 7, both pass,
+    both commit — the second silently overwrites the first. The claim is
+    made by the database instead, in one statement:
+
+        UPDATE claims_runs SET revision = revision + 1
+         WHERE id = ? AND revision = ?
+
+    which takes the write lock; whoever loses it waits, re-reads and
+    matches nothing (0 rows) → 409. Claiming the number here is also what
+    makes the check a claim rather than a look, so the later bump is
+    `_bump_revision`, which does not add a second one."""
+    expected = _expected_revision(body)
     if expected is None:
         if required:
             raise HTTPException(400, "expected_revision is required: send the revision your screen loaded.")
         return
+    claimed = (db.query(ClaimsRun)
+               .filter(ClaimsRun.id == run.id, func.coalesce(ClaimsRun.revision, 0) == expected)
+               .update({"revision": func.coalesce(ClaimsRun.revision, 0) + 1},
+                       synchronize_session=False))
+    if claimed != 1:
+        db.rollback()
+        current = db.query(func.coalesce(ClaimsRun.revision, 0)).filter(ClaimsRun.id == run.id).scalar()
+        raise HTTPException(409, f"This run changed since your screen loaded (revision {current}, you had "
+                                 f"{expected}). Reload and try again.")
+    run.revision = expected + 1
+    run._revision_claimed = True  # type: ignore[attr-defined]
+
+
+def _expected_revision(body) -> int | None:
+    """The revision the screen sent, as a number — from a request model or
+    from a plain dict (the routes that still take one)."""
+    expected = body.get("expected_revision") if isinstance(body, dict) else getattr(body, "expected_revision", None)
+    if expected is None:
+        return None
     try:
-        expected = int(expected)
+        return int(expected)
     except (TypeError, ValueError):
         raise HTTPException(400, "expected_revision must be a number.")
-    if expected != int(run.revision or 0):
-        raise HTTPException(409, f"This run changed since your screen loaded (revision {run.revision}, you had "
-                                 f"{expected}). Reload and try again.")
 
 
 def _grouping_action(run_id: str, body: dict, action: str, fn, statuses: tuple = ("map_ready",)):
@@ -512,16 +577,18 @@ def _grouping_action(run_id: str, body: dict, action: str, fn, statuses: tuple =
             raise HTTPException(404, "No such claims run.")
         if run.status not in statuses:
             raise HTTPException(400, f"This can be changed while the run is {' or '.join(statuses)} (it is {run.status}).")
-        _revision_check(run, body, required=True)
+        _revision_check(db, run, body, required=True)
         try:
             detail = fn(db, run)
         except cases_mod.GroupingError as exc:
             db.rollback()
             raise HTTPException(400, str(exc))
         gate = grouping.refresh(db, run)
-        cases_mod.bump_revision(run)
+        _bump_revision(run)
         db.add(AuditEvent(run_id=run_id, actor="reviewer", action=action, detail=str(detail)[:2000]))
         db.commit()
+        if run.status == "ready":
+            store_outputs(db, run)   # a claimant confirmed at review may open the gate
         return {"ok": True, "revision": run.revision, "grouping": gate}
     finally:
         db.close()
@@ -530,42 +597,47 @@ def _grouping_action(run_id: str, body: dict, action: str, fn, statuses: tuple =
 def _regrouping_on() -> None:
     """Create / merge / split / move / role are the full-dump grouping
     actions: off = a flat folder behaves as today (classified, not
-    regrouped on screen); the gate, claimant and dispositions stay."""
+    regrouped on screen); the gate, claimant and dispositions stay.
+
+    The case model comes first: with it switched off these routes do not
+    exist at all (404), rather than existing and refusing (400)."""
+    _case_routes_on()
     if not config.CLAIMS_FULL_DUMP_GROUPING:
         raise HTTPException(400, "Regrouping at the map is switched off on this server (CLAIMS_FULL_DUMP_GROUPING).")
 
 
 @router.post("/{run_id}/cases")
-def create_case(run_id: str, body: dict) -> dict:
+def create_case(run_id: str, body: S.CreateCaseBody) -> dict:
     """body = {label, artifact_ids: [...], expected_revision}"""
     _regrouping_on()
-    ids = [str(a) for a in (body.get("artifact_ids") or [])]
+    ids = list(body.artifact_ids)
 
     def fn(db, run):
-        c = cases_mod.create_case(db, run, str(body.get("label", "")), ids)
+        c = cases_mod.create_case(db, run, body.label, ids)
         return f"case {c.label} created with {len(ids)} file(s)"
     return _grouping_action(run_id, body, "case_created", fn)
 
 
 @router.put("/{run_id}/cases/{case_id}")
-def update_case(run_id: str, case_id: str, body: dict) -> dict:
+def update_case(run_id: str, case_id: str, body: S.UpdateCaseBody) -> dict:
     """body = {label?, roles?: {report_file, report_tab, mileage_tab, no_report}, state?: excluded|proposed, expected_revision}"""
     def fn(db, run):
-        c = cases_mod.update_case(db, run, case_id, body.get("label"), body.get("roles"), body.get("state"))
-        return f"case {c.label}: " + ", ".join(k for k in ("label", "roles", "state") if body.get(k) is not None)
+        c = cases_mod.update_case(db, run, case_id, body.label, body.roles, body.state)
+        return f"case {c.label}: " + ", ".join(k for k in ("label", "roles", "state")
+                                               if getattr(body, k) is not None)
     return _grouping_action(run_id, body, "case_updated", fn)
 
 
 @router.put("/{run_id}/cases/{case_id}/claimant")
-def set_case_claimant(run_id: str, case_id: str, body: dict) -> dict:
+def set_case_claimant(run_id: str, case_id: str, body: S.ClaimantBody) -> dict:
     """body = {name, identifier, expected_revision} — or {confirm: true} to
     confirm the proposed name as it stands."""
     def fn(db, run):
-        if body.get("confirm"):
+        if body.confirm:
             c = cases_mod.confirm_claimant(db, run, case_id)
             detail = f"case {c.label}: claimant {c.claimant_name!r} confirmed"
         else:
-            c = cases_mod.set_claimant(db, run, case_id, str(body.get("name", "")), str(body.get("identifier", "")))
+            c = cases_mod.set_claimant(db, run, case_id, body.name, body.identifier)
             detail = f"case {c.label}: claimant set to {c.claimant_name!r} {c.claimant_identifier!r}"
         # At review time the case already has its employee record: keep the
         # delivered fields in step and withdraw the output for a rebuild.
@@ -579,36 +651,35 @@ def set_case_claimant(run_id: str, case_id: str, body: dict) -> dict:
 
 
 @router.post("/{run_id}/cases/{case_id}/merge")
-def merge_case(run_id: str, case_id: str, body: dict) -> dict:
+def merge_case(run_id: str, case_id: str, body: S.MergeCaseBody) -> dict:
     """body = {into: case_id, expected_revision}"""
     _regrouping_on()
 
     def fn(db, run):
-        c = cases_mod.merge_cases(db, run, case_id, str(body.get("into", "")))
+        c = cases_mod.merge_cases(db, run, case_id, body.into)
         return f"case {case_id} merged into {c.label}"
     return _grouping_action(run_id, body, "cases_merged", fn)
 
 
 @router.post("/{run_id}/cases/{case_id}/split")
-def split_case(run_id: str, case_id: str, body: dict) -> dict:
+def split_case(run_id: str, case_id: str, body: S.SplitCaseBody) -> dict:
     """body = {artifact_ids: [...], label, expected_revision}"""
     _regrouping_on()
 
     def fn(db, run):
-        c = cases_mod.split_case(db, run, case_id, [str(a) for a in (body.get("artifact_ids") or [])],
-                                 str(body.get("label", "")))
-        return f"case {case_id}: {len(body.get('artifact_ids') or [])} file(s) split into {c.label}"
+        c = cases_mod.split_case(db, run, case_id, list(body.artifact_ids), body.label)
+        return f"case {case_id}: {len(body.artifact_ids)} file(s) split into {c.label}"
     return _grouping_action(run_id, body, "case_split", fn)
 
 
 @router.post("/{run_id}/artifacts/{artifact_id}/move")
-def move_artifact(run_id: str, artifact_id: str, body: dict) -> dict:
+def move_artifact(run_id: str, artifact_id: str, body: S.MoveArtifactBody) -> dict:
     """body = {case_id ("" = out of every case), expected_revision}"""
     _regrouping_on()
 
     def fn(db, run):
-        cases_mod.move_artifact(db, run, artifact_id, str(body.get("case_id", "")))
-        return f"file {artifact_id} moved to case {body.get('case_id') or '(none)'}"
+        cases_mod.move_artifact(db, run, artifact_id, body.case_id)
+        return f"file {artifact_id} moved to case {body.case_id or '(none)'}"
     return _grouping_action(run_id, body, "artifact_moved", fn)
 
 
@@ -616,14 +687,15 @@ ARTIFACT_ROLES = ("report", "receipts", "approval", "report_copy", "listing", "r
 
 
 @router.put("/{run_id}/artifacts/{artifact_id}/role")
-def set_artifact_role(run_id: str, artifact_id: str, body: dict) -> dict:
+def set_artifact_role(run_id: str, artifact_id: str, body: S.ArtifactRoleBody) -> dict:
     """The reviewer says what a file IS (its role); with remember=true the
     file-name pattern → role goes into the client profile (the delivered
     'remember for <client>'). body = {role, remember?, expected_revision}"""
     _regrouping_on()
-    role = str(body.get("role", "")).strip()
+    role = body.role.strip()
     if role not in ARTIFACT_ROLES:
         raise HTTPException(400, f"role must be one of {', '.join(ARTIFACT_ROLES)}.")
+    remember: list[tuple[str, str, str, str]] = []
 
     def fn(db, run):
         art = cases_mod._artifact(db, run.id, artifact_id)
@@ -631,20 +703,19 @@ def set_artifact_role(run_id: str, artifact_id: str, body: dict) -> dict:
         if role in IGNORABLE_ROLES and art.disposition == "unresolved":
             art.disposition, art.disposition_by, art.needs_confirmation = "irrelevant", "reviewer", 0
             art.disposition_reason = f"a {role.replace('_', ' ')}: nothing to verify in it"
-        if body.get("remember"):
-            from . import mapping
-
-            legacy_role = {"report": "report", "receipts": "receipts"}.get(role, "ignore")
-            pattern = _pattern_for(art.path)
-            client = (run.snapshot or {}).get("client_name") or run.client
-            prof = profile_mod.get_profile(client)
-            pats = list(prof.get("file_role_patterns") or [])
-            if legacy_role in mapping.ROLES and not any(p["pattern"] == pattern and p["role"] == legacy_role for p in pats):
-                pats.append({"pattern": pattern, "role": legacy_role})
-                prof["file_role_patterns"] = pats
-                profile_mod.save_profile(client, prof, evidence=f"map correction on run {run.id}")
-        return f"file {art.path}: role {role}" + (" (remembered)" if body.get("remember") else "")
-    return _grouping_action(run_id, body, "artifact_role_set", fn)
+        if body.remember:
+            # Staged, not written: the client profile is another store and
+            # is only touched once this action has committed (see
+            # _remember_file_role).
+            remember.append(((run.snapshot or {}).get("client_name") or run.client,
+                             _pattern_for(art.path),
+                             {"report": "report", "receipts": "receipts"}.get(role, "ignore"),
+                             f"map correction on run {run.id}"))
+        return f"file {art.path}: role {role}" + (" (remembered)" if body.remember else "")
+    out = _grouping_action(run_id, body, "artifact_role_set", fn)
+    for args in remember:
+        _remember_file_role(*args)
+    return out
 
 
 def _pattern_for(path: str) -> str:
@@ -654,7 +725,7 @@ def _pattern_for(path: str) -> str:
 
 
 @router.post("/{run_id}/confirm-grouping")
-async def confirm_grouping(run_id: str, body: dict) -> dict:
+async def confirm_grouping(run_id: str, body: S.RevisionBody) -> dict:
     """The one primary action of Map & Group: confirm the grouping and
     start verification. body = {expected_revision}. Refused (400) with the
     reasons while the gate is shut."""
@@ -666,7 +737,7 @@ async def confirm_grouping(run_id: str, body: dict) -> dict:
             raise HTTPException(404, "No such claims run.")
         if run.status != "map_ready":
             raise HTTPException(400, f"The grouping can be confirmed while the run waits at the map (it is {run.status}).")
-        _revision_check(run, body, required=True)
+        _revision_check(db, run, body, required=True)
         try:
             n, gate = cases_mod.confirm_grouping(db, run)
         except cases_mod.GroupingError as exc:
@@ -687,7 +758,7 @@ async def confirm_grouping(run_id: str, body: dict) -> dict:
 # ---- review actions -----------------------------------------------------------
 
 @router.post("/{run_id}/employees/{employee_id}/retry")
-async def retry_employee(run_id: str, employee_id: str, body: dict | None = None) -> dict:
+async def retry_employee(run_id: str, employee_id: str, body: S.RevisionBody | None = None) -> dict:
     """Re-run one worker: Retry on a failed employee, or Re-verify."""
     from . import worker
 
@@ -697,16 +768,19 @@ async def retry_employee(run_id: str, employee_id: str, body: dict | None = None
         emp = db.get(ClaimEmployee, employee_id)
         if not run or not emp or emp.run_id != run_id:
             raise HTTPException(404, "No such employee in this run.")
-        _revision_check(run, body or {})
+        _revision_check(db, run, body or {})
         if run.status not in ("ready", "verifying"):
             raise HTTPException(400, f"Employees can be re-verified once the run is verifying or ready (it is {run.status}).")
+        if emp.status == "skipped":
+            raise HTTPException(400, "This employee was skipped at the map, so there is nothing to verify. "
+                                     "Start a new run with them included.")
         if emp.status == "verifying":
             raise HTTPException(400, "This employee is being verified right now.")
         if emp.status == "pending" and run.status == "verifying":
             raise HTTPException(400, "This employee is already queued; the run will get to them.")
         emp.status, emp.error = "pending", ""
         cases_mod.sync_case_from_employee(db, emp)
-        cases_mod.bump_revision(run)
+        _bump_revision(run)
         db.add(AuditEvent(run_id=run_id, actor="reviewer", action="employee_reverify",
                           detail=f"{emp.name or emp.folder}: re-verify requested"))
         db.commit()
@@ -717,8 +791,9 @@ async def retry_employee(run_id: str, employee_id: str, body: dict | None = None
 
 
 @router.post("/{run_id}/cases/{case_id}/retry")
-async def retry_case(run_id: str, case_id: str, body: dict | None = None) -> dict:
+async def retry_case(run_id: str, case_id: str, body: S.RevisionBody | None = None) -> dict:
     """Re-run one case's worker (H7): the case-keyed twin of the employee retry."""
+    _case_routes_on()
     db = SessionLocal()
     try:
         case = db.get(ClaimCase, case_id)
@@ -731,17 +806,17 @@ async def retry_case(run_id: str, case_id: str, body: dict | None = None) -> dic
 
 
 @router.post("/{run_id}/flags/{flag_id}/decide")
-async def decide_claim_flag(run_id: str, flag_id: str, body: dict) -> dict:
+async def decide_claim_flag(run_id: str, flag_id: str, body: S.DecideFlagBody) -> dict:
     """Record a decision on one flag. body = {decision, note}.
 
     accepted  — it is a real problem: the flag's ROW is excluded from the
                 batch (an employee-level or run-level flag is acknowledged)
     dismissed — the flag is set aside with a note; the row stays
     """
-    decision = body.get("decision")
+    decision = body.decision
     if decision not in ("accepted", "dismissed"):
         raise HTTPException(400, "decision must be 'accepted' or 'dismissed'.")
-    note = str(body.get("note", "")).strip()[:500]
+    note = body.note.strip()[:500]
     if decision == "dismissed" and not note:
         raise HTTPException(400, "A short note is required when dismissing a flag — it goes in the audit trail.")
     db = SessionLocal()
@@ -751,26 +826,41 @@ async def decide_claim_flag(run_id: str, flag_id: str, body: dict) -> dict:
             raise HTTPException(404, "No such flag.")
         if flag.status not in ("open", "info"):
             raise HTTPException(400, f"This flag is already {flag.status}.")
-        _revision_check(db.get(ClaimsRun, run_id), body)
+        run = db.get(ClaimsRun, run_id)
+        if run is None:
+            raise HTTPException(404, "No such claims run.")
+        if run.status != "ready":
+            # Same guard as a row correction: while a worker is running it
+            # deletes and rewrites this employee's flags wholesale, so a
+            # decision taken now is written onto rows that are about to go.
+            raise HTTPException(400, f"Flags can be decided once the run is ready (it is {run.status}).")
+        _revision_check(db, run, body)
         if flag.code in ("CLAIMANT_UNKNOWN", "OWNERSHIP_CONFLICT"):
             raise HTTPException(400, "This is settled by an action, not a note: set or confirm the claimant on the case "
                                      "(CLAIMANT_UNKNOWN), or split / move the files at the map (OWNERSHIP_CONFLICT).")
         if flag.code == "ARTIFACT_UNRESOLVED":
+            # Settling a Source Artifact is a case-model act, and is behind
+            # the same switch as the disposition route it stands in for.
+            _case_routes_on()
             # A file is not "dismissed": it gets a disposition, which is
             # what releases the control (H3). The decision route accepts
             # the disposition inline so the flag card can offer it.
-            disposition = str(body.get("disposition", "")).strip()
+            disposition = body.disposition.strip()
             if disposition not in REVIEWER_DISPOSITIONS:
                 raise HTTPException(400, "Say what this file is: disposition must be irrelevant, unreadable "
                                          "or duplicate (with a note) — that is what settles an unplaced file.")
             if not note:
                 raise HTTPException(400, "A short note is required — it is the reason recorded with the disposition.")
-            _set_disposition(db, run_id, flag.artifact_id, disposition, note, actor="reviewer")
+            art = _set_disposition(db, run_id, flag.artifact_id, disposition, note, actor="reviewer")
             db.commit()
-            return {"ok": True, "disposition": disposition}
+            pending = _pending_retry(db, run_id, art)
+            if pending:
+                from . import worker
+
+                runner.start_background(worker.retry_employee(run_id, pending))
+            return {"ok": True, "disposition": disposition, "reverify_employee_id": pending}
         flag.status, flag.resolution = decision, note
-        run = db.get(ClaimsRun, run_id)
-        run.outputs = {}  # withdrawn; rebuilt from the reviewed state on next read
+        run.outputs = {}  # withdrawn; rebuilt below, now the state is settled
         if flag.code == "CLAIM_AMOUNT_UNCONFIRMED" and decision == "accepted" and flag.case_id:
             # "It is a real problem" on derived amounts means: these amounts
             # are not payable as they stand — the case is left out of the
@@ -779,52 +869,23 @@ async def decide_claim_flag(run_id: str, flag_id: str, body: dict) -> dict:
             if case is not None:
                 case.state = "excluded"
                 case.reason = (case.reason + "; excluded in review: derived amounts not confirmed")[:400]
-        cases_mod.bump_revision(run)
+        _bump_revision(run)
         db.add(AuditEvent(run_id=run_id, actor="reviewer", action=f"flag_{decision}",
                           detail=f"[{flag.code}] {flag.reason[:200]} — note: {note or 'none'}"))
         db.commit()
+        store_outputs(db, run)   # this decision may have opened the gate
         return {"ok": True}
     finally:
         db.close()
 
 
-from .investigator.contracts import IGNORABLE_ROLES, REVIEWER_DISPOSITIONS  # noqa: E402
-
-DISPOSITIONS = ("used", *REVIEWER_DISPOSITIONS)
-
-
-def _set_disposition(db, run_id: str, artifact_id: str, disposition: str, reason: str, actor: str) -> ClaimSourceArtifact:
-    """The reviewer settles a Source Artifact (H3): its disposition is
-    recorded as theirs (never overwritten by an adapter afterwards), the
-    open ARTIFACT_UNRESOLVED flag for it is resolved, the output is
-    withdrawn for a rebuild, and the change is audited."""
-    art = db.query(ClaimSourceArtifact).filter(ClaimSourceArtifact.run_id == run_id,
-                                               ClaimSourceArtifact.artifact_id == artifact_id).first()
-    if art is None:
-        raise HTTPException(404, "No such file in this run.")
-    if disposition not in DISPOSITIONS:
-        raise HTTPException(400, f"disposition must be one of {', '.join(DISPOSITIONS)}.")
-    if disposition == "used" and not art.case_id:
-        raise HTTPException(400, "A file is 'used' only inside a case — move it into a case at the map first.")
-    if disposition != "used" and not reason.strip():
-        raise HTTPException(400, "A short reason is required — it goes in the audit trail.")
-    old = art.disposition
-    art.disposition, art.disposition_reason, art.disposition_by = disposition, reason.strip()[:400], actor
-    art.needs_confirmation = 0
-    for fl in db.query(ClaimFlag).filter(ClaimFlag.run_id == run_id, ClaimFlag.code == "ARTIFACT_UNRESOLVED",
-                                          ClaimFlag.artifact_id == artifact_id, ClaimFlag.status.in_(("open", "info"))):
-        fl.status, fl.resolution = "resolved_by_correction", f"file marked {disposition} — {reason.strip() or 'no reason given'}"
-    run = db.get(ClaimsRun, run_id)
-    run.outputs = {}
-    cases_mod.bump_revision(run)
-    db.add(AuditEvent(run_id=run_id, actor=actor, action="artifact_disposition",
-                      detail=f"{art.path}: {old} -> {disposition} — {reason.strip() or 'no reason given'}"[:2000]))
-    return art
-
-
 @router.post("/{run_id}/artifacts/{artifact_id}/disposition")
-def set_artifact_disposition(run_id: str, artifact_id: str, body: dict) -> dict:
-    """The reviewer says what a file is. body = {disposition, reason}."""
+def set_artifact_disposition(run_id: str, artifact_id: str, body: S.DispositionBody) -> dict:
+    """The reviewer says what a file is. body = {disposition, reason}.
+    After verification, a change on a file inside a case re-verifies that
+    case (ready) or is refused until the run is ready (verifying)."""
+    from . import worker
+
     db = SessionLocal()
     try:
         run = db.get(ClaimsRun, run_id)
@@ -833,13 +894,18 @@ def set_artifact_disposition(run_id: str, artifact_id: str, body: dict) -> dict:
         if run.status not in ("map_ready", "verifying", "ready"):
             raise HTTPException(400, f"Files can be settled once the map is proposed (the run is {run.status}).")
         _case_routes_on()
-        _revision_check(run, body, required=True)
-        art = _set_disposition(db, run_id, artifact_id, str(body.get("disposition", "")).strip(),
-                               str(body.get("reason", "")).strip(), actor="reviewer")
+        _revision_check(db, run, body, required=True)
+        art = _set_disposition(db, run_id, artifact_id, body.disposition.strip(),
+                               body.reason.strip(), actor="reviewer")
         db.commit()
-        return {"ok": True, "artifact": cases_mod.artifact_dict(art)}
+        pending = _pending_retry(db, run_id, art)
+        out = {"ok": True, "artifact": cases_mod.artifact_dict(art), "revision": run.revision}
     finally:
         db.close()
+    if pending:
+        runner.start_background(worker.retry_employee(run_id, pending))
+        out["reverify_employee_id"] = pending
+    return out
 
 
 CORRECTABLE_ROW_FIELDS = {"date", "item", "reason", "receipt_included", "amount", "currency", "rate",
@@ -877,18 +943,18 @@ def _validate_row_value(field: str, value):
 
 
 @router.post("/{run_id}/rows/{row_id}/correct")
-async def correct_claim_row(run_id: str, row_id: str, body: dict) -> dict:
+async def correct_claim_row(run_id: str, row_id: str, body: S.CorrectRowBody) -> dict:
     """Fix a value on one row (audited), then re-check that employee at once:
     flags that no longer apply resolve themselves, new ones are raised,
     decided ones stay decided. body = {fields: {name: value}, reason}."""
     from . import worker
     from .report_reader import gl_of, item_name
 
-    reason = str(body.get("reason", "")).strip()
+    reason = body.reason.strip()
     if not reason:
         raise HTTPException(400, "A short reason is required — it goes in the audit trail.")
-    submitted = body.get("fields")
-    if not isinstance(submitted, dict) or not submitted:
+    submitted = body.fields
+    if not submitted:
         raise HTTPException(400, "fields must map field names to corrected values.")
     db = SessionLocal()
     try:
@@ -898,7 +964,7 @@ async def correct_claim_row(run_id: str, row_id: str, body: dict) -> dict:
             raise HTTPException(404, "No such row.")
         if run.status != "ready":
             raise HTTPException(400, "Corrections are possible once the run is ready.")
-        _revision_check(run, body)
+        _revision_check(db, run, body)
         emp = db.get(ClaimEmployee, row.employee_id)
         validated = {}
         for field, raw in submitted.items():
@@ -921,45 +987,23 @@ async def correct_claim_row(run_id: str, row_id: str, body: dict) -> dict:
             row.values, row.corrections = values, corrections
             run.outputs = {}
             db.commit()
-        # Instant re-check for this employee — code only over stored
-        # evidence (plus, at most, an AI tie-break).
-        profile = profile_mod.profile_of(run.snapshot)
-        summary = emp.summary or {}
-        result = await worker.run_checks_for(db, run, emp, profile,
-                                             searched=(int(summary.get("pages", 0)), len(emp.roles.get("receipt_files") or [])))
-        existing = db.query(ClaimFlag).filter(ClaimFlag.employee_id == emp.id).all()
-        new_keys = {(f["code"], f["row_id"], f["evidence_id"]): f for f in result["flags"]}
-        open_now = {}
-        for fl in existing:
-            key = (fl.code, fl.row_id, fl.evidence_id)
-            if fl.status in ("open", "info") and key not in new_keys:
-                fl.status = "resolved_by_correction"
-                fl.resolution = f"No longer applies after correcting {', '.join(sorted(changed)) or 'values'} — {reason}"
-            elif fl.status in ("open", "info"):
-                open_now[key] = fl
-        decided = {(fl.code, fl.row_id, fl.evidence_id) for fl in existing
-                   if fl.status in ("accepted", "dismissed") and fl.row_id != row_id}
-        for key, fd in new_keys.items():
-            if key in open_now:
-                open_now[key].reason, open_now[key].basis, open_now[key].cite = fd["reason"], fd["basis"], fd["cite"]
-            elif key not in decided:
-                db.add(ClaimFlag(run_id=run_id, employee_id=emp.id, case_id=cases_mod.case_id_for_employee(db, emp.id), **fd))
-        cases_mod.bump_revision(run)
-        # The run-wide controls see the corrected values too (H7): a receipt
-        # that stops being shared resolves; one that starts being shared is raised.
-        worker.rerun_global_controls(db, run_id, profile)
+        # Instant re-check for this employee, and the flag reconciliation
+        # that goes with it — the worker's own job (worker.py).
+        n_flags = await worker.recheck_after_correction(db, run, emp, row_id, sorted(changed), reason)
+        _bump_revision(run)
         db.add(AuditEvent(run_id=run_id, actor="system", action="employee_rechecked",
                           detail=f"{emp.name or emp.folder} after correcting "
                                  f"{', '.join(sorted(changed)) or 'nothing (retry)'}: "
-                                 f"{len(result['flags'])} rule(s) now apply"))
+                                 f"{n_flags} rule(s) now apply"))
         db.commit()
-        return {"ok": True, "flags_now": len(result["flags"])}
+        store_outputs(db, run)
+        return {"ok": True, "flags_now": n_flags}
     finally:
         db.close()
 
 
 @router.put("/{run_id}/cases/{case_id}/category")
-def set_case_category(run_id: str, case_id: str, body: dict) -> dict:
+def set_case_category(run_id: str, case_id: str, body: S.CategoryBody) -> dict:
     """The case-keyed twin of the employee category route (H10)."""
     _case_routes_on()
     db = SessionLocal()
@@ -974,12 +1018,12 @@ def set_case_category(run_id: str, case_id: str, body: dict) -> dict:
 
 
 @router.put("/{run_id}/employees/{employee_id}/category")
-def set_employee_category(run_id: str, employee_id: str, body: dict) -> dict:
+def set_employee_category(run_id: str, employee_id: str, body: S.CategoryBody) -> dict:
     """The reviewer sets the listing category (CATEGORY_UNCLEAR, or a
     correction). Audited; the open CATEGORY_UNCLEAR flag is resolved."""
-    category = str(body.get("category", "")).strip()[:80]
-    gl = str(body.get("gl", "")).strip()[:20]
-    reason = str(body.get("reason", "")).strip()[:300]
+    category = body.category.strip()[:80]
+    gl = body.gl.strip()[:20]
+    reason = body.reason.strip()[:300]
     if not category:
         raise HTTPException(400, "Choose a category.")
     db = SessionLocal()
@@ -988,7 +1032,9 @@ def set_employee_category(run_id: str, employee_id: str, body: dict) -> dict:
         run = db.get(ClaimsRun, run_id)
         if not emp or not run or emp.run_id != run_id:
             raise HTTPException(404, "No such employee in this run.")
-        _revision_check(run, body)
+        if run.status != "ready":
+            raise HTTPException(400, f"The category can be set once the run is ready (it is {run.status}).")
+        _revision_check(db, run, body)
         old = (emp.category, emp.gl)
         emp.category, emp.gl = category, gl
         emp.category_basis = f"set by the reviewer: {reason or 'no reason given'}"
@@ -999,8 +1045,9 @@ def set_employee_category(run_id: str, employee_id: str, body: dict) -> dict:
                           detail=f"{emp.name or emp.folder}: {old!r} -> {(category, gl)!r} — {reason}"))
         run.outputs = {}
         cases_mod.sync_case_from_employee(db, emp)
-        cases_mod.bump_revision(run)
+        _bump_revision(run)
         db.commit()
+        store_outputs(db, run)
         return {"ok": True}
     finally:
         db.close()
@@ -1122,116 +1169,18 @@ def get_flag_catalogue() -> dict:
 
 
 @settings_router.put("")
-def update_claims_settings(body: dict) -> dict:
+def update_claims_settings(body: S.ClaimsSettingsBody) -> dict:
     """body = {profile?: {...fields...}, playbook?: str, forget_last_map?: bool}.
-    Every value is validated before any is saved; the change is audited."""
-    from decimal import Decimal, InvalidOperation
+    Every value is validated before any is saved (settings_schema); the
+    change is audited by the profile store itself."""
+    from . import settings_schema
 
     client = settings_store.get_setting("client_name")
-    profile_in = body.get("profile")
-    if profile_in is not None:
-        if not isinstance(profile_in, dict):
-            raise HTTPException(400, "profile must be an object.")
-        current = profile_mod.get_profile(client)
-        merged = {**current}
-        if "mileage_rates" in profile_in:
-            rates = profile_in["mileage_rates"]
-            if not isinstance(rates, dict):
-                raise HTTPException(400, "mileage_rates must map vehicle type to a rate.")
-            clean = {}
-            for vehicle, rate in rates.items():
-                vehicle = str(vehicle).strip()
-                try:
-                    value = Decimal(str(rate).strip())
-                    if not value.is_finite() or value <= 0 or value > 100:
-                        raise InvalidOperation
-                except InvalidOperation:
-                    raise HTTPException(400, f"Rate for {vehicle!r} must be a number per km, e.g. 0.64.")
-                if vehicle:
-                    clean[vehicle] = f"{value.normalize():f}"
-            merged["mileage_rates"] = clean
-        if "km_tolerance" in profile_in:
-            try:
-                tol = Decimal(str(profile_in["km_tolerance"]).strip() or "0")
-                if not tol.is_finite() or tol < 0 or tol > 100:
-                    raise InvalidOperation
-            except InvalidOperation:
-                raise HTTPException(400, "km tolerance must be a number of km, e.g. 0 or 0.5.")
-            merged["km_tolerance"] = f"{tol.normalize():f}"
-        if "receipt_date_window_days" in profile_in:
-            try:
-                days = int(profile_in["receipt_date_window_days"])
-            except (TypeError, ValueError):
-                raise HTTPException(400, "receipt date window must be a whole number of days.")
-            if days < 0 or days > 31:
-                raise HTTPException(400, "receipt date window must be between 0 and 31 days.")
-            merged["receipt_date_window_days"] = days
-        for key in ("receipt_optional_items",):
-            if key in profile_in:
-                items = profile_in[key]
-                if not isinstance(items, list) or not all(isinstance(i, str) for i in items):
-                    raise HTTPException(400, f"{key} must be a list of expense item names.")
-                merged[key] = [i.strip() for i in items if i.strip()][:200]
-        if "unclaimed_receipt_threshold" in profile_in:
-            try:
-                thr = Decimal(str(profile_in["unclaimed_receipt_threshold"]).strip() or "0")
-                if not thr.is_finite() or thr < 0 or thr > 1_000_000:
-                    raise InvalidOperation
-            except InvalidOperation:
-                raise HTTPException(400, "unclaimed receipt threshold must be an amount in MYR, e.g. 100.")
-            merged["unclaimed_receipt_threshold"] = f"{thr.normalize():f}"
-        if "mileage_item_pattern" in profile_in:
-            pat = str(profile_in["mileage_item_pattern"]).strip()
-            if not pat or len(pat) > 60:
-                raise HTTPException(400, "mileage item pattern must be 1–60 characters.")
-            merged["mileage_item_pattern"] = pat
-        if "category_rule" in profile_in:
-            merged["category_rule"] = str(profile_in["category_rule"]).strip()[:1000]
-        if "categories" in profile_in:
-            cats = profile_in["categories"]
-            if not isinstance(cats, list):
-                raise HTTPException(400, "categories must be a list of {item, gl}.")
-            merged["categories"] = [{"item": str(c.get("item", "")).strip()[:80],
-                                     "gl": str(c.get("gl", "")).strip()[:20]}
-                                    for c in cats if isinstance(c, dict) and c.get("item")][:300]
-        if "file_role_patterns" in profile_in:
-            pats = profile_in["file_role_patterns"]
-            if not isinstance(pats, list):
-                raise HTTPException(400, "file_role_patterns must be a list of {pattern, role}.")
-            from . import mapping
-
-            merged["file_role_patterns"] = [
-                {"pattern": str(p.get("pattern", "")).strip()[:120], "role": str(p.get("role", ""))}
-                for p in pats if isinstance(p, dict) and p.get("pattern")
-                and p.get("role") in mapping.ROLES][:100]
-        if "listing_columns" in profile_in:
-            from . import listing as listing_mod
-
-            pins = profile_in["listing_columns"]
-            if not isinstance(pins, dict):
-                raise HTTPException(400, "listing_columns must map a header text to a role, 'blank' or '=text'.")
-            clean_pins = {}
-            for k, v in pins.items():
-                k, v = str(k).strip()[:80], str(v).strip()[:120]
-                if not k:
-                    continue
-                if not (v == "blank" or v.startswith("=") or v in listing_mod.ROLES):
-                    raise HTTPException(400, f"listing column {k!r}: {v!r} must be a role "
-                                             f"({', '.join(listing_mod.ROLES)}), 'blank', or '=text'.")
-                clean_pins[k] = v
-            merged["listing_columns"] = clean_pins
-        if "checks" in profile_in:
-            checks = profile_in["checks"]
-            if not isinstance(checks, dict):
-                raise HTTPException(400, "checks must map a check code to on/off.")
-            merged["checks"] = {str(k): bool(v) for k, v in checks.items()
-                                if str(k) in profile_mod.CHECK_CODES}
-        profile_mod.save_profile(client, merged)
-    if "playbook" in body:
-        text = body["playbook"]
-        if not isinstance(text, str) or len(text) > MAX_INSTRUCTIONS:
-            raise HTTPException(400, f"The playbook must be text, at most {MAX_INSTRUCTIONS} characters.")
-        profile_mod.save_playbook(client, text.strip())
-    if body.get("forget_last_map"):
+    if body.profile is not None:
+        profile_mod.save_profile(client,
+                                 settings_schema.merged_profile(profile_mod.get_profile(client), body.profile))
+    if "playbook" in body.model_fields_set:
+        profile_mod.save_playbook(client, settings_schema.clean_playbook(body.playbook))
+    if body.forget_last_map:
         profile_mod.forget_last_map(client)
     return _settings_payload(client)

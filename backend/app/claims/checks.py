@@ -22,7 +22,10 @@ A receipt may support one row: two rows on the same receipt →
 DUPLICATE_RECEIPT on both. The same receipt by value on two pages, each
 supporting a different row → DUPLICATE_SCAN on both. Receipts no row
 claims → UNCLAIMED_RECEIPT: a note below the client's threshold, open at
-or above it. Foreign rows: rate present and ≠ 1, amount × rate = total,
+or above it, and always open for a foreign-currency receipt (a foreign
+face amount is never compared with the RM threshold). A receipt a
+DUPLICATE_RECEIPT / RECEIPT_AMBIGUOUS verdict already names is CONTESTED,
+not unclaimed: the reviewer decides it once, on that flag. Foreign rows: rate present and ≠ 1, amount × rate = total,
 receipt currency = row currency, else CURRENCY_MISMATCH. A match on a
 receipt with no date, a date that fits only after a swap or the second
 read, or a low-confidence date/amount/currency → EVIDENCE_UNCERTAIN (a
@@ -156,11 +159,19 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
                among candidates; None means "always ambiguous"
 
     Returns {"flags": [...], "verdicts": {row_id: (verdict, evidence_id)},
-             "matches": {evidence_id: row_id}, "notes": [...]}.
+             "matches": {evidence_id: row_id},
+             "contested": {evidence_id: [row_ids]} — receipts a duplicate /
+                 ambiguous verdict names (claimed, not matched, never
+                 "unclaimed"),
+             "km_pairs": {report_mileage_row_id: km_row_id},
+             "notes": [...]}.
+    The input rows and evidence are never changed.
     """
     flags: list[dict] = []
     verdicts: dict[str, tuple[str, str]] = {}
     matches: dict[str, str] = {}
+    contested: dict[str, list[str]] = {}
+    km_pairs: dict[str, str] = {}
     notes: list[str] = []
     on = lambda code: profile_mod.check_enabled(profile, code)  # noqa: E731
 
@@ -318,6 +329,7 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
                                        "universal rule: one receipt supports one row",
                                        _ev_cite(e), row_id=r["id"], evidence_id=e["id"]))
                 verdicts[r["id"]] = ("duplicate", e["id"])
+                contested.setdefault(e["id"], []).append(r["id"])
             continue
         if len(cs) == 1:
             matches[cs[0]["id"]] = row["id"]
@@ -343,6 +355,8 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
             notes.append(f"row {row['row']}: {len(cs)} candidate receipts, tie broken by the AI")
             continue
         verdicts[row["id"]] = ("ambiguous", "")
+        for c in cs:
+            contested.setdefault(c["id"], []).append(row["id"])
         if on("RECEIPT_AMBIGUOUS"):
             flags.append(_flag("RECEIPT_AMBIGUOUS",
                                f"Row {row['row']} ({v.get('date')}, {item}, {v.get('currency', 'MYR')} "
@@ -350,7 +364,8 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
                                + "; ".join(f"{c['values'].get('vendor', '?')} at {_where(c)}{_conf_note(c)}" for c in cs)
                                + ". Choose which one supports it.",
                                "universal rule: same day, amount and currency; the AI could not tell them apart",
-                               _ev_cite(cs[0]), row_id=row["id"], evidence_id=cs[0]["id"]))
+                               {**_ev_cite(cs[0]), "candidates": [c["id"] for c in cs]},
+                               row_id=row["id"], evidence_id=cs[0]["id"]))
     # A match on evidence the reader was not sure of (no date, or the two
     # reads disagreed on date/amount/currency, or the reader said so) is
     # never accepted silently: a person confirms it.
@@ -400,23 +415,36 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
     if threshold is None:
         threshold = Decimal(profile_mod.PROFILE_DEFAULTS["unclaimed_receipt_threshold"])
     for e in receipts:
-        if e["id"] not in matches and on("UNCLAIMED_RECEIPT"):
-            ev = e["values"]
-            amount = _dec(ev.get("amount"))
-            big = amount is not None and amount >= threshold
-            flags.append(_flag("UNCLAIMED_RECEIPT",
-                               f"A receipt from {ev.get('vendor', '?')} ({ev.get('date') or 'no date'}, "
-                               f"{ev.get('currency', 'MYR')} {ev.get('amount')}) at {_where(e)} supports no "
-                               f"row of the report{_conf_note(e)}. "
-                               + (f"It is at or above the client's RM {threshold} threshold — a receipt this "
-                                  "size that no row claims is how a missed line looks. Was a line left off the "
-                                  "report, or is a row misread? Acknowledge, or fix the row so it matches."
-                                  if big else "Nothing to pay — noted so it is not lost."),
-                               "universal rule: nothing uploaded vanishes silently"
-                               + ("; " + profile_mod.basis_for(profile, "unclaimed_receipt_threshold",
-                                                               f"unclaimed receipts at or above RM {threshold} need a decision")
-                                  if big else ""),
-                               _ev_cite(e), evidence_id=e["id"], status=OPEN if big else INFO))
+        if e["id"] in matches or e["id"] in contested or not on("UNCLAIMED_RECEIPT"):
+            continue  # matched, or already before the reviewer on a duplicate/ambiguous flag
+        ev = e["values"]
+        amount = _dec(ev.get("amount"))
+        cur = (ev.get("currency") or "MYR").upper()
+        foreign = cur != "MYR"
+        big = amount is not None and amount >= threshold
+        if foreign:
+            # a foreign face amount is never measured against the RM
+            # threshold: a person looks at it
+            why = (f"It is in {cur}, so it cannot be measured against the client's RM {threshold} "
+                   "threshold — decide it yourself. Was a line left off the report, or is a row "
+                   "misread? Acknowledge, or fix the row so it matches.")
+        elif big:
+            why = (f"It is at or above the client's RM {threshold} threshold — a receipt this "
+                   "size that no row claims is how a missed line looks. Was a line left off the "
+                   "report, or is a row misread? Acknowledge, or fix the row so it matches.")
+        else:
+            why = "Nothing to pay — noted so it is not lost."
+        flags.append(_flag("UNCLAIMED_RECEIPT",
+                           f"A receipt from {ev.get('vendor', '?')} ({ev.get('date') or 'no date'}, "
+                           f"{cur} {ev.get('amount')}) at {_where(e)} supports no "
+                           f"row of the report{_conf_note(e)}. " + why,
+                           "universal rule: nothing uploaded vanishes silently"
+                           + ("; a foreign-currency receipt no row claims is always decided by a person"
+                              if foreign else "")
+                           + ("; " + profile_mod.basis_for(profile, "unclaimed_receipt_threshold",
+                                                           f"unclaimed receipts at or above RM {threshold} need a decision")
+                              if big and not foreign else ""),
+                           _ev_cite(e), evidence_id=e["id"], status=OPEN if (big or foreign) else INFO))
 
     # ---- mileage: report lines ↔ KM rows ------------------------------------------
     unpaired_km = list(km_rows)
@@ -427,7 +455,7 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
         if twin is not None:
             unpaired_km.remove(twin)
             verdicts[line["id"]] = ("matched", "")
-            line["values"]["km_row_id"] = twin["id"]
+            km_pairs[line["id"]] = twin["id"]  # returned, never written into the input row
         else:
             verdicts[line["id"]] = ("no_evidence", "")
             if on("MILEAGE_LINE_MISMATCH"):
@@ -545,7 +573,7 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
                                                  "double when the narrative says a return trip"),
                            _ev_cite(t), row_id=k["id"], evidence_id=t["id"]))
     for t in trips:
-        if t["id"] not in used_trips and t["id"] not in matches:
+        if t["id"] not in used_trips and t["id"] not in matches and on("MILEAGE_NO_MAP"):
             tv = t["values"]
             flags.append(_flag("MILEAGE_NO_MAP",
                                f"A map trip on {tv.get('date') or '?'} ({tv.get('purpose', '')}, "
@@ -556,7 +584,8 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
 
     for r in rows:
         verdicts.setdefault(r["id"], ("matched" if r["kind"] == "derived" else "unchecked", ""))
-    return {"flags": flags, "verdicts": verdicts, "matches": matches, "notes": notes}
+    return {"flags": flags, "verdicts": verdicts, "matches": matches, "contested": contested,
+            "km_pairs": km_pairs, "notes": notes}
 
 
 def needs_missing_reference(rows: list[dict], profile: dict) -> str:

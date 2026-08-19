@@ -104,6 +104,10 @@ class InMemoryTools:
     def cancel(self) -> None:
         self._cancelled = True
 
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
     # ---- the tools ----------------------------------------------------------------
 
     async def list_artifacts(self, query: str = "", media_type: str = "", limit: int = MAX_LIST) -> ToolResult:
@@ -211,7 +215,8 @@ class InMemoryTools:
             data={"handle": handle}, handle=handle, provenance=self._prov(m),
             citations=[Citation(artifact_id=m.id, path=m.path, page=page, region=list(region))]))
 
-    async def search_artifacts(self, query: str, limit: int = MAX_SEARCH_HITS) -> ToolResult:
+    async def search_artifacts(self, query: str, limit: int = MAX_SEARCH_HITS,
+                               artifact_ids: list[str] | None = None) -> ToolResult:
         args = (query, limit)
         if (g := self._guard("search_artifacts", args)) is not None:
             return g
@@ -219,7 +224,10 @@ class InMemoryTools:
         if not q:
             return self._record("search_artifacts", args, ToolResult.failure("BAD_INPUT", "empty query"))
         hits, cites = [], []
+        only = set(artifact_ids) if artifact_ids is not None else None
         for m in self.manifest:
+            if only is not None and m.id not in only:
+                continue
             c = self.contents.get(m.id) or {}
             for sheet, cells in (c.get("sheets") or {}).items():
                 for ref, value in cells.items():

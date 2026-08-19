@@ -23,7 +23,7 @@ from app.claims.models import (ClaimCase, ClaimEmployee, ClaimEvidence, ClaimEvi
                                ClaimInvestigation, ClaimRow, ClaimSourceArtifact, ClaimsRun, ClaimsSchema)
 
 from . import claims_scripted as scripted
-from .test_claims_baseline import client, db, run_client_a  # noqa: F401
+from .test_claims_baseline import client, db, rev, run_client_a  # noqa: F401
 
 needs_sample = pytest.mark.skipif(not scripted.GEN.is_dir(), reason="run samples/generate_claims_sample.py first")
 
@@ -169,7 +169,7 @@ async def test_a_run_writes_cases_beside_employees(db, monkeypatch):
     monkeypatch.setattr(config, "CLAIMS_CASE_MODEL", True)
     emp = got["employees"][0]
     r = client.put(f"/api/claims-runs/{run_id}/employees/{emp['id']}/category",
-                   json={"category": "Meals", "gl": "711010", "reason": "test"})
+                   json={"category": "Meals", "gl": "711010", "reason": "test", "expected_revision": rev(run_id)})
     assert r.status_code == 200
     again = client.get(f"/api/claims-runs/{run_id}").json()
     assert next(c for c in again["cases"] if c["employee_id"] == emp["id"])["category"] == "Meals"

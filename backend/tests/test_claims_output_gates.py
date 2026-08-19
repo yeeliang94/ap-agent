@@ -23,7 +23,7 @@ from app.claims import listing as listing_mod
 from app.claims.models import ClaimCase, ClaimsRun
 
 from . import claims_scripted as scripted
-from .test_claims_baseline import client, db, run_client_a  # noqa: F401
+from .test_claims_baseline import client, db, rev, run_client_a  # noqa: F401
 from .test_claims_grouping import _flat_dump_run, _settle_stray
 
 needs_sample = pytest.mark.skipif(not scripted.GEN.is_dir(), reason="run samples/generate_claims_sample.py first")
@@ -61,7 +61,7 @@ async def test_unconfirmed_claimant_is_never_paid_and_the_gate_is_server_side(db
     assert any("CLAIMANT_UNKNOWN" in b for b in blockers) and any("claimant unknown" in b for b in blockers)
     # A note cannot settle CLAIMANT_UNKNOWN.
     unknown = next(f for f in got["flags"] if f["code"] == "CLAIMANT_UNKNOWN" and f["status"] == "open")
-    r = client.post(f"/api/claims-runs/{run_id}/flags/{unknown['id']}/decide", json={"decision": "dismissed", "note": "whatever"})
+    r = client.post(f"/api/claims-runs/{run_id}/flags/{unknown['id']}/decide", json={"decision": "dismissed", "note": "whatever", "expected_revision": rev(run_id)})
     assert r.status_code == 400 and "set or confirm the claimant" in r.text
     # Decide every other open flag; the gate still holds because of the claimants.
     for f in got["flags"]:
@@ -88,7 +88,7 @@ async def test_unconfirmed_claimant_is_never_paid_and_the_gate_is_server_side(db
     for f in got["flags"]:
         if f["status"] == "open" and f["code"] == "CATEGORY_UNCLEAR":
             emp_id = next(c for c in got["cases"] if c["id"] == f["case_id"])["employee_id"]
-            client.put(f"/api/claims-runs/{run_id}/employees/{emp_id}/category", json={"category": "Taxi", "gl": "713070", "reason": "x"})
+            client.put(f"/api/claims-runs/{run_id}/employees/{emp_id}/category", json={"category": "Taxi", "gl": "713070", "reason": "x", "expected_revision": rev(run_id)})
     got = client.get(f"/api/claims-runs/{run_id}").json()
     assert got["outputs"] == {}  # the second case still blocks: one unconfirmed claimant locks the whole listing
     r = client.put(f"/api/claims-runs/{run_id}/cases/{cases[1]['id']}/claimant",
@@ -121,8 +121,11 @@ async def test_stale_revision_is_refused_on_the_delivered_routes(db, monkeypatch
                       json={"category": "Taxi", "gl": "1", "reason": "x", "expected_revision": stale}).status_code == 409
     assert client.post(f"/api/claims-runs/{run_id}/employees/{emp['id']}/retry",
                        json={"expected_revision": stale}).status_code == 409
-    # Without expected_revision the delivered behaviour stands (the old
-    # frontend keeps working); with the current one the action goes through.
+    # Without expected_revision the mutation is refused (400): every current
+    # screen sends it; with the current one the action goes through.
+    assert client.post(f"/api/claims-runs/{run_id}/flags/{flag['id']}/decide",
+                       json={"decision": "dismissed", "note": "x"}).status_code == 400
+    assert client.post(f"/api/claims-runs/{run_id}/employees/{emp['id']}/retry", json={}).status_code == 400
     r = client.post(f"/api/claims-runs/{run_id}/flags/{flag['id']}/decide",
                     json={"decision": "dismissed", "note": "x", "expected_revision": got["revision"]})
     assert r.status_code == 200
@@ -142,7 +145,7 @@ async def test_outputs_carry_the_three_totals_and_name_missing_reported_totals(d
     got = client.get(f"/api/claims-runs/{run_id}").json()
     for f in got["flags"]:
         if f["status"] == "open":
-            body = {"decision": "dismissed", "note": "x"}
+            body = {"decision": "dismissed", "note": "x", "expected_revision": rev(run_id)}
             if f["code"] == "ARTIFACT_UNRESOLVED":
                 body["disposition"] = "irrelevant"
             client.post(f"/api/claims-runs/{run_id}/flags/{f['id']}/decide", json=body)
@@ -162,3 +165,55 @@ async def test_outputs_carry_the_three_totals_and_name_missing_reported_totals(d
     flag = next(f for f in got["flags"] if f["row_id"] == row["id"] and f["code"] == "NO_RECEIPT")
     # it was dismissed above; re-open by deciding a fresh correction path is out of scope — assert shape only
     assert flag["case_id"] == case.id
+
+
+@needs_sample
+@pytest.mark.asyncio
+async def test_disposition_change_after_verification_reverifies_the_case(db, monkeypatch):
+    """A file the worker read cannot change what it is after verification
+    without the case being verified again: at ready, the case's roles are
+    recomputed, its employee goes back to pending and a retry is started;
+    while verifying, the change is refused. A file the worker never read
+    (a stray note) changes freely."""
+    from app.claims.models import ClaimEmployee, ClaimSourceArtifact
+
+    run_id = await run_client_a(db, monkeypatch)
+    got = client.get(f"/api/claims-runs/{run_id}").json()
+    assert got["status"] == "ready"
+    s = db()
+    receipt = next(a for a in s.query(ClaimSourceArtifact).filter(ClaimSourceArtifact.run_id == run_id)
+                   if a.disposition == "used" and a.media_type == "pdf" and a.case_id)
+    case = s.get(ClaimCase, receipt.case_id)
+    assert receipt.path in case.roles["receipt_files"]
+    emp_id = case.legacy_employee_id
+    assert s.get(ClaimEmployee, emp_id).status == "verified"
+    # ready: the change is applied and the case is sent back for verification
+    r = client.post(f"/api/claims-runs/{run_id}/artifacts/{receipt.artifact_id}/disposition",
+                    json={"disposition": "irrelevant", "reason": "a personal receipt, not a claim",
+                          "expected_revision": got["revision"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["reverify_employee_id"] == emp_id
+    s = db()
+    emp = s.get(ClaimEmployee, emp_id)
+    case = s.get(ClaimCase, receipt.case_id)
+    assert emp.status == "pending" and receipt.path not in case.roles["receipt_files"] \
+        and receipt.path not in emp.roles["receipt_files"]
+    assert s.get(ClaimsRun, run_id).outputs == {}
+    audit = client.get(f"/api/claims-runs/{run_id}/audit").json()
+    assert any(a["action"] == "artifact_disposition" and "re-verified" in a["detail"] for a in audit)
+    # verifying: a file inside a verified case is refused until the run is ready
+    run = s.get(ClaimsRun, run_id)
+    run.status = "verifying"
+    other = next(a for a in s.query(ClaimSourceArtifact).filter(ClaimSourceArtifact.run_id == run_id)
+                 if a.disposition == "used" and a.media_type == "pdf" and a.case_id and a.case_id != receipt.case_id)
+    s.commit()
+    rev = client.get(f"/api/claims-runs/{run_id}").json()["revision"]
+    r = client.post(f"/api/claims-runs/{run_id}/artifacts/{other.artifact_id}/disposition",
+                    json={"disposition": "irrelevant", "reason": "x", "expected_revision": rev})
+    assert r.status_code == 400 and "being verified" in r.json()["detail"]
+    # a file the worker never read (irrelevant → duplicate) changes without a re-verification
+    stray = next(a for a in s.query(ClaimSourceArtifact).filter(ClaimSourceArtifact.run_id == run_id)
+                 if a.disposition == "irrelevant")
+    r = client.post(f"/api/claims-runs/{run_id}/artifacts/{stray.artifact_id}/disposition",
+                    json={"disposition": "duplicate", "reason": "x", "expected_revision": rev})
+    assert r.status_code == 200 and "reverify_employee_id" not in r.json(), r.text

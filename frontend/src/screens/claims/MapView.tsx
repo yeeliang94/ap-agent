@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import {
   ClaimMap,
   ClaimsRunDetail,
@@ -7,6 +7,7 @@ import {
   claimsFileUrl,
   confirmClaimMap,
 } from "../../api";
+import { Reload, useAction } from "../../hooks/useAction";
 
 // Map & Rules: confirm the agent's map with one click; correct it if
 // needed. One row per subfolder; every role is a dropdown; the agent's
@@ -27,30 +28,41 @@ export function patternFor(path: string): string {
   return i > 0 ? "*" + name.slice(i) : name;
 }
 
+/** One thing that stops the map being confirmed, carrying the FOLDER it
+ *  belongs to. The folder is the key: a row shows its own problems by
+ *  identity, never by matching the start of the message text (a name that
+ *  is the start of another—"Ali" of "Alicia"—would borrow it). */
+export interface MapProblem {
+  /** The employee folder, "" for a problem that belongs to no row. */
+  folder: string;
+  message: string;
+}
+
 /** Client-side mirror of the server's validation, so the Confirm button
  *  can say why it is disabled. The server checks again. */
-export function mapProblems(map: ClaimMap, run: ClaimsRunDetail): string[] {
+export function mapProblems(map: ClaimMap, run: ClaimsRunDetail): MapProblem[] {
   const survey = "files" in run.survey ? run.survey : null;
   const byPath = new Map((survey?.files ?? []).map((f) => [f.path, f]));
-  const problems: string[] = [];
+  const problems: MapProblem[] = [];
   const codes = new Map<string, string>();
   for (const e of map.employees) {
     if (!e.is_employee || e.skip) continue;
     const label = e.name || e.folder;
+    const say = (message: string) => problems.push({ folder: e.folder, message });
     const receipts = e.files.filter((f) => f.role === "receipts");
     if (e.no_report) {
-      if (receipts.length === 0) problems.push(`${label}: no report and no receipt files — add one or skip`);
+      if (receipts.length === 0) say(`${label}: no report and no receipt files — add one or skip`);
     } else if (!e.report_file) {
-      problems.push(`${label}: choose the report file, or mark “no report”`);
+      say(`${label}: choose the report file, or mark “no report”`);
     } else {
       const f = byPath.get(e.report_file);
-      if (!f || f.type !== "workbook") problems.push(`${label}: the report must be a workbook`);
-      else if (!e.report_tab) problems.push(`${label}: choose the report tab`);
+      if (!f || f.type !== "workbook") say(`${label}: the report must be a workbook`);
+      else if (!e.report_tab) say(`${label}: choose the report tab`);
     }
-    if (!e.name.trim()) problems.push(`${e.folder}: the employee needs a name`);
+    if (!e.name.trim()) say(`${e.folder}: the employee needs a name`);
     const code = e.er_code.trim();
     if (code) {
-      if (codes.has(code)) problems.push(`${label}: ER code ${code} is also used by ${codes.get(code)}`);
+      if (codes.has(code)) say(`${label}: ER code ${code} is also used by ${codes.get(code)}`);
       codes.set(code, label);
     }
   }
@@ -59,9 +71,12 @@ export function mapProblems(map: ClaimMap, run: ClaimsRunDetail): string[] {
 
 export default function MapView({
   run,
+  onChanged,
   onConfirmed,
 }: {
   run: ClaimsRunDetail;
+  /** Re-read the run (a stale-run 409 reloads through this). */
+  onChanged: Reload;
   onConfirmed: () => void;
 }) {
   const initial = ("employees" in run.map ? run.map : { employees: [], root_files: [], notes: [] }) as ClaimMap;
@@ -69,8 +84,11 @@ export default function MapView({
   // path -> pattern the reviewer ticked "remember" on
   const [remember, setRemember] = useState<Record<string, boolean>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  // Confirming goes through the shared action hook, like every other
+  // mutation: the reload is awaited before the button is released and a
+  // stale run (409) reloads the screen before it says so.
+  const action = useAction(onChanged, "Could not confirm the map");
+  const busy = !!action.busy;
   const survey = "files" in run.survey ? run.survey : null;
   const byPath = useMemo(() => new Map((survey?.files ?? []).map((f) => [f.path, f])), [survey]);
   const original = useMemo(() => {
@@ -123,19 +141,17 @@ export default function MapView({
     });
   }
 
-  async function confirm() {
-    setBusy(true);
-    setError("");
-    try {
-      const rules = changedFiles
-        .filter((f) => remember[f.path])
-        .map((f) => ({ pattern: patternFor(f.path), role: f.role }));
-      await confirmClaimMap(run.id, map, rules);
+  function confirm() {
+    const rules = changedFiles
+      .filter((f) => remember[f.path])
+      .map((f) => ({ pattern: patternFor(f.path), role: f.role }));
+    // The revision the screen loaded travels with the map: the server
+    // answers 409 if the run moved on, and the reviewer is not silently
+    // confirming a map built from stale data.
+    return action.run(async () => {
+      await confirmClaimMap(run.id, map, rules, run.revision);
       onConfirmed();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not confirm the map");
-      setBusy(false);
-    }
+    });
   }
 
   return (
@@ -187,9 +203,9 @@ export default function MapView({
               const ignored = e.files.filter((f) => f.role === "ignore");
               const unplaced = e.files.filter((f) => f.role === "unplaced");
               const open = !!expanded[e.folder];
-              const rowProblems = problems.filter((p) => p.startsWith(e.name || e.folder) || p.startsWith(e.folder));
+              const rowProblems = problems.filter((p) => p.folder === e.folder);
               return (
-                <RowGroup key={e.folder}>
+                <Fragment key={e.folder}>
                   <tr className={unplaced.length || rowProblems.length ? "attention" : ""}>
                     <td>
                       <button
@@ -372,7 +388,7 @@ export default function MapView({
                       </td>
                     </tr>
                   )}
-                </RowGroup>
+                </Fragment>
               );
             })}
           </tbody>
@@ -389,27 +405,21 @@ export default function MapView({
           <button
             className="btn primary"
             disabled={busy || problems.length > 0}
-            title={problems.length ? problems.join("\n") : "Save this map and start verifying every employee"}
+            title={problems.length ? problems.map((p) => p.message).join("\n") : "Save this map and start verifying every employee"}
             onClick={confirm}
           >
             {busy ? "Starting verification…" : "Confirm & verify"}
           </button>
           {problems.length > 0 && (
             <span className="sub">
-              Not ready: {problems[0]}
+              Not ready: {problems[0].message}
               {problems.length > 1 ? ` (+${problems.length - 1} more)` : ""}
             </span>
           )}
         </div>
       )}
       {confirmed && <p className="sub">This map was confirmed; verification has started.</p>}
-      {error && <p className="error">{error}</p>}
+      {action.error && <p className="error">{action.error}</p>}
     </div>
   );
-}
-
-// A fragment that lets a data row and its expandable detail row sit side
-// by side inside <tbody> without a wrapper element.
-function RowGroup({ children }: { children: React.ReactNode }) {
-  return <>{children}</>;
 }
