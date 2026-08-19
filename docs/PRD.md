@@ -5,6 +5,14 @@
 The invoice pipeline (design doc: [ap-agent-design.html](../ap-agent-design.html))
 is not changed by this work. Shared plumbing is reused; pipeline stages are not.
 
+> **Scope amendment, 2026-08-19:** The owner does not require a company-recipe
+> feature. Flow 2b's persistent rule discovery, Flow 5's automatic learning,
+> recipe promotion and `RULE_DRIFT` are withdrawn. The agent may investigate
+> and adapt within the current run; explicit client-profile facts remain
+> reviewer-maintained. Full-folder dumps, unknown Claimants, evidence-only
+> cases and tool/sandbox hardening are specified in
+> [CLAIMS-AGENT-HARDENING.md](CLAIMS-AGENT-HARDENING.md).
+
 A few small operational details are still marked **[assumed]** in the flows;
 they are settled on the first real batch and listed at the end. Everything
 else below is confirmed.
@@ -45,10 +53,10 @@ the invoice pipeline today. Single user, no login, as today.
    workers, and its AI cost is recorded in the run diary. *(Confirmed.)*
 5. **Works for a second, differently-shaped company without code changes.**
    On a second synthetic client (flat folder, different report template,
-   different category list and rates, different listing columns), the
-   *discovery* step proposes that client's rules from its own files, and the
-   reviewer needs to correct **at most 2 items** before the batch verifies
-   correctly.
+   different category list and rates, different listing columns), run-local
+   investigation proposes Claim Cases and the reviewer needs to correct **at
+   most 2 grouping items** before the batch verifies correctly. No inferred
+   rule is promoted to a later run.
 
 ---
 
@@ -67,11 +75,11 @@ Most of what was agreed while shaping this came from one company
   list and GL codes, how a mixed report gets its listing category, the
   mileage rates, which items are receipt-optional, how tight the receipt
   date match is, the file-naming convention, which tab is what, the
-  listing's columns. **These are never hard-coded.** The app *discovers*
-  them from the company's own files and past practice, shows each one with
-  the evidence it rests on, a reviewer confirms, and from then on code
-  applies them (see *Discovery* in Flow 2 and *Steering* below). When a
-  case has no precedent, the app asks — and the answer becomes precedent.
+  listing's columns. **These are never company-specific code.** Structure and
+  current-run facts are investigated from the files; persistent policy values
+  are entered deliberately in the Explicit Client Profile. When required
+  information is absent, the app asks or raises a Flag; the answer remains a
+  run decision unless the reviewer separately edits Settings.
 
 The *Decisions* table at the end marks each item as universal or as this
 company's confirmed value.
@@ -86,7 +94,7 @@ company's confirmed value.
 | 2 | As a reviewer, I want to see — and correct — the agent's map of the folder **and the rules it has worked out for this client** before verification runs, so it looks in the right places and applies the right values, and I want my corrections remembered. | MUST HAVE |
 | 3 | As a reviewer, I want every claim row checked against its receipt, and every mileage row against its map and the fixed rate, with flags that cite exactly where to look, so I only spend time on problems. | MUST HAVE |
 | 4 | As a reviewer, I want — once the flags are cleared — one copy-ready listing row per employee with totals that reconcile, so I can paste into the month's Summary of Invoices. | MUST HAVE |
-| 5 | As a reviewer, I want the decisions I make on flags offered back to me as rules for this client, so the agent improves per client without anyone editing prompts. | MUST HAVE — *promoted and confirmed 2026-08-18: this is how "no precedent" cases become precedent; built last within v1* |
+| 5 | As a reviewer, I want the decisions I make on flags offered back to me as rules for this client, so the agent improves per client without anyone editing prompts. | **WITHDRAWN 2026-08-19** — no company recipe or automatic learning; explicit settings change only when the reviewer edits them. |
 
 ---
 
@@ -208,7 +216,14 @@ glance.
 confirm disabled. Reviewer closes the page → nothing is lost; the run stays
 at `map_ready`.
 
-#### Flow 2b — Discovery: the app works out this client's rules (Story 2)
+#### Flow 2b — Discovery: the app works out this client's rules (withdrawn)
+
+**Scope amendment:** Do not implement this persistent discovery flow. The
+current run may inspect its files to understand their structure and propose
+Claim Cases, but it does not save an executable company recipe, promote inferred
+rules, or compare later runs for recipe drift. Explicit values are entered by a
+reviewer in the client profile. The historical design below is retained only to
+explain the earlier plan.
 
 **Trigger.** Runs automatically with the map on a client's **first** run,
 whenever the reviewer clicks **Re-learn this client**, and — in a light
@@ -300,10 +315,10 @@ comparison and every sum.
   flag `MILEAGE_LINE_MISMATCH` naming both places. Mileage lines are
   recognised by the profile's mileage item pattern (e.g. item name contains
   "Mileage") **[assumed]**.
-- **The employee's category for the listing row — decided by precedent.**
-  The category must come from the client's own category list (discovered:
-  the *Expense Types* tab). *Which* category a mixed report gets follows the
-  client's confirmed rule from Discovery. For LinkedIn the confirmed rule is
+- **The employee's category for the listing row — decided by an explicit rule.**
+  The category must come from the client's own category list (read from the
+  current files or entered explicitly in Settings). *Which* category a mixed
+  report gets follows the client's reviewer-maintained rule. For LinkedIn the rule is
   **the report's overall purpose** — the "Business Reason for the Report"
   header plus the detailed reasons on the lines (e.g. "Halloween", "Offsite
   retreat" → *Company Event*, GL 710010). The AI applies the rule and quotes
@@ -311,8 +326,7 @@ comparison and every sum.
   the listing ("Nick Goh, all-taxi report → Taxi") so it reasons the way
   this client has before. If the rule does not settle it, or there is no
   rule yet → flag `CATEGORY_UNCLEAR`; the reviewer sets the category on the
-  employee's summary, the choice is audited, and it is offered as a new
-  precedent (Flow 5).
+  employee's summary and the choice is audited for this run.
 
 **3b. Inventory the evidence pages.**
 - Every receipt-bundle file is split into pages (PDF → image, as today).
@@ -420,7 +434,12 @@ block, the *not included* list.
 and no output. Reconciliation mismatch → red line naming the difference;
 copy still allowed but the mismatch is written to the run diary.
 
-### Flow 5 — Learn from decisions (Story 5)
+### Flow 5 — Learn from decisions (withdrawn)
+
+**Scope amendment:** Do not implement automatic learning from reviewer
+decisions. Decisions remain in the run audit. A reviewer may separately edit an
+Explicit Client Profile value, but no profile or playbook change is proposed or
+applied automatically. The historical design below is retained for context.
 
 This is the ongoing half of Discovery: Flow 2b learns from the *files*;
 this flow learns from the *reviewer*. When a run's review is complete, the
@@ -453,7 +472,7 @@ to install or operate:
   with the existing spreadsheet library.
 
 **Where the code lives.** A new package `backend/app/claims/` (survey,
-mapping, discovery, report reader, page inventory, matching, mileage,
+mapping/investigation, report reader, page inventory, matching, mileage,
 batch, runner, profile) and new API routes under `/api/claims-runs`. A
 *Claims* tab in the frontend with two screens (list, run detail with Map &
 Rules / Review / Output views). `backend/app/pipeline/*` is not modified. A
@@ -469,30 +488,30 @@ nothing is ever tested on real employee data:
   rate, one all-in-one PDF per person, a listing with different columns.
   Success criterion 5 is measured on this client.
 
-**Steering — how the agent is told what a client does.** The AI starts
-every run with no memory; the app decides what it is shown. The values in
-1 and 2 are **discovered, not typed**: Discovery (Flow 2b) proposes them
-from the client's files with evidence, and Flow 5 keeps them current from
-reviewer decisions; a person only confirms or corrects.
+**Steering — how the agent is told what a client does.** The AI receives the
+current run's files, objective and instructions plus a snapshot of explicit
+reviewer-maintained settings. It may infer structure for this run, but it never
+updates persistent settings or creates a reusable company recipe.
 1. **Client profile** (structured values; code reads them, applied
    exactly): the category list with GL codes; the category rule for mixed
    reports; mileage rates by vehicle type; km tolerance (default 0 =
    exact); receipt date window (default same day); receipt-optional expense
    items; file-role patterns; mileage item pattern; mileage layout (per
-   trip / summed); which checks are on. Each value carries its evidence
-   ("from tab *Expense Types*", "12 of 14 past listing rows", "set by
-   reviewer on run 3"). Editable on the Settings screen. (Listing columns
-   are *not* here — they are read from the client's listing each run.)
+   trip / summed); which checks are on. Each changed value records who set it
+   and when. Values are editable on the Settings screen and never changed by
+   the agent. (Listing columns are not here — they are read from the client's
+   listing each run.)
 2. **Client playbook** (half a page of plain-language notes; the AI is
    shown it at the map step and in every worker): where things are and what
-   matters for this client. Discovery drafts it; the team edits it. It
-   steers *where to look*; it never decides pass/fail.
+   matters for this client. The team edits it. It steers *where to look*; it
+   never decides pass/fail or updates itself.
 3. **Check catalogue** (fixed, tested): the checks in Flow 3. The playbook
    and profile can turn them on/off and tune them; a *new* kind of check is
    a developer change.
-4. **Memory**: the client's last confirmed map is shown to the AI as a
-   worked example; the closest past listing rows are shown when a category
-   is being decided; reviewer decisions become proposals (Flow 5).
+4. **Non-authoritative examples**: the client's last confirmed map may be shown
+   to the AI as a worked example and past listing rows may be shown when a
+   category is being decided. Fresh inventory, audit and reviewer confirmation
+   still run; decisions do not become profile proposals.
 Every flag names the rule it applied and where the rule came from, so the
 steering is always visible on the card.
 
@@ -500,7 +519,9 @@ steering is always visible on the card.
 locally, the enterprise proxy on Windows), the SharePoint MCP reader,
 pymupdf, openpyxl, Pillow. No new external services.
 
-**Data model (plain terms).**
+**Data model (plain terms).** The following is the delivered v1 model. The
+target model makes Claim Case primary and adds Source Artifacts and Evidence
+Assignments; see `CLAIMS-AGENT-HARDENING.md`.
 - **Claims run** — one batch: client, folder link, listing link and the
   header map read from it, received date, status
   (`queued → surveying → mapping → map_ready → verifying → ready / failed`),
@@ -524,10 +545,11 @@ pymupdf, openpyxl, Pillow. No new external services.
 
 ## Scope Boundaries
 
-**In scope (v1).** Flows 1–5 as written, including Discovery (2b); the
-check catalogue in Flow 3; profile + playbook + last-map memory; the two
-synthetic clients with ground truth and an end-to-end verifier script; the
-Claims tab; per-employee retry; audited corrections.
+**In scope.** Flows 1–4, excluding the withdrawn persistent Discovery 2b and
+Flow 5; the check catalogue in Flow 3; explicit profile + playbook +
+non-authoritative last-map example; the synthetic clients and full-dump
+scenarios with ground truth; the Claims tab; per-case retry; audited
+corrections; and the hardening plan's tool-using run-local investigation.
 
 **Out of scope (for now).**
 - Writing the batch rows into a draft tab of the client's listing workbook
@@ -557,29 +579,28 @@ Claims tab; per-employee retry; audited corrections.
 
 ## Decisions (confirmed by the owner, 2026-08-18)
 
-*Scope* says whether a decision is a **universal** rule built into the
-checks, or **this client's** value — a starting profile for LinkedIn
-Malaysia that Discovery must be able to find (or the reviewer confirm) for
-any other client. Client values are never hard-coded.
+*Scope* says whether a decision is a **universal** rule built into the checks,
+or **this client's** explicit value. Client values are never hard-coded and are
+not learned automatically.
 
 | # | Question | Decision | Scope |
 |---|---|---|---|
-| 1 | Category / GL on the employee's listing row when the report mixes categories | Category comes from the client's own list; *which* one follows the client's confirmed rule, learned from precedent. LinkedIn's rule: **the overall purpose of the report** ("Business Reason" header + line reasons; an offsite → *Company Event*, GL 710010). AI applies, cites, sees past examples; `CATEGORY_UNCLEAR` when unsettled; reviewer's choice becomes precedent. | Mechanism universal; **rule is this client's** |
+| 1 | Category / GL on the employee's listing row when the report mixes categories | Category comes from the client's own list; *which* one follows the reviewer-maintained category rule. LinkedIn's explicit rule is **the overall purpose of the report** ("Business Reason" header + line reasons; an offsite → *Company Event*, GL 710010). AI applies and cites; `CATEGORY_UNCLEAR` when unsettled. A run decision does not automatically change the rule. | Mechanism universal; **rule is this client's** |
 | 2 | Listing columns | **Not hard-coded.** A link to the month's listing is given per run; the AI reads its header row; rows are emitted in that order. | Universal |
 | 3 | Km tolerance | **Any difference flags** — exact, or exactly double for a return trip. Profile field, default 0. | Universal default; client may loosen |
-| 4 | Mileage on the report | **One report line per trip**; KM tab is the working; lines pair with KM rows by date + amount. Discovery detects per-trip vs summed from how employees fill it. | **This client's** |
-| 5 | "Receipt included = N" | **Allowed only for items the profile names** (LinkedIn: e.g. Mobile Allowance); otherwise `NO_RECEIPT`. Discovery proposes the list from past paid rows without receipts. | Mechanism universal; **item list is this client's** |
+| 4 | Mileage on the report | **One report line per trip**; KM tab is the working; lines pair with KM rows by date + amount. A different layout is investigated for the current run and unresolved ambiguity is flagged. | **This client's explicit value** |
+| 5 | "Receipt included = N" | **Allowed only for items the profile names** (LinkedIn: e.g. Mobile Allowance); otherwise `NO_RECEIPT`. The reviewer maintains the list in Settings. | Mechanism universal; **item list is this client's** |
 | 6 | Receipt date window | **Same day only.** Profile field. | Universal default; client may loosen |
 | 7 | Foreign-currency rows | **Accept the typed rate; check the arithmetic** and that the receipt currency matches. | Universal |
 | 8 | Receipts but no report, no playbook rule | **Build the rows from the receipts and flag `NO_REPORT`.** | Universal |
-| 9 | Category list, GL codes, mileage rates (0.64 / 0.35), `ER(...)` naming, which tab is what | Discovered from the client's files (Expense Types tab, KM tab, file names, past listing tabs) and confirmed by the reviewer. | **This client's** |
+| 9 | Category list, GL codes, mileage rates (0.64 / 0.35), `ER(...)` naming, which tab is what | Current structure is investigated from the run's files; persistent policy values are set explicitly by the reviewer. | **This client's** |
 
 ## Confirmed defaults (owner: "default", 2026-08-18)
 
 | Item | Confirmed value |
 |---|---|
-| Story 5 (learn from reviewer decisions) | MUST HAVE; built last within v1 |
-| Delivery order | **v1 first** — Flows 1–4, Story 5, profile + playbook + last-map memory (plan Phases 1–5); **v2 after** v1 passes its verifier — Discovery (Flow 2b), `RULE_DRIFT`, the second synthetic client (plan Phase 6). Nothing dropped, only ordered. |
+| Story 5 (learn from reviewer decisions) | **Withdrawn 2026-08-19**; no company recipe or automatic learning |
+| Delivery order | Finish reusable Phase 4b controls, then H0–H12 in `CLAIMS-AGENT-HARDENING.md`; run-local investigation and full-dump support replace persistent Discovery and `RULE_DRIFT`. |
 | Pause at the map | Always, in v1 (one click); auto-continue on a clean map is a later option |
 | Received date on listing rows | Typed by the reviewer when starting the run |
 | Quotas | 30 employee folders per batch; 60 files / 200 pages per employee; 25 MB per file; over a limit the run refuses and names it |

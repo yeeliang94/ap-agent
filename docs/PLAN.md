@@ -1,9 +1,20 @@
 # Implementation Plan: Employee Claims Verification Module
 
-**Overall Progress:** `47%` (Steps 1–14 of 30 — Phase 4b R1–R10 added 2026-08-19)
-**PRD Reference:** [docs/PRD.md](PRD.md) (flows 1–5, check catalogue in Flow 3, steering, decisions table)
-**Last Updated:** 2026-08-19 (Phases 1–4 done; peer-review fixes landed same day; **Phase 4b next**, then Phase 5)
+**Overall Progress:** Core Steps 1–14 complete; follow-on Phase 4b and hardening
+H0–H12 are tracked by their checklists.
+
+**PRD Reference:** [docs/PRD.md](PRD.md) (Flows 1–4, withdrawn 2b/5,
+check catalogue in Flow 3, steering, decisions table)
+
+**Last Updated:** 2026-08-19 (agentic/full-dump scope added; no company recipe)
 **Previous plan (invoice pipeline MVP, complete):** [docs/PLAN-MVP.md](PLAN-MVP.md)
+**Agentic/full-dump hardening:** [docs/CLAIMS-AGENT-HARDENING.md](CLAIMS-AGENT-HARDENING.md)
+
+> **Scope amendment, 2026-08-19:** Phase 6's company-rule discovery,
+> learn-from-decisions and `RULE_DRIFT` work is superseded by the hardening
+> plan above. Investigation may adapt within a run, but no company recipe,
+> automatic rule learning, recipe promotion or recipe drift feature will be
+> built. Explicit profile settings remain reviewer-maintained.
 
 ## Summary
 
@@ -11,11 +22,11 @@ Build a *Claims run* — a second run type inside the AP Agent — that takes a
 SharePoint folder link (plus a link to the month's listing), finds each
 employee's expense report and receipts by itself, verifies every claim row
 and mileage trip with code-checked arithmetic and cited evidence, and, once a
-person has cleared the flags, produces one copy-ready listing row per
-employee. The invoice pipeline is not touched. Delivery is in two tiers: **v1
-is deliberately Copilot-simple** (folder + optional paragraph of
-instructions → verified tables → listing rows), and **v2 adds discovery and
-learning** so a new company needs no instructions at all.
+person has cleared the flags, produces copy-ready listing rows. The invoice
+pipeline is not touched. The delivered v1 is deliberately Copilot-simple
+(folder + optional paragraph of instructions → verified tables → listing
+rows). The next tier is the run-local, tool-using full-dump investigation in
+`CLAIMS-AGENT-HARDENING.md`; it does not learn or promote a company recipe.
 
 ## Key Decisions
 
@@ -41,10 +52,9 @@ learning** so a new company needs no instructions at all.
 - **Company values are not hard-coded** — rates, receipt-optional items,
   category rule, mileage layout live in a per-client profile + playbook.
   LinkedIn's confirmed values are the *sample's* defaults, not the code's.
-- **v1 before v2 (confirmed by the owner 2026-08-18)** —
-  Phases 1–5 ship the simple experience the owner liked in the Copilot test;
-  Phase 6 (Discovery, learn-from-decisions, second client) starts only after
-  v1 passes its verifier. Nothing from the PRD is dropped, only ordered.
+- **Correctness before agentic expansion** — finish the reusable backend
+  controls in Phase 4b, then implement H0–H12 in the hardening plan. Persistent
+  discovery and learn-from-decisions were withdrawn by the owner on 2026-08-19.
 - **Listing columns come from the client's own listing** — the reviewer links
   the month's listing; the AI maps its header row; code emits rows in that
   order.
@@ -81,8 +91,9 @@ peer review and the checks walkthrough:*
   its receipt, not only the flagged rows. Same CSS, same components; the
   flag cards stay, gaining title / meaning / what-to-do / amount at stake,
   and a summary strip with filters above them.
-- **Phase 4b goes before Phase 5** — Step 15's checks on/off toggles need
-  the catalogue (R1); nothing in Phase 5/6 is changed, only pushed down.
+- **Phase 4b backend controls remain prerequisites** — Step 15's checks on/off
+  toggles need the catalogue (R1). R7–R10 should be completed against Claim
+  Cases during hardening so the employee-only UI is not built twice.
 
 ## Screens & UX (what the reviewer sees)
 
@@ -98,17 +109,17 @@ a programmer either.
 |---|---|---|---|
 | **Claims list** (new *Claims* tab beside *Runs*) | See past batches, start a new one | *New claims run* card at top; table of runs: client, folder, started, status chip ("Map ready", "Verifying 3/10", "Ready", "Failed"), employees, open flags | Empty: "No claims runs yet — start one above." Failed row shows the reason inline |
 | **New claims run** form | The Copilot-simple start | Folder link · listing link · received date · *Instructions for this client* (textarea, prefilled from the client playbook, optional, placeholder shows an example paragraph) · *Start*. Local dev only: zip upload | Inline validation (link shape, date); disabled *Start* until valid; "Starting…" then redirect |
-| **Run detail → Map & Rules** | Confirm the agent's map with one click; correct if needed | One row per subfolder: employee · ER code · report file+tab · mileage tab · receipt files · ignored · unplaced · warnings badge; each role is a dropdown; **reason on hover/expand** ("tab `Expense Report`: name header, Date/Item/Amount columns"); *remember for <client>* tick per correction; **Confirm & verify** (disabled until valid, tooltip says why); v2 adds a *Rules* panel beside the map | Loading skeleton while mapping; warnings listed above the table; invalid edit → inline message |
+| **Run detail → Map & Rules** | Confirm the agent's current v1 map with one click; correct if needed | One row per subfolder: employee · ER code · report file+tab · mileage tab · receipt files · ignored · unplaced · warnings badge; each role is a dropdown; **reason on hover/expand** ("tab `Expense Report`: name header, Date/Item/Amount columns"); *remember for <client>* tick per correction; **Confirm & verify** (disabled until valid, tooltip says why). H6 replaces this with Map & Group for flat dumps. | Loading skeleton while mapping; warnings listed above the table; invalid edit → inline message |
 | **Run detail → Verifying** | Watch progress without refreshing | Employee chips: queued / verifying / done (n flags) / failed (retry button); overall bar; Activity link | Poll every 3 s (as today); failed employee shows reason and *Retry* |
 | **Run detail → Review** | Clear flags fast | Employee summary table (name, ER code, category + why, rows verified/flagged, total, status); below it flag cards **grouped by employee**, each: code, reason, basis ("client profile: car RM 0.64/km"), **evidence preview** — page image with the receipt's position highlighted, or the sheet row — and actions *Accept* / *Exclude (note)* / *Fix a value* / *Re-verify employee* | "All flags resolved — Output unlocked" banner; per-flag saving state; instant re-check spinner on fix |
 | **Run detail → Review (Phase 4b additions)** | Understand the batch at a glance; review by employee, not by flag | **Summary strip**: counts by kind with RM at stake ("5 need a receipt · RM 340 · 3 uncertain reads · 2 mileage · 4 notes"), click to filter; **flag cards** carry a title, a one-line meaning, "what to do" and the amount at stake ("Accept — leave RM 45.00 out"); **All rows** per employee (expandable): every row with a verdict chip (matched ✓ / no receipt / uncertain / duplicate / receipt-optional / excluded), its receipt (vendor · page · position, *show* highlights it), the flags on that row, *Fix a value*; mileage rows beside their map trip | Filter with no matches: "No open flags of this kind"; excluded rows greyed with the decision; corrected values marked |
 | **Run detail → Output** | Copy the listing rows | Totals cards (employees included, total MYR), reconciliation line (green/red with the difference named), copy block (TSV preview, header order from the client's listing), *Not included* list with reasons | Locked state: "Review is not complete: 4 flags open" with link to Review; header-fallback notice when the listing headers could not be read |
-| **Run detail → Activity** | What the system did | Run diary as today: map rounds, per-employee timings, AI cost, warnings, RULE_DRIFT (v2) | — |
-| **Settings → Claims (per client)** | The few values code needs | Mileage rates by vehicle type; km tolerance (default 0); receipt-optional items; mileage item pattern; the playbook textarea; last confirmed map (read-only, with *forget*) | Save confirmation; values carry "set by reviewer on <date>" (v2: evidence) |
+| **Run detail → Activity** | What the system did | Run diary as today: map/investigation rounds, per-case timings, AI/tool cost, and warnings | — |
+| **Settings → Claims (per client)** | The few explicit values code needs | Mileage rates by vehicle type; km tolerance (default 0); receipt-optional items; mileage item pattern; the playbook textarea; last confirmed map (read-only, with *forget*) | Save confirmation; values carry "set by reviewer on <date>"; the agent never changes them automatically |
 
 ## Pre-Implementation Checklist
 - [x] 🟩 PRD written and updated with the owner's decisions (2026-08-18)
-- [x] 🟩 Owner confirmed the two open items in the PRD (2026-08-18): Story 5 is MUST HAVE (built last within v1); v1→v2 sequencing
+- [x] 🟩 Historical 2026-08-18 decision recorded; Story 5 and persistent discovery were superseded by the owner's no-company-recipe decision on 2026-08-19
 - [x] 🟩 Owner confirmed the four defaults (2026-08-18): always pause at the map; received date typed at run start; quotas 30 / 60 files / 200 pages / 25 MB; under 5 minutes for 10 employees
 - [x] 🟩 No conflicting in-progress work (repo clean at start)
 - [x] 🟩 Local `.env` OpenAI key still valid (`AP_LIVE_TESTS=1 pytest backend/tests/test_model_layer.py` — 1 passed, 2026-08-18)
@@ -276,22 +287,15 @@ clean sample).
   - [ ] 🟥 README: Claims section, .env notes; `docs/WINDOWS-AGENT-TASK.md`: add "nested folder read through the real MCP" and "listing header read on a real Summary of Invoices" to the checklist; PRD status line updated
   - **Verify:** `start.bat`/`start.sh` serve the Claims tab; docs read through once by the owner.
 
-### Phase 6: v2 — Discovery & learning (confirmed: starts only after Phase 4's verifier passes)
-- [ ] 🟥 **Step 17: Discovery (PRD Flow 2b)** — the app proposes the client's rules from its own files, with evidence.
-  - [ ] 🟥 Evidence gathering: *Expense Types* tab → category list; *KM* tab → rates; how employees fill mileage (per trip vs summed); listing past tabs → how ER rows were categorised; policy doc if present; optional links to previous batches
-  - [ ] 🟥 Proposals with evidence per line; *Rules* panel beside the map (accept / edit / reject / "no evidence — please set"); confirmed values → profile + playbook with evidence and date; light pass on later runs → `RULE_DRIFT` note
-  - **Verify:** on Client A with an **empty** profile, discovery proposes: the 23 categories, RM 0.64 / 0.35, per-trip mileage, Mobile Allowance receipt-optional, `_Approval.pdf` ignore, "category follows stated purpose" with the count of matching past rows; adding a new category to the template raises `RULE_DRIFT` on the next run.
+### Phase 6: Superseded by agentic/full-dump hardening
 
-- [ ] 🟥 **Step 18: Learn from decisions (PRD Flow 5)** — reviewer decisions become proposals.
-  - [ ] 🟥 End-of-review proposals from exclude notes, corrections and category choices; accept → profile/playbook with the run as evidence; audited
-  - **Verify:** exclude three `NO_RECEIPT` flags on the same item with a note → one proposal appears → accept → the next run raises none for that item; the audit trail shows the acceptance.
-
-- [ ] 🟥 **Step 19: Client B (deliberately different) + success criterion 5** — proof it isn't a LinkedIn tool.
-  - [ ] 🟥 Generator adds Client B: flat folder, different report template and category list, one rate, one all-in-one PDF per person, different listing columns, its own ground truth
-  - **Verify:** discovery on Client B needs ≤ 2 corrections; the batch verifies; the verifier passes on both clients.
-
-- [ ] 🟥 **Step 20: Peer review + simplification pass** — as after the MVP.
-  - **Verify:** review findings fixed and re-verified with two clean end-to-end runs on both clients.
+The earlier company-rule discovery, learn-from-decisions and `RULE_DRIFT`
+steps are withdrawn. Continue with H0–H12 in
+[CLAIMS-AGENT-HARDENING.md](CLAIMS-AGENT-HARDENING.md): run-local tool-using
+investigation, Claim Cases with optional Claimants, full-folder grouping,
+evidence-only verification, deterministic controls, and an optional isolated
+Python sandbox. The second-client proof is retained and expanded into the
+evaluation matrix there.
 
 ## Implementation notes (what was found on the way)
 

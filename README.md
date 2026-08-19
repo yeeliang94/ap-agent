@@ -8,7 +8,7 @@ a **draft** of next month's payment-listing tab on a copy of the client's own
 workbook. The agent never writes to SharePoint or any working file — a
 person pastes, and finalises the draft after the bank run.
 
-Design doc: [ap-agent-design.html](ap-agent-design.html) · MVP plan (done): [docs/PLAN-MVP.md](docs/PLAN-MVP.md) · Claims module: [docs/PRD.md](docs/PRD.md) → [docs/PLAN.md](docs/PLAN.md)
+Design doc: [ap-agent-design.html](ap-agent-design.html) · MVP plan (done): [docs/PLAN-MVP.md](docs/PLAN-MVP.md) · Claims module: [docs/PRD.md](docs/PRD.md) → [docs/PLAN.md](docs/PLAN.md) → [agentic/full-dump hardening](docs/CLAIMS-AGENT-HARDENING.md)
 
 ## Layout
 

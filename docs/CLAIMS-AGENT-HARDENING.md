@@ -1,0 +1,779 @@
+# Claims Agent Hardening Plan — Tool-Using Investigation and Full-Folder Dumps
+
+**Status:** Proposed for implementation  
+**Written:** 2026-08-19  
+**Owner decision:** Do not build a company-recipe feature. No automatic rule
+learning, recipe promotion, or cross-run recipe drift workflow.  
+**Extends:** [Employee Claims Verification plan](PLAN.md) and
+[PRD](PRD.md)  
+**Invoice pipeline:** Out of scope; `backend/app/pipeline/` remains untouched.
+
+## Outcome
+
+A reviewer gives the Claims module a folder and a short objective such as:
+
+> Check the expense records and all supporting evidence, group what belongs
+> together, reconcile every line and total, and show me anything that does not
+> agree.
+
+The system must handle all of these without company-specific code:
+
+1. One folder per claimant, with a report workbook and receipt bundles.
+2. A flat folder containing several claimants' reports and evidence.
+3. A full folder dump containing evidence but no per-claimant folders.
+4. Evidence-only submissions with no claim summary.
+5. A master workbook containing several claimants.
+6. A familiar input whose layout changes in a later month.
+
+The agent may decide how to investigate and may use file, workbook, document,
+calculator, and isolated Python tools. It may not decide that an unsupported
+payment is safe. Code enforces the universal controls, and a reviewer confirms
+grouping, ownership, material assumptions, and every blocking Flag.
+
+## Scope decision: no company recipe
+
+This plan deliberately excludes a reusable or learned company recipe.
+
+- The agent creates an **Investigation Plan for the current Claims Run only**.
+- The plan, tool calls, calculations, and source hashes are stored for audit and
+  replay, but are not applied automatically to a later run.
+- The existing Explicit Client Profile remains for facts a reviewer deliberately
+  maintains: mileage rates, tolerances, category values, receipt exceptions, and
+  check toggles.
+- Optional plain-language instructions remain. They apply to the current run;
+  a saved playbook may prefill them, but it never overrides a source audit.
+- The last confirmed map may remain as a non-authoritative worked example. It
+  never bypasses a fresh inventory, grouping confirmation, or control check.
+- Reviewer decisions do not silently update settings or create executable rules.
+
+This is less automation than a recipe system, but it is simpler to explain and
+safer when a company's process changes unpredictably month to month.
+
+## What changes from the current module
+
+The existing module is strong at a known claims shape but assumes the grouping
+too early:
+
+- `FolderMap` starts with one employee per subfolder, while root files can only
+  be classified, not grouped into cases (`backend/app/claims/mapping.py`).
+- `ClaimEmployee` owns rows, evidence, status, totals, and category
+  (`backend/app/claims/models.py`).
+- A no-report worker can derive rows from receipts, but only after an employee
+  already exists (`backend/app/claims/worker.py`).
+- Report, evidence, and listing readers adapt coordinates within fixed semantic
+  forms (`report_reader.py`, `evidence.py`, and `listing.py`).
+- `create_agent` provides a required output form but no investigation tools
+  (`backend/app/model_layer.py`).
+- Run instructions currently reach the folder mapper; they do not form the
+  objective of the per-case worker.
+
+The current correctness work remains valuable. R1–R6 from `docs/PLAN.md` — the
+flag catalogue, report-total handling, skipped subtotal rows, duplicate scans,
+cross-case duplicate evidence, and material unclaimed evidence — becomes part of
+the universal control layer. It must not be replaced with AI judgment.
+
+## Design principles
+
+1. **Claim Case, not employee folder, is the organizing concept.** A Claim Case
+   may have a confirmed, proposed, or unknown Claimant.
+2. **Inventory before interpretation.** Every Source Artifact is hashed,
+   snapshotted, inspected, and ultimately dispositioned.
+3. **Agent investigates; code controls; reviewer authorizes.** Tool freedom is
+   inside the investigation. Release conditions remain deterministic.
+4. **Stable result, flexible implementation.** Input layouts and investigation
+   steps may vary; the normalized result does not.
+5. **Missing information stays missing.** Plausible ownership, purpose, category,
+   or amount is not converted into fact.
+6. **No direct side effects from the agent.** Tools read the run snapshot or
+   write only to the run's temporary output area. The agent never writes to
+   SharePoint, the source workbook, settings, or the database directly.
+7. **Replayable money.** Every payment amount is reproducible with `Decimal`
+   from cited source values and recorded transformations.
+8. **Graceful degradation.** If Python is unavailable, the rest of the toolset
+   still works and the run names the capability it could not perform.
+
+## Target deep module and seam
+
+Create one deep `ClaimsInvestigator` module. Its interface is the test surface:
+
+```python
+async def investigate(request: InvestigationRequest,
+                      tools: InvestigationTools) -> InvestigationResult:
+    ...
+```
+
+`InvestigationRequest` contains only:
+
+- Claims Run id and immutable workspace path.
+- Source Artifact manifest with hashes.
+- Current-run instructions and objective.
+- Snapshot of the Explicit Client Profile.
+- Optional current listing, policy, roster, or historical references supplied
+  for this run.
+- Resource budget: wall time, model requests, tool calls, and bytes/pages read.
+
+`InvestigationResult` contains only normalized domain results:
+
+- Source Artifacts and their dispositions.
+- Evidence Items with values, confidence, and Citations.
+- proposed Claim Cases and Claimants.
+- Evidence Assignments, including basis and status.
+- Claim Lines, whether reported or evidence-derived.
+- Flags, assumptions, and unresolved questions.
+- the run-local Investigation Plan and tool-execution record.
+
+The module hides prompting, tool selection, retries, sandbox mechanics, file
+formats, and model-provider details. Callers and end-to-end tests should not
+need to know which internal adapter produced the result.
+
+The real adapters behind the seam are:
+
+- **Structured-folder adapter:** the current employee-folder path, retained as
+  the fast path for familiar batches.
+- **Full-dump adapter:** global inventory and proposed grouping when folder
+  structure carries no ownership.
+- **Evidence-only adapter:** derives proposed Claim Lines when no summary exists.
+- **In-memory test adapter:** scripted artifacts and tool results for deterministic
+  tests.
+
+The current readers remain internal implementations where they fit. They no
+longer define what input shapes the external interface accepts.
+
+## Normalized domain model
+
+### Claims Run
+
+Add an immutable manifest containing each file's relative path, byte size,
+content hash, type, page/sheet count, and snapshot location. A run never
+re-reads a live source after snapshotting.
+
+### Source Artifact
+
+One record per submitted file, even when it contains several Evidence Items.
+Required fields:
+
+- source path, content hash, media type, and size;
+- inspection state and failure reason;
+- proposed role and the reason/citations for it;
+- disposition: `used`, `duplicate`, `irrelevant`, `unreadable`, or `unresolved`;
+- reviewer confirmation where required.
+
+`ignored` is not a terminal state. A file may be irrelevant, but the reason
+must be recorded.
+
+### Evidence Item
+
+One extracted item from a Source Artifact. Start with receipt, map trip, report
+line, approval, and other, but allow an `attributes` dictionary for source facts
+that do not belong in the universal fields. Core fields are type, source
+Citation, extracted values, confidence by field, and extraction method.
+
+### Claim Case
+
+One proposed payment-listing decision. Required fields:
+
+- optional Claimant name and identifier;
+- claimant state: `confirmed`, `proposed`, or `unknown`;
+- case state: `proposed`, `confirmed`, `blocked`, or `excluded`;
+- grouping basis and Citations;
+- Claim Lines, assigned Evidence Items, totals, category, and GL where known.
+
+A Claim Case is allowed to exist without a Claimant so that the system can show
+useful work without inventing who should be paid.
+
+### Evidence Assignment
+
+Replace the single `matched_row_id` assumption with an explicit relationship:
+
+- Evidence Item → Claim Case and optionally → Claim Line;
+- state: `proposed`, `confirmed`, or `rejected`;
+- basis: exact identifier, explicit name, supplied filename rule, report
+  reference, reviewer decision, or AI inference;
+- confidence and supporting Citations.
+
+One Evidence Item cannot support two payable Claim Lines unless a reviewer
+confirms that the source legitimately covers both.
+
+### Claim Line
+
+Keep universal money fields stable: date, description, claimed amount,
+currency, rate, home amount, category, GL, and purpose. Preserve source-specific
+values under `attributes` and cite each material value. Record origin as
+`reported`, `evidence_derived`, or `reviewer_entered`.
+
+An evidence-derived line is a proposal, not an approved claim amount.
+
+## Full-folder-dump workflow
+
+### 1. Snapshot and inventory
+
+Walk the complete folder without assuming top-level folders are employees.
+Enforce run-wide limits first; per-case limits apply only after cases exist.
+Hash every file, reject path escapes, and build previews without executing
+macros, formulas, links, or embedded code.
+
+### 2. Inspect and classify
+
+The agent uses tools to inspect likely workbooks, PDFs, images, and supported
+documents. It proposes a role for every Source Artifact with a reason. Unknown
+files remain unresolved and visible.
+
+### 3. Extract identity signals
+
+Collect claimant names, employee codes, email addresses, report references,
+cardholder names, filename prefixes, approval subjects, and supplied roster or
+listing references. Keep the source and confidence of every signal.
+
+Identity policy:
+
+- Explicit, unambiguous identity in a source may support a strong proposal.
+- A filename convention supplied by the reviewer may support a proposal.
+- Similar dates, merchants, amounts, or proximity in the folder never confirm
+  ownership by themselves.
+- Conflicting strong signals force `Claimant = unknown` and a blocking Flag.
+- The reviewer always confirms the grouping before verification proceeds.
+
+### 4. Propose cases and assignments
+
+Cluster Evidence Items and summaries into Claim Cases. Each proposed assignment
+must say why. Leave evidence unassigned when the basis is weak; do not optimize
+for assigning everything.
+
+### 5. Map & Group review gate
+
+Replace the employee-only map screen with a case-oriented screen:
+
+- proposed cases with Claimant, identifiers, totals, confidence, and reasons;
+- Source Artifacts and Evidence Items inside each case;
+- an unassigned pool;
+- merge, split, move, create case, set Claimant, mark irrelevant, and mark
+  unreadable actions;
+- an explicit count of artifacts with no disposition;
+- **Confirm grouping & verify**, disabled while ownership conflicts or unresolved
+  potentially material artifacts remain.
+
+Every action is audited. Confirmation converts proposed assignments to confirmed
+assignments; AI inference alone never does.
+
+### 6. Build or read Claim Lines
+
+- If a summary/report exists, read its lines and total, then match evidence.
+- If only evidence exists, create one proposed line per evidence item or one
+  combined line only when the source explicitly supports aggregation.
+- Raise `CLAIM_AMOUNT_UNCONFIRMED` for evidence-derived lines until a reviewer
+  confirms the payable amount.
+- Raise `PURPOSE_UNKNOWN` and `CATEGORY_UNCLEAR` when required output facts are
+  absent.
+- Preserve the current `NO_REPORT` behaviour as a compatibility description,
+  but use `NO_SUMMARY` as the broader domain condition in new code.
+
+### 7. Verify each confirmed case
+
+Run case workers in parallel with per-run and per-case budgets. The worker sees
+the case's confirmed artifacts plus read-only access to the global inventory for
+cross-case duplicate checks. It receives the current-run objective and
+instructions, not only a preselected report tab.
+
+### 8. Review and output
+
+The reviewer sees every case, line, Evidence Assignment, unused Evidence Item,
+and Flag. Output remains locked until all blocking conditions are resolved.
+
+## Investigation tools
+
+The agent receives small, typed, allowlisted tools. Tools return data; they do
+not write domain records directly.
+
+| Tool | Capability | Required controls |
+|---|---|---|
+| `list_artifacts` | Search and filter the immutable manifest | Run-relative paths only |
+| `inspect_workbook` | Sheets, tables, used ranges, names, formulas, hidden/merged areas | Cell/row/column limits; no macro execution |
+| `read_cells` | Exact values/formulas for a bounded range | Range and text-size limits; provenance returned |
+| `inspect_document` | Page count, text blocks, thumbnails, document metadata | Page/byte limits; embedded links inert |
+| `render_page` / `crop_page` | Visual inspection and precise Citations | Image dimension and crop limits |
+| `search_artifacts` | Search extracted text for names, IDs, totals, or references | Bounded results; source locations returned |
+| `calculate` | Exact `Decimal` arithmetic and reconciliation | Expression grammar; no `eval`; operation cap |
+| `compare_tables` | Join, group, diff, and sum bounded tables | Deterministic operations; input/output caps |
+| `run_python` | Irregular read-only transformations in isolation | Disabled unless the sandbox exit gate is met |
+| `record_proposal` | Add an in-memory proposed case, assignment, line, or assumption | Schema validation; no database write |
+
+Tool outputs include a tool-call id, elapsed time, input artifact hashes, output
+hash, truncation indicator, and error code. Large results are written to the
+run's temporary output directory and returned by handle.
+
+## Python sandbox hardening
+
+Python expands capability and risk. It must be behind a `SandboxPort` with a
+production adapter and an in-memory test adapter. Never execute model-generated
+code inside the FastAPI process.
+
+Production requirements:
+
+- Ephemeral process/container identity for each execution.
+- Source snapshot mounted read-only; one empty writable output directory.
+- No network, inherited credentials, browser session, environment secrets,
+  subprocess creation, or host filesystem access.
+- Explicit allowlist of data libraries; macros and native extensions reviewed.
+- Wall-time, CPU, memory, process, open-file, input-byte, and output-byte limits.
+- Kill the entire execution tree on timeout or cancellation.
+- Store code, dependency versions, stdout/stderr with redaction, output hashes,
+  and exit status in the run record.
+- Re-run successful scripts once when they affect money; outputs must be
+  deterministic.
+- Parse output through the same normalized schemas and controls as any other
+  adapter.
+
+Do not treat Python AST filtering as a security sandbox. If the Windows
+enterprise environment cannot provide OS-level isolation, ship workbook,
+document, calculator, and table tools first and leave `run_python` disabled.
+The run should raise `TOOL_UNAVAILABLE` only when the requested investigation
+genuinely cannot be completed without it.
+
+## Deterministic universal controls
+
+These controls are outside the agent and cannot be disabled by instructions:
+
+1. **Snapshot integrity:** every Citation resolves to the hash captured at run
+   start.
+2. **Artifact completeness:** every Source Artifact has a terminal disposition;
+   unresolved material artifacts block output.
+3. **Ownership:** every payable Claim Case has a reviewer-confirmed Claimant and
+   required identifier.
+4. **Assignment exclusivity:** one Evidence Item cannot silently support two
+   payable lines or cases.
+5. **Line provenance:** every payable amount is reported, evidence-derived and
+   confirmed, or reviewer-entered with an audit reason.
+6. **Money arithmetic:** `Decimal` only; line, currency, mileage, tax, case, and
+   batch totals reconcile to the cent.
+7. **Summary reconciliation:** reported totals, derived line totals, evidence
+   totals, and output totals are separately named; mismatches never disappear
+   into a generic unreadable state.
+8. **Evidence confidence:** uncertain material fields require review.
+9. **Duplicate evidence:** within-case and cross-case duplicate checks run after
+   every grouping or correction.
+10. **Listing reconciliation:** emitted text is parsed and re-summed; every
+    output cell traces to a confirmed case value or is intentionally blank.
+11. **Human gate:** no Payment Listing Row while a blocking Flag, proposed
+    Claimant, unconfirmed derived amount, or unresolved material artifact exists.
+12. **No external write:** SharePoint and client files remain read-only.
+
+New catalogue entries expected:
+
+- `CLAIMANT_UNKNOWN`
+- `OWNERSHIP_CONFLICT`
+- `UNASSIGNED_EVIDENCE`
+- `ARTIFACT_UNRESOLVED`
+- `CLAIM_AMOUNT_UNCONFIRMED`
+- `PURPOSE_UNKNOWN`
+- `NO_SUMMARY`
+- `TOOL_UNAVAILABLE`
+- `TOOL_FAILED`
+- `SANDBOX_LIMIT`
+
+Each needs title, meaning, reviewer action, kind, blocking default, Citation
+rules, and an idempotency key before it can be raised.
+
+## Storage migration
+
+Use additive, idempotent migrations; do not destructively rename current tables
+while runs may exist.
+
+1. Add `claim_cases` with claimant/grouping states and `legacy_employee_id`.
+2. Backfill one Claim Case for every existing `ClaimEmployee`.
+3. Add nullable `case_id` to rows, evidence, and flags; backfill it from
+   `employee_id` and write both during the compatibility period.
+4. Add `claim_source_artifacts`, populated from the run manifest.
+5. Add `claim_evidence_assignments` instead of overloading
+   `matched_row_id` for proposed and rejected relationships.
+6. Add `claim_investigations` and `claim_tool_executions` for the run-local plan
+   and replay record.
+7. Add a claims schema version and an idempotent migration runner; the current
+   startup `ALTER TABLE` pattern is insufficient for related-table backfills.
+8. Keep existing HTTP response fields (`employees`, `employee_id`) as deprecated
+   aliases until the frontend and verification script consume `cases` and
+   `case_id`.
+9. After old runs render and the compatibility tests pass, stop writing the
+   aliases. Physical column removal is a later maintenance task, not part of
+   this rollout.
+
+## State machine and orchestration
+
+Target states:
+
+```text
+queued
+  → surveying
+  → investigating
+  → group_ready       (reviewer resting state)
+  → verifying
+  → ready             (reviewer resting state)
+  ↘ failed
+```
+
+During migration, `mapping` maps to `investigating` and `map_ready` maps to
+`group_ready` in the HTTP representation. A server restart fails only active
+states; resting states survive. One case failure is isolated and retryable.
+
+The orchestration loop is bounded:
+
+1. Agent proposes an Investigation Plan.
+2. Tool harness executes allowlisted calls.
+3. Agent returns an `InvestigationResult` proposal.
+4. Code audits schemas, coverage, arithmetic, Citations, and budgets.
+5. Audit problems return to the agent, at most three rounds.
+6. Remaining uncertainty becomes visible Flags or unresolved assignments; it is
+   never discarded to make the run pass.
+
+## HTTP and frontend changes
+
+### HTTP routes
+
+- Run detail returns `artifacts`, `cases`, `evidence_items`, `assignments`,
+  `investigation`, `tool_summary`, and compatibility `employees` fields.
+- Replace the internals of `confirm-map` with case grouping confirmation while
+  retaining the old route temporarily.
+- Add actions to create/merge/split cases, move evidence, set/confirm a Claimant,
+  and set a Source Artifact disposition.
+- Every mutation takes an expected run revision to prevent two browser actions
+  overwriting each other.
+- Corrections re-run only the affected case plus global duplicate/ownership
+  controls.
+
+### Map & Group screen
+
+- Cases as columns/cards; unassigned pool beside them.
+- Artifact/evidence preview, extracted identity signals, and grouping reason.
+- Merge, split, move, set Claimant, irrelevant, and unreadable actions.
+- Coverage counter: `47/49 artifacts dispositioned; 2 need review`.
+- One primary action: **Confirm grouping & verify**.
+
+### Verification and Review
+
+- Replace employee labels internally with case labels; show Claimant when known.
+- Show whether a Claim Line is reported or evidence-derived.
+- Expose tool failures and incomplete artifacts without raw stack traces.
+- Keep R7–R10's plain-language flag cards, summary filters, all-lines table,
+  unused evidence section, and output reconciliation, but key them by case.
+
+### Output
+
+- Default to one Payment Listing Row per confirmed Claim Case.
+- The reviewer may merge cases before confirmation when the listing requires one
+  row per claimant.
+- Map the current listing each run. Unknown columns remain blank and visible;
+  required unknown values block rather than being fabricated.
+
+## Security and misuse hardening
+
+- Treat workbook cells, document text, filenames, QR content, and metadata as
+  untrusted data, never as agent instructions.
+- Put the user objective and tool policy above all document content; explicitly
+  tell the model that documents may contain prompt injection.
+- Tools resolve only manifest ids, not arbitrary paths supplied by the model.
+- Preserve current zip/path, file-size, page, sheet, cell, request, timeout, and
+  concurrency limits; add run-wide flat-dump quotas that do not use an employee
+  folder as the unit.
+- Do not execute workbook macros, formulas, links, embedded objects, or document
+  scripts.
+- Do not expose SharePoint tokens, temporary download URLs, environment values,
+  or local absolute paths to model prompts or sandbox output.
+- Sanitize all TSV/spreadsheet output against formula injection.
+- Redact likely account numbers, tokens, and signed URLs from telemetry.
+- Cancel outstanding tool calls when the run or case is cancelled or fails.
+- Record model, prompt version, tool versions, budgets, and output hashes for
+  reproducibility without storing unnecessary raw prompt copies.
+
+## Testing and evaluation matrix
+
+### Deterministic tests
+
+Test through the `ClaimsInvestigator` interface with in-memory tools:
+
+- Every Source Artifact receives exactly one terminal disposition.
+- A cited cell/page outside the manifest is rejected.
+- Conflicting identity signals create `OWNERSHIP_CONFLICT`.
+- Weak signals never confirm a Claimant.
+- Moving evidence between cases re-runs duplicate and total controls.
+- Evidence-derived lines remain blocked until amount confirmation.
+- One Evidence Item assigned to two payable lines is rejected or flagged.
+- Decimal calculations and emitted listing totals round-trip exactly.
+- Tool budgets, truncation, timeout, and cancellation fail closed.
+- Prompt-injection text in a workbook cannot call a forbidden tool or change the
+  objective.
+- Sandbox network, filesystem, subprocess, memory, and time escapes fail.
+- Old employee-folder runs backfill and render through compatibility fields.
+
+### Synthetic end-to-end clients
+
+| Scenario | Required result |
+|---|---|
+| A — current employee folders | Existing planted errors and RM10 variance still found; no regression |
+| B — flat folder, reports present | Correct cases proposed; reviewer needs no more than two grouping changes |
+| C — full dump, names on evidence | Evidence grouped with cited identity signals; no false confirmed owner |
+| D — full dump, no identity anywhere | Useful evidence ledger and totals; `CLAIMANT_UNKNOWN`; output locked |
+| E — evidence only | Proposed lines created; amounts and purpose/category gaps explicitly blocked |
+| F — master workbook | Several cases extracted from one Source Artifact with exact cell Citations |
+| G — changed monthly layout | Investigation succeeds without code changes or produces precise unresolved items |
+| H — duplicate across cases | Both cases flagged; idempotent after regroup/retry |
+| I — malicious document | Prompt injection and embedded code inert; run remains contained |
+| J — sandbox abuse/timeout | Execution killed, audited, no partial domain writes |
+
+### Live-model acceptance gates
+
+- 100% of submitted Source Artifacts dispositioned or visibly blocking.
+- 100% of payable Claimants reviewer-confirmed.
+- 100% of material values cited.
+- 100% money reconciliation to the cent.
+- Zero silent evidence reuse across payable cases.
+- Zero automatic owner confirmation based solely on weak/fuzzy signals.
+- Every planted error found; false blocking Flags average no more than one per
+  confirmed case on the synthetic suites.
+- Current ten-case structured batch remains under five minutes; flat-dump timing
+  and model/tool cost are reported, with an initial target set after the first
+  representative run.
+- Two consecutive clean runs per scenario before enabling the new path by
+  default.
+
+## Delivery phases
+
+Each phase lands independently with its own migration, tests, documentation,
+and rollback switch.
+
+### H0 — Rebaseline and protect current correctness
+
+- [ ] Finish current backend R6 and record the R1–R6 baseline.
+- [x] Update PRD scope: no company recipe, automatic learning, or recipe drift
+  (documented 2026-08-19).
+- [ ] Reframe pending R7–R10 UI work around Claim Cases to avoid building a
+  second employee-only review surface.
+- [ ] Pin the current structured-folder end-to-end result and RM10 example.
+- **Exit:** existing tests green twice; working tree clean; baseline metrics
+  recorded.
+
+### H1 — Deep interface and normalized contracts
+
+- [ ] Add `investigator/contracts.py` with request/result and normalized domain
+  models.
+- [ ] Put the existing structured-folder pipeline behind the new interface.
+- [ ] Add in-memory InvestigationTools and contract tests.
+- [ ] Pass current-run instructions into investigation and case verification.
+- **Exit:** current Client A passes through the new interface without changing
+  observable results.
+
+### H2 — Additive storage migration
+
+- [ ] Add schema versioning and idempotent claims migrations.
+- [ ] Add Claim Cases, Source Artifacts, Evidence Assignments, investigations,
+  and tool executions.
+- [ ] Backfill existing runs and dual-write compatibility ids.
+- [ ] Add old-run rendering and rollback tests.
+- **Exit:** a pre-migration database opens, migrates once, opens again unchanged,
+  and old/new run detail is equivalent.
+
+### H3 — Global inventory independent of folders
+
+- [ ] Replace employee-named quotas with run-wide limits plus post-group case
+  budgets.
+- [ ] Hash and manifest every file before mapping.
+- [ ] Inspect root and nested files uniformly.
+- [ ] Create Source Artifact dispositions and completeness audit.
+- **Exit:** a flat folder with zero subfolders reaches investigation with every
+  file visible; nothing is silently dropped.
+
+### H4 — Safe deterministic tool harness
+
+- [ ] Implement typed workbook, document, image, search, calculator, and bounded
+  table-comparison tools.
+- [ ] Use manifest ids and return Citations/provenance on every read.
+- [ ] Enforce tool budgets, output handles, cancellation, redaction, and logs.
+- [ ] Add prompt-injection and hostile-file fixtures.
+- **Exit:** tools cannot read outside the snapshot or write outside temporary
+  output; calculator/table results replay exactly.
+
+### H5 — Tool-using investigation loop
+
+- [ ] Allow `create_agent` to receive an allowlisted InvestigationTools adapter.
+- [ ] Implement plan → act → normalized proposal → deterministic audit → repair,
+  capped at three rounds.
+- [ ] Persist the Investigation Plan and execution summary for this run only.
+- [ ] Surface incomplete investigations as Flags, not generic run failures.
+- **Exit:** the agent can find an unfamiliar report and evidence without a fixed
+  file role map, while all current audit failures still fail closed.
+
+### H6 — Full-dump grouping and Map & Group gate
+
+- [ ] Extract identity signals with Citations.
+- [ ] Propose Claim Cases and Evidence Assignments, including unknown/unassigned.
+- [ ] Implement grouping validation and revision control.
+- [ ] Build Map & Group UI and audited merge/split/move/claimant actions.
+- **Exit:** scenarios B–D behave as specified; no output is possible before
+  grouping confirmation.
+
+### H7 — Evidence-only and no-summary verification
+
+- [ ] Derive proposed Claim Lines from Evidence Items.
+- [ ] Add amount, purpose, category, and summary Flags.
+- [ ] Generalize workers from employee to confirmed case.
+- [ ] Re-run global duplicate controls after case changes or retries.
+- **Exit:** scenario E produces useful lines and totals but blocks every
+  unsupported payment fact.
+
+### H8 — Isolated Python sandbox
+
+- [ ] Complete a Windows enterprise feasibility spike against the production
+  isolation requirements.
+- [ ] Define `SandboxPort`, production adapter, and in-memory fake.
+- [ ] Add limits, double execution for material successful output, audit record,
+  and normalized result parsing.
+- [ ] Keep feature disabled by default until security tests pass.
+- **Exit:** scenario J passes. If OS isolation is unavailable, formally ship
+  `run_python` disabled without blocking H0–H7 or H9–H12.
+
+### H9 — Generic listing output and gates
+
+- [ ] Produce one row per confirmed Claim Case in the current listing's column
+  order.
+- [ ] Generalize listing field mappings beyond the current fixed roles while
+  keeping required universal roles explicit.
+- [ ] Recompute case, batch, and emitted totals independently.
+- [ ] Update corrections/exclusions to case ids and rerun affected controls.
+- **Exit:** structured and full-dump outputs round-trip; every blocking state is
+  enforced server-side.
+
+### H10 — Case-oriented review surface
+
+- [ ] Complete R7–R10 against cases: plain-language cards, summary filters, all
+  lines, unused evidence, verification progress, and output reconciliation.
+- [ ] Add claimant/assignment confidence and evidence-derived badges.
+- [ ] Ensure keyboard, empty, loading, stale-revision, and failure states.
+- **Exit:** a reviewer can complete scenarios A–E without inspecting server logs
+  or editing JSON.
+
+### H11 — Security, audit, and operational hardening
+
+- [ ] Threat-model file ingestion, prompt injection, tool use, sandboxing,
+  telemetry, and output injection.
+- [ ] Add replay bundles: manifest, versions, plan, tool hashes, calculations,
+  reviewer decisions, and final output.
+- [ ] Add recovery for restart, cancellation, partial tool failure, and retry.
+- [ ] Document cost/time budgets and retention controls.
+- **Exit:** threat-model findings fixed or explicitly accepted; replay reproduces
+  all material totals.
+
+### H12 — Evaluation, shadow rollout, and default-on decision
+
+- [ ] Build scenarios B–J with ground truth.
+- [ ] Run old and new structured paths in shadow mode on Client A.
+- [ ] Pilot representative anonymized full dumps with output locked.
+- [ ] Compare accuracy, false Flags, grouping corrections, time, cost, and tool
+  failures.
+- [ ] Enable by default only after acceptance gates pass twice.
+- **Exit:** owner signs off on default-on; old adapter remains a rollback path
+  for one release cycle.
+
+## Critical path and parallel work
+
+```text
+H0 → H1 → H2 → H3 → H4 → H5 → H6 → H7 → H9 → H10 → H11 → H12
+                         └──────── H8 sandbox ────────────┘
+```
+
+- H1 contracts must settle before storage or tool implementations expose new
+  interfaces.
+- H2 and the latter half of H3 may run in parallel after the manifest and case
+  identifiers are fixed.
+- Tool implementations inside H4 may run in parallel behind
+  `InvestigationTools`.
+- H8 is optional for default-on full-dump support and can run beside H6–H10; it
+  must not delay deterministic file/workbook/document/calculator tools.
+- H9 cannot complete before H6/H7 define confirmed case and derived-line gates.
+- H10 should consume stable case-oriented HTTP fields from H2/H6, not temporary
+  frontend-only grouping state.
+- H11 threat modelling begins during H1 and closes after H8/H10; security is not
+  deferred to one final review.
+
+## Risk register
+
+| Risk | Impact | Mitigation and exit evidence |
+|---|---|---|
+| AI assigns evidence to the wrong person | Wrong employee could be paid | Claimant never confirmed by AI; Map & Group always pauses; weak-signal tests and ownership gate |
+| Full dump contains no ownership information | Work cannot become payable | Preserve unknown cases and evidence ledger; `CLAIMANT_UNKNOWN`; request roster/manual assignment |
+| Agent ignores an inconvenient file | Missed claim or control evidence | Immutable manifest plus artifact-completeness control; every artifact disposition visible |
+| Python escapes or reads credentials | Host or client-data compromise | OS isolation, no network/secrets, disabled-by-default feature; H8 escape tests |
+| Enterprise Windows cannot host a sandbox | Python feature cannot ship | `SandboxPort`; ship all deterministic tools without Python; explicit `TOOL_UNAVAILABLE` |
+| Tool freedom increases cost and latency | Runs become uneconomic or time out | Plan/tool/request/byte budgets, handles for large output, concurrency caps, cost acceptance gates |
+| Generic attributes weaken validation | Important values bypass typed controls | Stable typed core money/identity/Citation fields; extensions cannot drive payment until normalized |
+| Additive migration splits old/new identities | Flags or corrections attach to wrong case | Backfill, dual-write period, idempotent migration and old-run equivalence tests |
+| Prompt injection inside client files | Objective or tool policy is altered | Untrusted-data framing, manifest-id tools, no side effects, hostile-document fixtures |
+| Case-oriented UI is built after employee-only R7–R10 | Duplicate work and inconsistent review | Reframe R7–R10 at H0; one case-keyed review state and compatibility aliases |
+| Evidence-derived receipt total is not the amount claimed | Overpayment | `CLAIM_AMOUNT_UNCONFIRMED`; visible per-line origin; reviewer confirmation and reconciliation |
+| Agent result looks plausible but is incomplete | Reviewer over-trusts presentation | Coverage, Citations, unresolved questions, replay record, and server-side output gate |
+
+Risk acceptance must be explicit in the plan or PRD. A warning in a log is not
+an accepted risk.
+
+## Feature switches and rollback
+
+- `CLAIMS_CASE_MODEL`: case storage and HTTP fields.
+- `CLAIMS_AGENTIC_INVESTIGATION`: tool-using investigator versus current mapper.
+- `CLAIMS_FULL_DUMP_GROUPING`: Map & Group flow.
+- `CLAIMS_PYTHON_SANDBOX`: isolated Python tool, independently disabled.
+
+All migrations are additive. Disabling the new investigator routes new runs
+through the existing structured-folder adapter; it does not reinterpret old
+runs. No rollback deletes user data or writes to SharePoint.
+
+## Implementation file map
+
+Expected new modules:
+
+```text
+backend/app/claims/
+├── investigator/
+│   ├── contracts.py       # deep module interface and normalized results
+│   ├── investigator.py    # bounded plan/act/audit loop
+│   ├── audit.py           # universal result controls
+│   └── adapters.py        # structured, full-dump, evidence-only
+├── tools/
+│   ├── contracts.py       # InvestigationTools and SandboxPort
+│   ├── files.py
+│   ├── workbook.py
+│   ├── documents.py
+│   ├── calculator.py
+│   ├── tables.py
+│   └── sandbox.py
+├── grouping.py            # identity signals and case proposals
+├── migrations.py          # idempotent claims schema migrations
+└── models.py              # additive case/artifact/assignment records
+```
+
+Expected frontend changes remain under `frontend/src/screens/claims/`, with a
+new `GroupView.tsx` replacing the employee-only assumptions in `MapView.tsx`.
+
+## Decisions fixed by this plan
+
+- Claim Case is primary; Claimant may be unknown.
+- Flat folders and evidence-only submissions are valid inputs.
+- Grouping always pauses for reviewer confirmation.
+- Evidence-derived amounts require confirmation.
+- The agent receives typed tools and a run-local objective.
+- Deterministic controls and the server-side human gate remain authoritative.
+- Python requires OS-level isolation and may ship disabled independently.
+- No company recipe, automatic learning, recipe promotion, or recipe drift.
+- Explicit Client Profile values change only through deliberate reviewer action.
+
+## Defaults to confirm before H6/H8/H9
+
+Recommended defaults are shown first:
+
+1. **Unresolved evidence:** potentially claim-related unresolved evidence blocks;
+   reviewer-confirmed irrelevant evidence does not.
+2. **Grouping:** always pause at Map & Group, even when identity signals are
+   strong.
+3. **Output granularity:** one Payment Listing Row per confirmed Claim Case;
+   merge cases before confirmation when one row per claimant is required.
+4. **Python:** disabled in production until the enterprise environment meets all
+   sandbox requirements.
+5. **Evidence-only amount:** receipt total is a proposed amount and requires one
+   reviewer confirmation per case, with a bulk confirm only when every line is
+   visible.
