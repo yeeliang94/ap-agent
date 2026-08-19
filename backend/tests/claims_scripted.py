@@ -214,3 +214,50 @@ def install(monkeypatch, survey_of, t: dict | None = None) -> dict:
         db.commit()
     monkeypatch.setattr(listing_mod, "prepare_listing", fake_prepare_listing)
     return holder
+
+
+def good_proposal(manifest, t: dict | None = None):
+    """The correct InvestigationProposal for the sample (H5): what a
+    competent tool-using investigator answers, built from the ground truth
+    and the run's manifest. Labels are the folder names, so the delivered
+    confirm-map validation (files under their folder) still holds."""
+    from app.claims.investigator.proposal import (ArtifactProposal, CaseProposal, CiteProposal,
+                                                  InvestigationProposal)
+
+    t = t or truth()
+    by_folder = {e["folder"]: e for e in t["employees"]}
+    arts, cases = [], []
+    per_folder: dict[str, list] = {}
+    for m in manifest:
+        top = m.path.split("/", 1)[0] if "/" in m.path else ""
+        per_folder.setdefault(top, []).append(m)
+    for folder, ms in per_folder.items():
+        e = by_folder.get(folder)
+        if e is None:
+            for m in ms:
+                arts.append(ArtifactProposal(artifact_id=m.id, role="unknown", disposition="unresolved", reason="not a person folder"))
+            continue
+        report_id = None
+        for m in ms:
+            name = m.path.split("/", 1)[1]
+            if name == e["files"]["report"]:
+                arts.append(ArtifactProposal(artifact_id=m.id, role="report", disposition="used", reason="claim summary tab 'Expense Report'"))
+                report_id = m.id
+            elif name in e["files"]["receipts"]:
+                arts.append(ArtifactProposal(artifact_id=m.id, role="receipts", disposition="used", reason="till receipts side by side"))
+            elif name == e["files"]["approval"]:
+                arts.append(ArtifactProposal(artifact_id=m.id, role="approval", disposition="used", reason="approval e-mail"))
+            elif name == e["files"]["report_print"]:
+                arts.append(ArtifactProposal(artifact_id=m.id, role="report_copy", disposition="used", reason="PDF print of the report"))
+            else:
+                arts.append(ArtifactProposal(artifact_id=m.id, role="unknown", disposition="unresolved", reason="cannot look inside"))
+        cites = [CiteProposal(artifact_id=report_id, sheet="Expense Report", cell="B1", quote=e["name"])] if report_id else []
+        cases.append(CaseProposal(
+            key=folder, label=folder, claimant_name=e["name"], claimant_identifier=e["er_code"] if report_id else "",
+            claimant_basis="folder_structure", identity_citations=cites, grouping_basis="folder_structure",
+            artifact_ids=[m.id for m in ms if not m.path.endswith("notes.txt")],
+            report_artifact_id=report_id, report_sheet="Expense Report" if report_id else None,
+            mileage_sheet="KM" if (report_id and e["mileage_tab"]) else None,
+            no_summary=report_id is None, reason="one person per subfolder; name in file names and B1"))
+    return InvestigationProposal(plan_steps=["list", "peek", "group by folder", "verify names"], artifacts=arts, cases=cases,
+                                 unassigned_artifact_ids=[m.id for m in manifest if m.path.endswith("notes.txt")])

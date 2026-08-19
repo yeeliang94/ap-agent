@@ -45,8 +45,8 @@ def create_model(role: str) -> OpenAIChatModel:
 
 
 def create_agent(role: str, output_type: type, instructions: str,
-                 temperature: float | None = None) -> Agent:
-    """An Agent = model + instructions + a required answer shape.
+                 temperature: float | None = None, tools=None) -> Agent:
+    """An Agent = model + instructions + a required answer shape (+ tools).
 
     output_type is a Pydantic class (a fill-in-the-blanks form): the model's
     reply MUST fit it — wrong shapes are rejected and retried automatically.
@@ -56,6 +56,11 @@ def create_agent(role: str, output_type: type, instructions: str,
     judge, where categorisation should be stable reasoning. Extraction
     deliberately keeps the default: run-to-run variance on a blurry scan is
     exactly what the double-read uses to detect an untrustworthy read.
+
+    tools (hardening H5): an ALLOWLIST of callables the model may invoke
+    during its run — the investigation harness's typed tools
+    (claims/tools/binding.py). Nothing outside the list is callable,
+    whatever a document asks for. Default: none.
     """
     return Agent(
         create_model(role),
@@ -63,4 +68,5 @@ def create_agent(role: str, output_type: type, instructions: str,
         instructions=instructions,
         retries=2,  # malformed answers get two more chances, then error out
         model_settings=None if temperature is None else {"temperature": temperature},
+        tools=list(tools or []),
     )

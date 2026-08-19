@@ -17,7 +17,8 @@ from typing import Any
 
 from .investigator import contracts as C
 from .investigator.legacy import case_id_for
-from .models import (ClaimCase, ClaimEmployee, ClaimEvidenceAssignment, ClaimInvestigation,
+from . import profile as profile_mod
+from .models import (ClaimCase, ClaimEmployee, ClaimEvidenceAssignment, ClaimFlag, ClaimInvestigation,
                      ClaimSourceArtifact, ClaimToolExecution, ClaimsRun)
 
 
@@ -31,7 +32,14 @@ def bump_revision(run: ClaimsRun) -> int:
 def store_result(s, run: ClaimsRun, result: C.InvestigationResult, confirmed: bool = False) -> ClaimInvestigation:
     """Write (or refresh) the artifacts, cases, assignments, plan and tool
     record of a result. Called at map time (proposal) and at confirm time
-    (the reviewer's corrected map, confirmed=True)."""
+    (the reviewer's corrected map, confirmed=True — the confirmed record
+    keeps the proposal's plan, adapter and strategy: confirmation is a
+    reviewer step, not a second investigation)."""
+    if confirmed:
+        previous = s.query(ClaimInvestigation).filter(ClaimInvestigation.run_id == run.id) \
+            .order_by(ClaimInvestigation.created_at.desc(), ClaimInvestigation.id.desc()).first()
+        if previous is not None:
+            result = result.model_copy(update={"plan": C.InvestigationPlan(**previous.plan)})
     inv = ClaimInvestigation(run_id=run.id, adapter=result.plan.adapter, strategy=result.plan.strategy or "",
                              status="confirmed" if confirmed else "proposed", plan=result.plan.model_dump(),
                              rounds=result.plan.rounds,
@@ -50,8 +58,29 @@ def store_result(s, run: ClaimsRun, result: C.InvestigationResult, confirmed: bo
     upsert_artifacts(s, run.id, result.artifacts)
     upsert_cases(s, run.id, result.cases, confirmed)
     upsert_assignments(s, run.id, result.assignments)
+    upsert_flags(s, run.id, result.flags)
     s.flush()
     return inv
+
+
+def upsert_flags(s, run_id: str, flags: list[C.FlagProposal]) -> int:
+    """The investigation's own flags (TOOL_FAILED, TOOL_UNAVAILABLE,
+    OWNERSHIP_CONFLICT, …) as ClaimFlag rows — once per identity key; a
+    flag a person already decided is not raised again. Returns how many
+    were added."""
+    existing = {profile_mod.flag_key(f) for f in s.query(ClaimFlag).filter(ClaimFlag.run_id == run_id)}
+    added = 0
+    for f in flags:
+        d = f.model_dump()
+        if profile_mod.flag_key(d) in existing:
+            continue
+        s.add(ClaimFlag(run_id=run_id, employee_id="", case_id=f.case_id, artifact_id=f.artifact_id,
+                        row_id=f.row_id, evidence_id=f.evidence_id, code=f.code, reason=f.reason,
+                        basis=f.basis, cite=dict(f.cite), status=f.status))
+        existing.add(profile_mod.flag_key(d))
+        added += 1
+    s.flush()
+    return added
 
 
 def upsert_artifacts(s, run_id: str, artifacts: list[C.SourceArtifact]) -> None:

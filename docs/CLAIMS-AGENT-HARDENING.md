@@ -717,11 +717,23 @@ and rollback switch.
 
 ### H5 — Tool-using investigation loop
 
-- [ ] Allow `create_agent` to receive an allowlisted InvestigationTools adapter.
-- [ ] Implement plan → act → normalized proposal → deterministic audit → repair,
-  capped at three rounds.
-- [ ] Persist the Investigation Plan and execution summary for this run only.
-- [ ] Surface incomplete investigations as Flags, not generic run failures.
+- [x] Allow `create_agent` to receive an allowlisted InvestigationTools adapter
+  (`model_layer.create_agent(..., tools=)`; `tools/binding.py` binds the harness
+  as typed tools; `run_python` is bound only when `CLAIMS_PYTHON_SANDBOX` is on;
+  2026-08-19).
+- [x] Implement plan → act → normalized proposal → deterministic audit → repair,
+  capped at three rounds (`investigator/investigator.py`, `proposal.py`,
+  `audit.py`, `strategies.py`; the audit checks coverage, case shape, report
+  plausibility, one identifier per case, and verifies every claimed name /
+  identifier at a cited place or file name with the tools).
+- [x] Persist the Investigation Plan and execution summary for this run only
+  (`claim_investigations` + `claim_tool_executions` via `cases.store_result`;
+  confirmation keeps the proposal's plan).
+- [x] Surface incomplete investigations as Flags, not generic run failures
+  (`TOOL_FAILED` per failed tool call and on budget exhaustion,
+  `TOOL_UNAVAILABLE` when `run_python` was asked for and the investigation did
+  not converge; unresolved artifacts and unknown claimants stay visible;
+  `tests/test_claims_investigator.py`, incl. Client A through the agentic path).
 - **Exit:** the agent can find an unfamiliar report and evidence without a fixed
   file role map, while all current audit failures still fail closed.
 
