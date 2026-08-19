@@ -208,17 +208,20 @@ CATALOGUE: dict[str, dict] = {
                    "It is listed so it is not lost; nothing is paid on it.",
         "what_to_do": "If it belongs to someone, move it into their case at the map; otherwise leave it."},
     "CLAIM_AMOUNT_UNCONFIRMED": {
-        "title": "Amount taken from a receipt, not a claim", "kind": "money", "blocks": "open",
-        "toggle": False, "identity": ("row_id",),
-        "meaning": "This line was built from a receipt because no claim summary states what is claimed. "
-                   "A receipt total is a proposal, not an approved amount.",
-        "what_to_do": "Confirm the amount to pay (acknowledge), fix it, or accept to leave the line out."},
+        "title": "Amounts taken from receipts, not from a claim", "kind": "money", "blocks": "open",
+        "toggle": False, "identity": ("case_id",),
+        "meaning": "The case's lines were built from receipts because no claim summary states what is claimed. "
+                   "A receipt total is a proposal, not an approved amount — one confirmation per case, with "
+                   "every derived line listed.",
+        "what_to_do": "Read the listed lines; dismiss with a note to confirm they are what should be paid, or "
+                      "fix a value / accept a line's flag to leave it out first."},
     "PURPOSE_UNKNOWN": {
-        "title": "No stated purpose", "kind": "structure", "blocks": "open",
+        "title": "No stated purpose", "kind": "note", "blocks": "info",
         "identity": ("case_id",),
-        "meaning": "The listing needs a purpose / category basis for this case and none is stated in any "
-                   "file — the lines were derived from evidence.",
-        "what_to_do": "Type the purpose or choose the category on the case; or acknowledge to proceed."},
+        "meaning": "No file of this case states the purpose of the expenses; the lines were built from evidence. "
+                   "Recorded so the gap is visible — the category decision (CATEGORY_UNCLEAR when it could not "
+                   "be settled) is what blocks.",
+        "what_to_do": "Usually nothing; if the category shown looks wrong for these lines, choose another on the case."},
     "NO_SUMMARY": {
         "title": "No claim summary — lines derived from evidence", "kind": "structure", "blocks": "open",
         "identity": ("case_id",),

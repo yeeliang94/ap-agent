@@ -192,7 +192,7 @@ def sync_case_from_employee(s, emp: ClaimEmployee) -> ClaimCase:
             case = ClaimCase(id=cid, run_id=emp.run_id, label=emp.folder, state="confirmed",
                              claimant_state="confirmed" if emp.name else "unknown",
                              claimant_basis="the confirmed map (employee folder)",
-                             grouping_basis="folder structure: one subfolder per claimant")
+                             grouping_basis="folder_structure: one subfolder per claimant")
             s.add(case)
         case.legacy_employee_id = emp.id
     _mirror(case, emp)

@@ -591,6 +591,20 @@ async def retry_employee(run_id: str, employee_id: str) -> dict:
     return {"ok": True}
 
 
+@router.post("/{run_id}/cases/{case_id}/retry")
+async def retry_case(run_id: str, case_id: str, body: dict | None = None) -> dict:
+    """Re-run one case's worker (H7): the case-keyed twin of the employee retry."""
+    db = SessionLocal()
+    try:
+        case = db.get(ClaimCase, case_id)
+        if not case or case.run_id != run_id or not case.legacy_employee_id:
+            raise HTTPException(404, "No such case in this run.")
+        emp_id = case.legacy_employee_id
+    finally:
+        db.close()
+    return await retry_employee(run_id, emp_id)
+
+
 @router.post("/{run_id}/flags/{flag_id}/decide")
 async def decide_claim_flag(run_id: str, flag_id: str, body: dict) -> dict:
     """Record a decision on one flag. body = {decision, note}.
@@ -787,6 +801,9 @@ async def correct_claim_row(run_id: str, row_id: str, body: dict) -> dict:
             elif key not in decided:
                 db.add(ClaimFlag(run_id=run_id, employee_id=emp.id, case_id=cases_mod.case_id_for_employee(db, emp.id), **fd))
         cases_mod.bump_revision(run)
+        # The run-wide controls see the corrected values too (H7): a receipt
+        # that stops being shared resolves; one that starts being shared is raised.
+        worker.rerun_global_controls(db, run_id, profile)
         db.add(AuditEvent(run_id=run_id, actor="system", action="employee_rechecked",
                           detail=f"{emp.name or emp.folder} after correcting "
                                  f"{', '.join(sorted(changed)) or 'nothing (retry)'}: "
@@ -839,7 +856,13 @@ def _employee_dict(e: ClaimEmployee) -> dict:
 
 
 def _row_dict(r: ClaimRow) -> dict:
-    return {"id": r.id, "employee_id": r.employee_id, "case_id": r.case_id, "kind": r.kind, "sheet": r.sheet,
+    # origin (H7): where the amount comes from — reported (read from a claim
+    # summary), evidence_derived (built from a receipt), reviewer_entered
+    # (a value the reviewer corrected).
+    origin = "evidence_derived" if r.kind == "derived" else "reported"
+    if r.corrections:
+        origin = "reviewer_entered"
+    return {"id": r.id, "employee_id": r.employee_id, "case_id": r.case_id, "origin": origin, "kind": r.kind, "sheet": r.sheet,
             "row": r.row, "values": r.values, "corrections": r.corrections,
             "matched_evidence_id": r.matched_evidence_id, "verdict": r.verdict}
 

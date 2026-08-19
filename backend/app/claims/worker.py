@@ -104,20 +104,20 @@ def _shared_receipt_flags(s, run_id: str, profile: dict) -> int:
         return 0
     receipts = s.query(ClaimEvidence).filter(ClaimEvidence.run_id == run_id, ClaimEvidence.kind == "receipt",
                                              ClaimEvidence.matched_row_id != "").all()
-    if not receipts:
-        return 0
     employees = {e.id: e for e in s.query(ClaimEmployee).filter(ClaimEmployee.run_id == run_id).all()}
-    existing = {(f.code, f.row_id, f.evidence_id) for f in s.query(ClaimFlag).filter(
-        ClaimFlag.run_id == run_id, ClaimFlag.code == "SHARED_RECEIPT").all()}
+    flags = s.query(ClaimFlag).filter(ClaimFlag.run_id == run_id, ClaimFlag.code == "SHARED_RECEIPT").all()
+    existing = {(f.code, f.row_id, f.evidence_id) for f in flags}
     groups: dict[tuple, list[ClaimEvidence]] = {}
     for e in receipts:
         groups.setdefault(checks_mod._receipt_key({"values": e.values or {}}), []).append(e)
+    live: set[tuple] = set()
     added = 0
     for group in groups.values():
         if len({e.employee_id for e in group}) < 2:
             continue
         for e in group:
             key = ("SHARED_RECEIPT", e.matched_row_id, e.id)
+            live.add(key)
             if key in existing:
                 continue
             others = [x for x in group if x.employee_id != e.employee_id]
@@ -138,7 +138,21 @@ def _shared_receipt_flags(s, run_id: str, profile: dict) -> int:
                 cite=checks_mod._ev_cite(as_dict(e))))
             existing.add(key)
             added += 1
+    # A shared receipt that no longer is one (a corrected amount, a moved
+    # file, a re-verified case) resolves itself; a decided flag stays decided.
+    for f in flags:
+        if f.status in ("open", "info") and (f.code, f.row_id, f.evidence_id) not in live:
+            f.status, f.resolution = "resolved_by_correction", "no longer shared after a correction or re-verification"
     return added
+
+
+def rerun_global_controls(s, run_id: str, profile: dict) -> None:
+    """The run-wide controls (H7): cross-case duplicate evidence and
+    artifact completeness — after every case change, correction or retry,
+    not only at run close."""
+    _shared_receipt_flags(s, run_id, profile)
+    _artifact_completeness_flags(s, run_id)
+    s.flush()
 
 
 def _artifact_completeness_flags(s, run_id: str) -> int:
@@ -270,9 +284,7 @@ def _finish_run(run_id: str, started: float) -> bool:
                                       "the listing and start a new run, or acknowledge to proceed with the "
                                       "fallback."),
                             basis="run input: this month's listing link", cite={"what": "listing"}))
-        _shared_receipt_flags(s, run_id, profile)
-        _artifact_completeness_flags(s, run_id)
-        s.flush()  # so the count below sees the flags just added
+        rerun_global_controls(s, run_id, profile)
         n_flags = s.query(ClaimFlag).filter(ClaimFlag.run_id == run_id, ClaimFlag.status == "open").count()
         failed = [e for e in employees if e.status == "failed"]
         cost = sum(int((e.summary or {}).get("requests", 0)) for e in employees)
@@ -385,7 +397,8 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
     files = _files_dir(run.id)
     roles = emp.roles or {}
     notes: list[tuple[str, str]] = []
-    case_id = cases_mod.sync_case_from_employee(s, emp).id
+    case = cases_mod.sync_case_from_employee(s, emp)
+    case_id = case.id
     context = run_context_for(run)
     if context:
         notes.append(("INFO", f"the run's instructions/playbook ({len(context)} chars) were shown to the "
@@ -502,12 +515,36 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
                                     "total": r["amount"] if r["currency"] == "MYR" else None,
                                     "vendor": r.get("vendor", "")}})
         if roles.get("no_report"):
-            flags.append(checks_mod._flag("NO_REPORT",
-                                          f"{emp.name or emp.folder} has no expense report in the folder; "
-                                          f"{len(receipts)} row(s) were built from the receipts found. Confirm "
-                                          "the derived list is what should be paid.",
-                                          "universal rule: receipts but no report → rows from receipts, "
-                                          "flagged for a person", {}))
+            # NO_REPORT is the delivered wording for a folder-based case
+            # (receipts but no report in the folder); NO_SUMMARY is the same
+            # condition for any other grouping (H7). One or the other, per case.
+            code = "NO_REPORT" if (case.grouping_basis or "").replace(" ", "_").startswith("folder_structure") else "NO_SUMMARY"
+            if profile_mod.check_enabled(profile, code):
+                flags.append(checks_mod._flag(code,
+                                              f"{emp.name or emp.folder} has no expense report"
+                                              + (" in the folder" if code == "NO_REPORT" else " or claim summary among its files")
+                                              + f"; {len(receipts)} row(s) were built from the receipts found. Confirm "
+                                              "the derived list is what should be paid.",
+                                              "universal rule: receipts but no summary → lines from receipts, "
+                                              "flagged for a person", {}))
+        # A receipt total is a PROPOSED amount, not an approved claim (H7):
+        # one confirmation per case, listing every derived line.
+        if receipts:
+            lines = "; ".join(f"{r.get('date') or 'no date'} {r.get('vendor') or '?'} {r['currency']} {r['amount']}"
+                              for r in receipts[:12]) + (" …" if len(receipts) > 12 else "")
+            flags.append(checks_mod._flag(
+                "CLAIM_AMOUNT_UNCONFIRMED",
+                f"{len(receipts)} line(s) were built from receipts, not from a claim: {lines}. Each amount is the "
+                "receipt's total — a proposal until a person confirms it is what should be paid.",
+                "universal rule: an evidence-derived amount needs a reviewer's confirmation before it is payable",
+                {}))
+        else:
+            flags.append(checks_mod._flag(
+                "CLAIM_AMOUNT_UNCONFIRMED",
+                f"{emp.name or emp.folder} has no claim summary and no readable receipt, so no line could be built. "
+                "Nothing is payable for this case as it stands.",
+                "universal rule: an evidence-derived amount needs a reviewer's confirmation before it is payable",
+                {}))
 
     # ---- 9. checks — in memory, so no database lock is held while the
     # tie-break may call the AI; then everything is written in one commit.
@@ -598,6 +635,18 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
                                "summary, or add the client's list in Settings → Claims.",
                         basis="client profile: categories (not set)", cite={}))
 
+    # A required output fact that is absent is said, not invented (H7): a
+    # derived case with no stated purpose is noted. The category decision
+    # (CATEGORY_UNCLEAR when it could not be settled) is what blocks.
+    if derived and not (header or {}).get("purpose") and profile_mod.check_enabled(profile, "PURPOSE_UNKNOWN"):
+        s.add(ClaimFlag(run_id=run.id, employee_id=emp.id, case_id=case_id, code="PURPOSE_UNKNOWN",
+                        reason=(f"No file of {emp.name or emp.folder} states the purpose of these expenses, and the "
+                                "lines were built from evidence. "
+                                + (f"The category was settled from the lines alone ({emp.category}); check it fits."
+                                   if emp.category else "The category could not be settled (see CATEGORY_UNCLEAR).")),
+                        basis="universal rule: a required output fact that is absent is said, not invented",
+                        cite={}, status="info"))
+
     # ---- summary -----------------------------------------------------------------------
     # report_total is the figure the REPORT states (its total cell) — the
     # independent side of the output reconciliation. An employee with no
@@ -676,6 +725,35 @@ async def run_checks_for(s, run: ClaimsRun, emp: ClaimEmployee, profile: dict,
             e.matched_row_id = result["matches"].get(e.id, "")
     s.flush()
     return result
+
+
+async def verify_case(run_id: str, case_id: str) -> None:
+    """The worker for one confirmed Claim Case (H7): the case's employee
+    record is the delivered unit underneath, 1:1 during the compatibility
+    period."""
+    s = SessionLocal()
+    try:
+        from .models import ClaimCase
+
+        case = s.get(ClaimCase, case_id)
+        emp_id = case.legacy_employee_id if case else ""
+    finally:
+        s.close()
+    if emp_id:
+        await verify_employee(run_id, emp_id)
+
+
+async def retry_case(run_id: str, case_id: str) -> None:
+    s = SessionLocal()
+    try:
+        from .models import ClaimCase
+
+        case = s.get(ClaimCase, case_id)
+        emp_id = case.legacy_employee_id if case else ""
+    finally:
+        s.close()
+    if emp_id:
+        await retry_employee(run_id, emp_id)
 
 
 async def retry_employee(run_id: str, employee_id: str) -> None:

@@ -115,7 +115,7 @@ def from_map(request: InvestigationRequest, claim_map: dict, warnings: list[str]
         cases.append(ClaimCase(
             id=cid, claimant=claimant,
             state="excluded" if skipped else ("confirmed" if confirmed else "proposed"),
-            grouping_basis="folder structure: one subfolder per claimant",
+            grouping_basis="folder_structure: one subfolder per claimant",
             citations=[Citation(path=e["folder"], note="subfolder")],
             artifact_ids=[by_path[f["path"]].id for f in files if f["path"] in by_path],
             roles=roles, label=e["folder"],

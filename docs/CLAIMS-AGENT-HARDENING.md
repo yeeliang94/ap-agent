@@ -760,10 +760,19 @@ and rollback switch.
 
 ### H7 — Evidence-only and no-summary verification
 
-- [ ] Derive proposed Claim Lines from Evidence Items.
-- [ ] Add amount, purpose, category, and summary Flags.
-- [ ] Generalize workers from employee to confirmed case.
-- [ ] Re-run global duplicate controls after case changes or retries.
+- [x] Derive proposed Claim Lines from Evidence Items (the worker's derived rows,
+  now with `origin: evidence_derived` on the HTTP row; 2026-08-19).
+- [x] Add amount, purpose, category, and summary Flags (`CLAIM_AMOUNT_UNCONFIRMED`
+  one per case listing every derived line; `NO_SUMMARY` for any non-folder
+  grouping, `NO_REPORT` kept for folder-based cases; `PURPOSE_UNKNOWN` as a note —
+  `CATEGORY_UNCLEAR` is what blocks when the category cannot be settled).
+- [x] Generalize workers from employee to confirmed case (`worker.verify_case` /
+  `retry_case`, `POST /cases/{id}/retry`; the employee record is the 1:1 unit
+  underneath during the compatibility period).
+- [x] Re-run global duplicate controls after case changes or retries
+  (`worker.rerun_global_controls` at run close, after every correction and retry;
+  `SHARED_RECEIPT` now resolves itself when a receipt stops being shared;
+  `tests/test_claims_evidence_only.py`).
 - **Exit:** scenario E produces useful lines and totals but blocks every
   unsupported payment fact.
 
