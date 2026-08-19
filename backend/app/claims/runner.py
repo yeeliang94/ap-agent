@@ -41,8 +41,10 @@ def store_investigation(db, run: ClaimsRun, result) -> None:
     """Persist the normalized result: artifacts, proposed cases and
     assignments, the plan and the tool record (H2 tables)."""
     from . import cases as cases_mod
+    from . import grouping
 
     cases_mod.store_result(db, run, result, confirmed=False)
+    grouping.refresh(db, run)
     db.commit()
 
 

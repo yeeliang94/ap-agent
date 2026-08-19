@@ -192,7 +192,10 @@ def _case_model_payload(db, run_id: str) -> dict:
         t["calls"] += n
         if err:
             t["failed"] += n
+    from . import grouping
+
     return {"cases": [cases_mod.case_dict(c) for c in cases],
+            "grouping": grouping.gate(db, db.get(ClaimsRun, run_id)),
             "artifacts": [cases_mod.artifact_dict(a) for a in artifacts],
             "assignments": [cases_mod.assignment_dict(a) for a in assignments],
             "investigation": cases_mod.investigation_dict(inv),
@@ -297,33 +300,11 @@ async def confirm_map(run_id: str, body: dict) -> dict:
                  "notes": new_map.get("notes", []), "rounds": run.map.get("rounds"),
                  "confirmed": True}
         run.map = clean
-        # Status changes HERE, in the same commit as the confirmation, so
-        # the screen sees "verifying" at once and a restart before the
-        # workers start is reconciled as an interrupted run.
-        run.status = "verifying"
-        run.progress = {"done": 0, "total": 0}
-        # One employee record per confirmed employee folder.
-        db.query(ClaimEmployee).filter(ClaimEmployee.run_id == run_id).delete()
-        n = 0
-        for e in clean["employees"]:
-            if not e.get("is_employee"):
-                continue
-            roles = {
-                "report_file": e.get("report_file"), "report_tab": e.get("report_tab"),
-                "mileage_tab": e.get("mileage_tab"), "no_report": bool(e.get("no_report")),
-                "receipt_files": [f["path"] for f in e.get("files", []) if f["role"] == "receipts"],
-                "ignored": [f["path"] for f in e.get("files", []) if f["role"] == "ignore"],
-                "unplaced": [f["path"] for f in e.get("files", []) if f["role"] == "unplaced"],
-            }
-            db.add(ClaimEmployee(run_id=run_id, folder=e["folder"], name=e.get("name", ""),
-                                 er_code=e.get("er_code", ""), roles=roles,
-                                 status="skipped" if e.get("skip") else "pending",
-                                 error="skipped by the reviewer at the map" if e.get("skip") else ""))
-            n += 1
-        # The case model (H2), written beside the employees: the confirmed
-        # map as a normalized result — cases and claimants CONFIRMED by the
-        # reviewer, artifacts dispositioned, assignments confirmed — then
-        # each case tied to its employee record.
+        # The case model is the source of truth (H6): the edited map is
+        # stored as the (reviewer-corrected) proposal, replacing the AI's,
+        # and the one grouping gate confirms it — cases and claimants
+        # confirmed, one ClaimEmployee per case for the delivered worker,
+        # status verifying in the same commit.
         from . import manifest as manifest_mod
         from .investigator import contracts as C
         from .investigator import legacy
@@ -331,9 +312,13 @@ async def confirm_map(run_id: str, body: dict) -> dict:
         request = C.InvestigationRequest(run_id=run_id, workspace=str(runner.workspace_for(run_id)),
                                          manifest=manifest_mod.from_dicts(run.manifest or []),
                                          instructions=run.instructions or "", profile_snapshot=run.snapshot or {})
-        cases_mod.store_result(db, run, legacy.from_map(request, clean, confirmed=True), confirmed=True)
-        cases_mod.link_employees(db, run)
-        cases_mod.bump_revision(run)
+        cases_mod.store_result(db, run, legacy.from_map(request, clean, confirmed=False), confirmed=False,
+                               replace_cases=True, record=False)
+        try:
+            n, _gate = cases_mod.confirm_grouping(db, run)
+        except cases_mod.GroupingError as exc:
+            db.rollback()
+            raise HTTPException(400, str(exc))
         db.add(AuditEvent(run_id=run_id, actor="reviewer", action="map_confirmed",
                           detail=(f"{n} employee(s); " + ("; ".join(changes) if changes
                                   else "no changes to the proposed map"))[:2000]))
@@ -395,6 +380,184 @@ def get_claims_file(run_id: str, path: str, page: int = 1, highlight: str = "",
     except IndexError:
         raise HTTPException(404, "No such page.")
     return Response(content=png, media_type="image/png")
+
+
+# ---- Map & Group actions (H6) -------------------------------------------------------
+# Every mutation takes the revision the screen last saw (expected_revision);
+# a stale one is refused with 409 so two browser actions never overwrite
+# each other. Each action is audited, refreshes the grouping controls
+# (conflicts, unknown claimants, case roles) and bumps the revision.
+
+def _revision_check(run: ClaimsRun, body: dict) -> None:
+    expected = body.get("expected_revision")
+    if expected is None:
+        return
+    try:
+        expected = int(expected)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "expected_revision must be a number.")
+    if expected != int(run.revision or 0):
+        raise HTTPException(409, f"This run changed since your screen loaded (revision {run.revision}, you had "
+                                 f"{expected}). Reload and try again.")
+
+
+def _grouping_action(run_id: str, body: dict, action: str, fn):
+    """Common frame for a Map & Group action: run at the map, revision
+    checked, fn(db, run) applied, controls refreshed, audited, committed;
+    returns the gate and the new revision."""
+    from . import grouping
+
+    db = SessionLocal()
+    try:
+        run = db.get(ClaimsRun, run_id)
+        if not run:
+            raise HTTPException(404, "No such claims run.")
+        if run.status != "map_ready":
+            raise HTTPException(400, f"Grouping can be changed while the run waits at the map (it is {run.status}).")
+        _revision_check(run, body)
+        try:
+            detail = fn(db, run)
+        except cases_mod.GroupingError as exc:
+            db.rollback()
+            raise HTTPException(400, str(exc))
+        gate = grouping.refresh(db, run)
+        cases_mod.bump_revision(run)
+        db.add(AuditEvent(run_id=run_id, actor="reviewer", action=action, detail=str(detail)[:2000]))
+        db.commit()
+        return {"ok": True, "revision": run.revision, "grouping": gate}
+    finally:
+        db.close()
+
+
+@router.post("/{run_id}/cases")
+def create_case(run_id: str, body: dict) -> dict:
+    """body = {label, artifact_ids: [...], expected_revision}"""
+    ids = [str(a) for a in (body.get("artifact_ids") or [])]
+
+    def fn(db, run):
+        c = cases_mod.create_case(db, run, str(body.get("label", "")), ids)
+        return f"case {c.label} created with {len(ids)} file(s)"
+    return _grouping_action(run_id, body, "case_created", fn)
+
+
+@router.put("/{run_id}/cases/{case_id}")
+def update_case(run_id: str, case_id: str, body: dict) -> dict:
+    """body = {label?, roles?: {report_file, report_tab, mileage_tab, no_report}, state?: excluded|proposed, expected_revision}"""
+    def fn(db, run):
+        c = cases_mod.update_case(db, run, case_id, body.get("label"), body.get("roles"), body.get("state"))
+        return f"case {c.label}: " + ", ".join(k for k in ("label", "roles", "state") if body.get(k) is not None)
+    return _grouping_action(run_id, body, "case_updated", fn)
+
+
+@router.put("/{run_id}/cases/{case_id}/claimant")
+def set_case_claimant(run_id: str, case_id: str, body: dict) -> dict:
+    """body = {name, identifier, expected_revision} — or {confirm: true} to
+    confirm the proposed name as it stands."""
+    def fn(db, run):
+        if body.get("confirm"):
+            c = cases_mod.confirm_claimant(db, run, case_id)
+            return f"case {c.label}: claimant {c.claimant_name!r} confirmed"
+        c = cases_mod.set_claimant(db, run, case_id, str(body.get("name", "")), str(body.get("identifier", "")))
+        return f"case {c.label}: claimant set to {c.claimant_name!r} {c.claimant_identifier!r}"
+    return _grouping_action(run_id, body, "claimant_set", fn)
+
+
+@router.post("/{run_id}/cases/{case_id}/merge")
+def merge_case(run_id: str, case_id: str, body: dict) -> dict:
+    """body = {into: case_id, expected_revision}"""
+    def fn(db, run):
+        c = cases_mod.merge_cases(db, run, case_id, str(body.get("into", "")))
+        return f"case {case_id} merged into {c.label}"
+    return _grouping_action(run_id, body, "cases_merged", fn)
+
+
+@router.post("/{run_id}/cases/{case_id}/split")
+def split_case(run_id: str, case_id: str, body: dict) -> dict:
+    """body = {artifact_ids: [...], label, expected_revision}"""
+    def fn(db, run):
+        c = cases_mod.split_case(db, run, case_id, [str(a) for a in (body.get("artifact_ids") or [])],
+                                 str(body.get("label", "")))
+        return f"case {case_id}: {len(body.get('artifact_ids') or [])} file(s) split into {c.label}"
+    return _grouping_action(run_id, body, "case_split", fn)
+
+
+@router.post("/{run_id}/artifacts/{artifact_id}/move")
+def move_artifact(run_id: str, artifact_id: str, body: dict) -> dict:
+    """body = {case_id ("" = out of every case), expected_revision}"""
+    def fn(db, run):
+        cases_mod.move_artifact(db, run, artifact_id, str(body.get("case_id", "")))
+        return f"file {artifact_id} moved to case {body.get('case_id') or '(none)'}"
+    return _grouping_action(run_id, body, "artifact_moved", fn)
+
+
+ARTIFACT_ROLES = ("report", "receipts", "approval", "report_copy", "listing", "roster", "policy", "other", "unknown")
+
+
+@router.put("/{run_id}/artifacts/{artifact_id}/role")
+def set_artifact_role(run_id: str, artifact_id: str, body: dict) -> dict:
+    """The reviewer says what a file IS (its role); with remember=true the
+    file-name pattern → role goes into the client profile (the delivered
+    'remember for <client>'). body = {role, remember?, expected_revision}"""
+    role = str(body.get("role", "")).strip()
+    if role not in ARTIFACT_ROLES:
+        raise HTTPException(400, f"role must be one of {', '.join(ARTIFACT_ROLES)}.")
+
+    def fn(db, run):
+        art = cases_mod._artifact(db, run.id, artifact_id)
+        art.proposed_role, art.role_reason = role, "set by the reviewer at the map"
+        if role in ("approval", "report_copy", "listing", "roster", "policy") and art.disposition == "unresolved":
+            art.disposition, art.disposition_by, art.needs_confirmation = "irrelevant", "reviewer", 0
+            art.disposition_reason = f"a {role.replace('_', ' ')}: nothing to verify in it"
+        if body.get("remember"):
+            from . import mapping
+
+            legacy_role = {"report": "report", "receipts": "receipts"}.get(role, "ignore")
+            pattern = _pattern_for(art.path)
+            client = (run.snapshot or {}).get("client_name") or run.client
+            prof = profile_mod.get_profile(client)
+            pats = list(prof.get("file_role_patterns") or [])
+            if legacy_role in mapping.ROLES and not any(p["pattern"] == pattern and p["role"] == legacy_role for p in pats):
+                pats.append({"pattern": pattern, "role": legacy_role})
+                prof["file_role_patterns"] = pats
+                profile_mod.save_profile(client, prof, evidence=f"map correction on run {run.id}")
+        return f"file {art.path}: role {role}" + (" (remembered)" if body.get("remember") else "")
+    return _grouping_action(run_id, body, "artifact_role_set", fn)
+
+
+def _pattern_for(path: str) -> str:
+    name = path.rsplit("/", 1)[-1]
+    i = name.rfind("_")
+    return "*" + name[i:] if i > 0 else name
+
+
+@router.post("/{run_id}/confirm-grouping")
+async def confirm_grouping(run_id: str, body: dict) -> dict:
+    """The one primary action of Map & Group: confirm the grouping and
+    start verification. body = {expected_revision}. Refused (400) with the
+    reasons while the gate is shut."""
+    db = SessionLocal()
+    try:
+        run = db.get(ClaimsRun, run_id)
+        if not run:
+            raise HTTPException(404, "No such claims run.")
+        if run.status != "map_ready":
+            raise HTTPException(400, f"The grouping can be confirmed while the run waits at the map (it is {run.status}).")
+        _revision_check(run, body)
+        try:
+            n, gate = cases_mod.confirm_grouping(db, run)
+        except cases_mod.GroupingError as exc:
+            db.rollback()
+            raise HTTPException(400, str(exc))
+        run.map = {**(run.map or {}), "confirmed": True}
+        db.add(AuditEvent(run_id=run_id, actor="reviewer", action="grouping_confirmed",
+                          detail=f"{n} case(s) to verify; {gate['counts']}"[:2000]))
+        db.commit()
+        telemetry.record(db, run_id, "map", telemetry.INFO, "GROUPING_CONFIRMED",
+                         f"Grouping confirmed by the reviewer; {n} case(s) to verify.")
+        runner.start_background(runner.start_verification(run_id))
+        return {"ok": True, "cases": n, "revision": run.revision}
+    finally:
+        db.close()
 
 
 # ---- review actions -----------------------------------------------------------

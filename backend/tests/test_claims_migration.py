@@ -153,9 +153,11 @@ async def test_a_run_writes_cases_beside_employees(db, monkeypatch):
     # Assignments confirmed by the map confirmation; investigation record confirmed.
     assert got["assignments"] and all(a["state"] == "confirmed" for a in got["assignments"])
     assert got["investigation"]["status"] == "confirmed" and got["investigation"]["adapter"] == "legacy"
-    # Storage: two investigation records (proposal, confirmation), one artifact row per file.
+    # Storage: ONE investigation record (the proposal, confirmed by the
+    # reviewer's click — a reviewer edit is not a second investigation),
+    # one artifact row per file.
     s = db()
-    assert s.query(ClaimInvestigation).filter(ClaimInvestigation.run_id == run_id).count() == 2
+    assert s.query(ClaimInvestigation).filter(ClaimInvestigation.run_id == run_id).count() == 1
     assert s.query(ClaimSourceArtifact).filter(ClaimSourceArtifact.run_id == run_id).count() == 44
     assert s.query(ClaimEvidenceAssignment).filter(ClaimEvidenceAssignment.run_id == run_id).count() == len(got["assignments"])
     # The switch hides the fields; storage stays.

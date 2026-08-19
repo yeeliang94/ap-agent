@@ -166,11 +166,13 @@ def install(monkeypatch, survey_of, t: dict | None = None) -> dict:
         for tr in e["map_trips"]:
             by_file.setdefault(f"{e['folder']}/{tr['file']}", {"receipts": [], "trips": []})["trips"].append(tr)
 
+    by_basename = {k.split("/", 1)[1]: v for k, v in by_file.items()}
+
     async def fake_read_bundle(path, rel_path, usage, sem=None, context=""):
         holder.setdefault("page_contexts", []).append(context)
         usage.requests += 1
         n_pages = batch_source.page_count(path) or 1
-        found = by_file.get(rel_path, {"receipts": [], "trips": []})
+        found = by_file.get(rel_path) or by_basename.get(rel_path.rsplit("/", 1)[-1]) or {"receipts": [], "trips": []}
         receipts = [{"file": rel_path, "page": r["page"], "position": r["position"], "vendor": r["vendor"],
                      "date": r["date"], "amount": f"{Decimal(str(r['amount'])):.2f}", "currency": r["currency"],
                      "confidence": {}} for r in found["receipts"]]
@@ -261,3 +263,61 @@ def good_proposal(manifest, t: dict | None = None):
             no_summary=report_id is None, reason="one person per subfolder; name in file names and B1"))
     return InvestigationProposal(plan_steps=["list", "peek", "group by folder", "verify names"], artifacts=arts, cases=cases,
                                  unassigned_artifact_ids=[m.id for m in manifest if m.path.endswith("notes.txt")])
+
+
+def flat_zip(folders=("Aegene Ong_1", "Nick Goh_2"), extra: dict[str, bytes] | None = None) -> bytes:
+    """The named sample folders' files thrown flat into one zip (a dump)."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for folder in folders:
+            for p in (GEN / "batch" / folder).iterdir():
+                z.write(p, p.name)
+        for name, data in (extra or {}).items():
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+def flat_proposal(manifest, t: dict | None = None, claimants: bool = True):
+    """The correct proposal for a flat dump of sample files: one case per
+    person, found by the name prefix of the file names; unknown files
+    unresolved. claimants=False leaves every case without a name (scenario D)."""
+    from app.claims.investigator.proposal import (ArtifactProposal, CaseProposal, CiteProposal,
+                                                  InvestigationProposal)
+
+    t = t or truth()
+    people = t["employees"]
+    arts, cases = [], []
+    per: dict[str, list] = {}
+    for m in manifest:
+        e = next((x for x in people if m.path.startswith(x["name"])), None)
+        if e is None:
+            arts.append(ArtifactProposal(artifact_id=m.id, role="unknown", disposition="unresolved", reason="cannot place"))
+            continue
+        per.setdefault(e["name"], []).append((m, e))
+    for n, (name, ms) in enumerate(per.items(), 1):
+        e = ms[0][1]
+        report_id = None
+        for m, _ in ms:
+            if m.path == e["files"]["report"]:
+                arts.append(ArtifactProposal(artifact_id=m.id, role="report", disposition="used", reason="claim summary"))
+                report_id = m.id
+            elif m.path in e["files"]["receipts"]:
+                arts.append(ArtifactProposal(artifact_id=m.id, role="receipts", disposition="used", reason="receipts"))
+            elif m.path == e["files"]["approval"]:
+                arts.append(ArtifactProposal(artifact_id=m.id, role="approval", disposition="used", reason="approval"))
+            else:
+                arts.append(ArtifactProposal(artifact_id=m.id, role="report_copy", disposition="used", reason="print"))
+        cases.append(CaseProposal(
+            key=f"case-{n}", label=name if claimants else f"Case {n}",
+            claimant_name=name if claimants else "", claimant_identifier=(e["er_code"] if (claimants and report_id) else ""),
+            claimant_basis="explicit_name",
+            identity_citations=[CiteProposal(artifact_id=report_id, sheet="Expense Report", cell="B1", quote=name)] if (report_id and claimants) else [],
+            grouping_basis="explicit_name" if claimants else "ai_inference",
+            artifact_ids=[m.id for m, _ in ms], report_artifact_id=report_id,
+            report_sheet="Expense Report" if report_id else None,
+            mileage_sheet="KM" if (report_id and e["mileage_tab"]) else None,
+            no_summary=report_id is None, reason="name prefix on every file and the report header"))
+    return InvestigationProposal(plan_steps=["list", "read headers", "group by name"], artifacts=arts, cases=cases)
