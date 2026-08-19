@@ -65,6 +65,10 @@ CLAIMS_CASE_MODEL = _flag("CLAIMS_CASE_MODEL", "1")
 # New runs investigate with the tool-using agent (off = the delivered
 # structured-folder mapper; old runs are never reinterpreted).
 CLAIMS_AGENTIC_INVESTIGATION = _flag("CLAIMS_AGENTIC_INVESTIGATION", "0")
+# Shadow mode (H12): with the agentic switch OFF, also run the tool-using
+# investigator on each new run and record where it agrees with / differs
+# from the structured-folder mapper — nothing it proposes is used.
+CLAIMS_SHADOW_INVESTIGATION = _flag("CLAIMS_SHADOW_INVESTIGATION", "0")
 # Map & Group actions for a flat folder dump (off = a flat folder behaves
 # as today: root files are classified, not grouped).
 CLAIMS_FULL_DUMP_GROUPING = _flag("CLAIMS_FULL_DUMP_GROUPING", "0")

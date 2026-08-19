@@ -37,6 +37,30 @@ OBJECTIVE = ("Check the expense records and all supporting evidence, group what 
              "together, reconcile every line and total, and show anything that does not agree.")
 
 
+async def _shadow_investigation(db, run: ClaimsRun, request, primary) -> None:
+    """Shadow mode (H12): the tool-using investigator runs beside the
+    mapper on the same request; its result is compared and recorded, never
+    used. Its failure is a diary line, not a run failure."""
+    if not config.CLAIMS_SHADOW_INVESTIGATION or config.CLAIMS_AGENTIC_INVESTIGATION:
+        return
+    from . import cases as cases_mod
+    from .investigator import investigator as agentic
+
+    started = time.monotonic()
+    try:
+        shadow = await agentic.investigate(request)
+    except Exception as exc:
+        telemetry.record_failure(db, run.id, "map", "SHADOW_FAILED", "The shadow investigation failed", exc)
+        return
+    comparison = cases_mod.compare_results(primary, shadow)
+    cases_mod.store_shadow(db, run, shadow, comparison)
+    db.commit()
+    telemetry.record(db, run.id, "map", telemetry.INFO if comparison["agrees"] else telemetry.WARNING, "SHADOW_RESULT",
+                     f"Shadow investigation in {_secs(started)}: "
+                     + ("agrees with the map." if comparison["agrees"] else
+                        f"{len(comparison['differences'])} difference(s) — " + "; ".join(comparison["differences"])[:600]))
+
+
 def store_investigation(db, run: ClaimsRun, result) -> None:
     """Persist the normalized result: artifacts, proposed cases and
     assignments, the plan and the tool record (H2 tables)."""
@@ -142,6 +166,7 @@ async def process_run(run_id: str) -> None:
         claim_map, warnings, notes = result.map, list(result.warnings), list(result.notes)
         run.manifest = manifest_mod.to_dicts(manifest)
         store_investigation(db, run, result)
+        await _shadow_investigation(db, run, request, result)
         for level, text in notes:
             telemetry.record(db, run_id, "map",
                              telemetry.WARNING if level == "WARNING" else telemetry.INFO,

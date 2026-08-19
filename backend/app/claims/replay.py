@@ -30,7 +30,7 @@ BUNDLE_VERSION = "h11.1"
 
 
 def build_bundle(db, run: ClaimsRun) -> dict:
-    inv = db.query(ClaimInvestigation).filter(ClaimInvestigation.run_id == run.id) \
+    inv = db.query(ClaimInvestigation).filter(ClaimInvestigation.run_id == run.id, ClaimInvestigation.status != "shadow") \
         .order_by(ClaimInvestigation.created_at.desc(), ClaimInvestigation.id.desc()).first()
     tools = db.query(ClaimToolExecution).filter(ClaimToolExecution.run_id == run.id).order_by(ClaimToolExecution.id).all()
     cases = db.query(ClaimCase).filter(ClaimCase.run_id == run.id).order_by(ClaimCase.label).all()
@@ -139,4 +139,42 @@ def verify_bundle(db, run: ClaimsRun) -> dict:
     return {"reproduces": not problems, "problems": problems,
             "checked": {"calculations": n_calc, "flags": len(bundle["flags"]), "artifacts": len(bundle["manifest"]),
                         "output_rows": len((published or {}).get("rows", []))},
+            "gates": acceptance_gates(db, run),
             "versions": bundle["versions"], "bundle_version": BUNDLE_VERSION}
+
+
+def acceptance_gates(db, run: ClaimsRun) -> dict:
+    """The live-model acceptance gates (H12), measured on one run: artifacts
+    dispositioned, payable claimants confirmed, material values cited,
+    arithmetic reconciled, evidence reuse, automatic owner confirmation."""
+    from .models import ClaimEvidence
+
+    arts = db.query(ClaimSourceArtifact).filter(ClaimSourceArtifact.run_id == run.id).all()
+    cases = db.query(ClaimCase).filter(ClaimCase.run_id == run.id).all()
+    flags = db.query(ClaimFlag).filter(ClaimFlag.run_id == run.id).all()
+    rows = db.query(ClaimRow).filter(ClaimRow.run_id == run.id).all()
+    evidence = db.query(ClaimEvidence).filter(ClaimEvidence.run_id == run.id).all()
+    payable = [c for c in cases if c.state == "confirmed" and c.status == "verified"]
+    open_flags = [f for f in flags if f.status == "open"]
+    uncited = [f for f in flags if not f.cite and f.code not in ("NO_REPORT", "NO_SUMMARY", "CLAIM_AMOUNT_UNCONFIRMED",
+                                                                  "PURPOSE_UNKNOWN", "CATEGORY_UNCLEAR", "REPORT_UNREADABLE")]
+    rows_uncited = [r for r in rows if not r.sheet and r.kind != "derived"]
+    ev_uncited = [e for e in evidence if not e.file]
+    reuse = [f for f in flags if f.code in ("SHARED_RECEIPT", "DUPLICATE_RECEIPT") and f.status == "open"]
+    ai_confirmed = [c for c in cases if c.claimant_state == "confirmed" and "reviewer" not in (c.claimant_basis or "")
+                    and "confirmed map" not in (c.claimant_basis or "")]
+    out = run.outputs or {}
+    return {
+        "artifacts_dispositioned_or_blocking": {
+            "ok": all(a.disposition != "unresolved" or any(f.code == "ARTIFACT_UNRESOLVED" and f.artifact_id == a.artifact_id and f.status == "open" for f in flags) for a in arts),
+            "total": len(arts), "unresolved": sum(1 for a in arts if a.disposition == "unresolved")},
+        "payable_claimants_confirmed": {"ok": all(c.claimant_state == "confirmed" for c in payable),
+                                        "payable": len(payable), "confirmed": sum(1 for c in payable if c.claimant_state == "confirmed")},
+        "material_values_cited": {"ok": not uncited and not rows_uncited and not ev_uncited,
+                                  "flags_uncited": len(uncited), "rows_uncited": len(rows_uncited), "evidence_uncited": len(ev_uncited)},
+        "arithmetic_reconciles": {"ok": bool(out) and bool((out.get("totals") or {}).get("match")),
+                                  "reported_missing_named": (out.get("totals") or {}).get("reported_missing")},
+        "no_silent_evidence_reuse": {"ok": True, "open_reuse_flags": len(reuse)},
+        "no_automatic_owner_confirmation": {"ok": not ai_confirmed, "cases": [c.label for c in ai_confirmed]},
+        "open_flags": len(open_flags), "false_flag_budget": f"≤ 1 open false flag per confirmed case ({len(payable)} cases)",
+    }

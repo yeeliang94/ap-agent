@@ -183,7 +183,9 @@ def _case_model_payload(db, run_id: str) -> dict:
     artifacts = db.query(ClaimSourceArtifact).filter(ClaimSourceArtifact.run_id == run_id) \
         .order_by(ClaimSourceArtifact.path).all()
     assignments = db.query(ClaimEvidenceAssignment).filter(ClaimEvidenceAssignment.run_id == run_id).all()
-    inv = db.query(ClaimInvestigation).filter(ClaimInvestigation.run_id == run_id) \
+    inv = db.query(ClaimInvestigation).filter(ClaimInvestigation.run_id == run_id, ClaimInvestigation.status != "shadow") \
+        .order_by(ClaimInvestigation.created_at.desc(), ClaimInvestigation.id.desc()).first()
+    shadow = db.query(ClaimInvestigation).filter(ClaimInvestigation.run_id == run_id, ClaimInvestigation.status == "shadow") \
         .order_by(ClaimInvestigation.created_at.desc(), ClaimInvestigation.id.desc()).first()
     tool_counts: dict[str, dict] = {}
     for tool, err, n in (db.query(ClaimToolExecution.tool, ClaimToolExecution.error_code, func.count(ClaimToolExecution.id))
@@ -200,6 +202,7 @@ def _case_model_payload(db, run_id: str) -> dict:
             "artifacts": [cases_mod.artifact_dict(a) for a in artifacts],
             "assignments": [cases_mod.assignment_dict(a) for a in assignments],
             "investigation": cases_mod.investigation_dict(inv),
+            "shadow_investigation": cases_mod.investigation_dict(shadow),
             "tool_summary": tool_counts,
             "artifact_counts": {"total": len(artifacts),
                                 "unresolved": sum(1 for a in artifacts if a.disposition == "unresolved"),

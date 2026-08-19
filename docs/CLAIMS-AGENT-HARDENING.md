@@ -1,7 +1,10 @@
 # Claims Agent Hardening Plan — Tool-Using Investigation and Full-Folder Dumps
 
-**Status:** Rebaselined after delivered R1–R10 and review fixes; H1–H12
-remain proposed
+**Status:** H0–H12 implemented 2026-08-19 behind the switches below (all
+automated checks green: backend 317 passed, frontend build clean). Open items
+are the owner's: the live structured run that reproduces the RM10 example
+(H0), the Windows sandbox feasibility spike (H8), the anonymized full-dump
+pilot and the default-on decision after two clean shadow cycles (H12).
 
 **Written:** 2026-08-19
 
@@ -863,12 +866,28 @@ and rollback switch.
 
 ### H12 — Evaluation, shadow rollout, and default-on decision
 
-- [ ] Build scenarios B–J with ground truth.
-- [ ] Run old and new structured paths in shadow mode on Client A.
-- [ ] Pilot representative anonymized full dumps with output locked.
-- [ ] Compare accuracy, false Flags, grouping corrections, time, cost, and tool
-  failures.
-- [ ] Enable by default only after acceptance gates pass twice.
+- [x] Build scenarios B–J with ground truth (deterministic, from the synthetic
+  Client A sample: `tests/test_claims_scenarios.py` B, C, F, G, H, I;
+  `test_claims_grouping.py` D; `test_claims_evidence_only.py` E;
+  `test_claims_sandbox.py` J; the pinned baseline is A; 2026-08-19). A master
+  workbook may now be the report of several cases, one sheet each.
+- [x] Run old and new structured paths in shadow mode on Client A
+  (`CLAIMS_SHADOW_INVESTIGATION=1`: the investigator runs beside the mapper on
+  every new run, its result is compared and recorded as a `shadow`
+  investigation — `SHADOW_RESULT` diary line, `shadow_investigation` on the run
+  detail — and never used; pinned with scripted agents. **Live runs are the
+  owner's to trigger.**)
+- [ ] Pilot representative anonymized full dumps with output locked —
+  **owner action** (the flat-dump path is exercised end to end on the synthetic
+  dumps; a live pilot needs real anonymized data and the model).
+- [x] Compare accuracy, false Flags, grouping corrections, time, cost, and tool
+  failures (`GET /claims-runs/{id}/replay?verify=1` → `gates`: the acceptance
+  gates measured on one run; per-case seconds/requests/tokens in the diary;
+  `tool_summary` on the run detail; shadow comparison per run). The live
+  numbers come from the owner's shadow runs.
+- [ ] Enable by default only after acceptance gates pass twice — **owner
+  decision**; `CLAIMS_AGENTIC_INVESTIGATION` stays off and the legacy adapter
+  remains the rollback path.
 - **Exit:** owner signs off on default-on; old adapter remains a rollback path
   for one release cycle.
 

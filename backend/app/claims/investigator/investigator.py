@@ -203,11 +203,14 @@ def normalize(proposal: InvestigationProposal, request: InvestigationRequest, to
     valid_cases: list[CaseProposal] = []
     in_case: dict[str, str] = {}
     for c in proposal.cases:
-        arts = [aid for aid in c.artifact_ids if aid in by_id and aid not in in_case]
+        # a workbook already in another case stays here too when it is THIS
+        # case's report (a master workbook, one sheet per claimant)
+        arts = [aid for aid in c.artifact_ids if aid in by_id
+                and (aid not in in_case or (by_id[aid].media_type == "workbook" and c.report_artifact_id == aid))]
         if not arts:
             continue
         for aid in arts:
-            in_case[aid] = c.key
+            in_case.setdefault(aid, c.key)
         valid_cases.append(c.model_copy(update={"artifact_ids": arts}))
     unverifiable = {p.split(":")[0].replace("case ", "") for p in problems if "claimant_" in p and p.startswith("case ")}
 

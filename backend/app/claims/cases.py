@@ -164,6 +164,57 @@ def upsert_assignments(s, run_id: str, assignments: list[C.EvidenceAssignment]) 
         art.case_id = by_art.get(art.artifact_id, "")
 
 
+def compare_results(primary: C.InvestigationResult, shadow: C.InvestigationResult) -> dict:
+    """Where two investigations of the same run agree and differ (H12 shadow
+    mode): cases by label → (claimant name, report file, receipts), and
+    artifact dispositions. Plain sentences, for the diary and the record."""
+    def shape(r: C.InvestigationResult) -> dict:
+        return {c.label: (c.claimant.name, (c.roles or {}).get("report_file"), tuple(sorted((c.roles or {}).get("receipt_files") or [])))
+                for c in r.cases}
+    a, b = shape(primary), shape(shadow)
+    diffs: list[str] = []
+    for label in sorted(set(a) | set(b)):
+        if label not in b:
+            diffs.append(f"case {label}: only the primary proposed it")
+        elif label not in a:
+            diffs.append(f"case {label}: only the shadow proposed it")
+        elif a[label] != b[label]:
+            diffs.append(f"case {label}: primary {a[label]} vs shadow {b[label]}")
+    # Dispositions: what matters is whether a file is SETTLED or left for the
+    # reviewer (used/irrelevant/duplicate vs unresolved/unreadable); "used
+    # inside the case" vs "irrelevant" for an approval e-mail is a naming
+    # difference between the adapters, not a grouping difference.
+    def settled(d: str | None) -> str:
+        return "settled" if d in ("used", "irrelevant", "duplicate") else (d or "missing")
+    da = {x.id: x.disposition for x in primary.artifacts}
+    db_ = {x.id: x.disposition for x in shadow.artifacts}
+    for aid in sorted(set(da) | set(db_)):
+        if settled(da.get(aid)) != settled(db_.get(aid)):
+            path = next((x.path for x in primary.artifacts + shadow.artifacts if x.id == aid), aid)
+            diffs.append(f"{path}: primary {da.get(aid)} vs shadow {db_.get(aid)}")
+    return {"agrees": not diffs, "differences": diffs[:100], "cases_primary": len(a), "cases_shadow": len(b)}
+
+
+def store_shadow(s, run: ClaimsRun, shadow: C.InvestigationResult, comparison: dict) -> ClaimInvestigation:
+    """The shadow investigation on record — plan, tool executions and the
+    comparison — and nothing else: its cases, artifacts and flags are not
+    written (nothing it proposes is used)."""
+    inv = ClaimInvestigation(run_id=run.id, adapter=shadow.plan.adapter, strategy=shadow.plan.strategy or "",
+                             status="shadow", plan=shadow.plan.model_dump(), rounds=shadow.plan.rounds,
+                             summary={"comparison": comparison, "artifacts": len(shadow.artifacts),
+                                      "cases": len(shadow.cases), "flags": len(shadow.flags),
+                                      "unresolved": len(shadow.unresolved_artifacts()),
+                                      "warnings": list(shadow.warnings)[:50]})
+    s.add(inv)
+    s.flush()
+    for t in shadow.tool_executions:
+        s.add(ClaimToolExecution(run_id=run.id, investigation_id=inv.id, tool=t.tool, elapsed_ms=t.elapsed_ms,
+                                 input_hashes=list(t.input_hashes), output_hash=t.output_hash,
+                                 truncated=1 if t.truncated else 0, error_code=t.error_code, note=t.note))
+    s.flush()
+    return inv
+
+
 # ---- the employee ↔ case mirror ------------------------------------------------------
 
 def link_employees(s, run: ClaimsRun) -> None:

@@ -54,11 +54,24 @@ async def audit_proposal(proposal: InvestigationProposal, request: Investigation
         if m.id not in seen:
             problems.append(f"artifact {m.id} ({m.path}) has no role/disposition — every file gets one")
     in_case: dict[str, str] = {}
+    sheet_of: dict[str, dict[str, str]] = {}   # workbook id → {case key: report sheet}
     for c in proposal.cases:
         for aid in c.artifact_ids:
+            m = by_id.get(aid)
             if aid in in_case and in_case[aid] != c.key:
-                problems.append(f"artifact {aid} is in two cases ({in_case[aid]} and {c.key}); a file belongs to one case")
+                # A MASTER WORKBOOK may hold several claimants' summaries on
+                # different sheets (scenario F): the one file sits in every
+                # case that names it as its report with a distinct sheet.
+                shared_ok = (m is not None and m.media_type == "workbook" and c.report_artifact_id == aid
+                             and bool(c.report_sheet) and c.report_sheet not in sheet_of.get(aid, {}).values())
+                if shared_ok:
+                    sheet_of.setdefault(aid, {})[c.key] = c.report_sheet or ""
+                    continue
+                problems.append(f"artifact {aid} is in two cases ({in_case[aid]} and {c.key}); a file belongs to one case "
+                                "(a workbook may be shared only as the report of each, on different sheets)")
             in_case.setdefault(aid, c.key)
+            if m is not None and m.media_type == "workbook" and c.report_artifact_id == aid and c.report_sheet:
+                sheet_of.setdefault(aid, {})[c.key] = c.report_sheet
     for a in proposal.artifacts:
         if a.artifact_id not in by_id:
             continue

@@ -71,13 +71,17 @@ def signals_for(run: ClaimsRun, artifacts: list[ClaimSourceArtifact]) -> dict[st
     return out
 
 
-def conflict_in(case: ClaimCase, artifacts: list[ClaimSourceArtifact], signals: dict[str, list[dict]]) -> str:
+def conflict_in(case: ClaimCase, artifacts: list[ClaimSourceArtifact], signals: dict[str, list[dict]],
+                shared: set[str] | None = None) -> str:
     """A sentence naming the conflict, or "" — strong signals of the case's
-    files that point at two different identifiers or two different names."""
+    files that point at two different identifiers or two different names.
+    `shared` = artifact ids of master workbooks that are the report of
+    several cases: they carry every claimant's name by design and are left
+    out of the comparison."""
     codes: dict[str, str] = {}
     names: dict[str, str] = {}
     for a in artifacts:
-        if a.case_id != case.id:
+        if a.case_id != case.id or (shared and a.artifact_id in shared):
             continue
         for s in signals.get(a.artifact_id, []):
             if s["strength"] != "strong":
@@ -112,7 +116,12 @@ def roles_for_case(case: ClaimCase, artifacts: list[ClaimSourceArtifact], survey
     explicit_no = bool(old.get("no_report")) and not old.get("report_file")
     report = None
     if not explicit_no:
+        # the chosen report may be a MASTER workbook whose home is another
+        # case (one sheet per claimant, scenario F): any used workbook of
+        # the run that the case named keeps being its report
         report = next((a for a in workbooks if a.path == old.get("report_file")), None) \
+            or next((a for a in artifacts if a.media_type == "workbook" and a.path == old.get("report_file")
+                     and a.disposition == "used" and (case.artifact_ids and a.artifact_id in case.artifact_ids)), None) \
             or next((a for a in workbooks if a.proposed_role == "report"), None) \
             or (workbooks[0] if len(workbooks) == 1 else None)
     tabs = list((((peeks.get(report.path) or {}).get("peek") or {}).get("tabs") or {}).keys()) if report else []
@@ -143,10 +152,19 @@ def refresh(s, run: ClaimsRun) -> dict:
     live: set[tuple] = set()
     for c in cases:
         c.roles = roles_for_case(c, artifacts, run.survey or {})
-        c.artifact_ids = [a.artifact_id for a in artifacts if a.case_id == c.id]
+    report_use: dict[str, int] = {}
+    for c in cases:
+        rf = (c.roles or {}).get("report_file")
+        if rf:
+            report_use[rf] = report_use.get(rf, 0) + 1
+    shared = {a.artifact_id for a in artifacts if report_use.get(a.path, 0) > 1}
+    for c in cases:
+        shared = [aid for aid in (c.artifact_ids or []) if aid != "" and any(
+            a.artifact_id == aid and a.media_type == "workbook" and a.path == (c.roles or {}).get("report_file") for a in artifacts)]
+        c.artifact_ids = sorted({*[a.artifact_id for a in artifacts if a.case_id == c.id], *shared})
         if c.state == "excluded":
             continue
-        why = conflict_in(c, artifacts, signals)
+        why = conflict_in(c, artifacts, signals, shared)
         if why:
             key = ("OWNERSHIP_CONFLICT", c.id)
             live.add(key)
