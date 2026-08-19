@@ -823,11 +823,19 @@ and rollback switch.
 
 ### H10 — Case-oriented review surface
 
-- [ ] Adapt the delivered R7–R10 surface from employee ids to case ids:
-  plain-language cards, summary filters, all lines, unused evidence,
-  verification progress, and output reconciliation.
-- [ ] Add claimant/assignment confidence and evidence-derived badges.
-- [ ] Ensure keyboard, empty, loading, stale-revision, and failure states.
+- [x] Adapt the delivered R7–R10 surface from employee ids to case ids
+  (`frontend/src/screens/claims/units.ts`: the review surface is keyed by Claim
+  Case, an older run's employees render through the same `reviewUnits`;
+  ReviewView / VerifyingView / OutputView migrated, not duplicated; 2026-08-19).
+- [x] Add claimant/assignment confidence and evidence-derived badges (claimant
+  chip with basis and grouping confidence; `derived` / `corrected` origin chips
+  on lines and cases; Reported Total and Calculated Lines Total shown apart;
+  Output names the blockers and the three totals).
+- [x] Ensure keyboard, empty, loading, stale-revision, and failure states (every
+  mutation sends `expected_revision`; a 409 reloads the run and says so;
+  action-settled flags — file disposition, set claimant — offer the action on
+  the card instead of accept/dismiss; verified in the browser on a seeded
+  flat-dump run).
 - **Exit:** a reviewer can complete scenarios A–E without inspecting server logs
   or editing JSON.
 

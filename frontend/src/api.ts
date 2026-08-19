@@ -315,6 +315,8 @@ export interface ClaimRow {
   employee_id: string;
   /** The Claim Case this line belongs to (hardening H2). */
   case_id?: string;
+  /** Where the amount comes from (H7): reported | evidence_derived | reviewer_entered. */
+  origin?: "reported" | "evidence_derived" | "reviewer_entered";
   kind: string;
   sheet: string;
   row: number;
@@ -374,13 +376,19 @@ export interface ClaimsOutputs {
   totals: {
     total_myr: string;
     source_total: string;
+    /** Calculated Lines Total of the lines to be paid (H9). */
+    lines_total?: string;
+    /** The Reported Totals added up, where a source states one. */
+    reported_total?: string;
+    reported_missing?: number;
     match: boolean;
     difference: string;
-    differences?: { name: string; expected: string | null; emitted: string; why: string }[];
+    differences?: { name: string; case_id?: string; expected: string | null; emitted: string; why: string }[];
   };
-  included: { name: string; er_code: string; amount: string; category: string; gl: string }[];
-  not_included: { name: string; why: string }[];
-  exclusions: { name: string; row: number; amount: string; why: string }[];
+  included: { name: string; case_id?: string; er_code: string; amount: string; category: string; gl: string;
+    reported_total?: string | null; lines_total?: string; derived?: boolean }[];
+  not_included: { name: string; case_id?: string; why: string }[];
+  exclusions: { name: string; case_id?: string; row: number; amount: string; why: string }[];
   /** Receipts and map trips no row used — what will NOT be paid, on the same screen as what will. */
   unused_evidence?: { name: string; what: string; where: string; amount: string; decision: string }[];
   header_fallback: boolean;
@@ -499,6 +507,8 @@ export interface ClaimsRunDetail extends ClaimsRunSummary {
   investigation?: Investigation;
   tool_summary?: Record<string, { calls: number; failed: number }>;
   artifact_counts?: { total: number; unresolved: number; needs_review: number };
+  /** What keeps the Payment Listing locked, named by the server (H9). */
+  output_blockers?: string[];
   folder_url: string;
   listing_url: string;
   received_date: string;
@@ -655,37 +665,58 @@ export async function saveClaimsSettings(body: {
   return r.json();
 }
 
-export async function retryClaimEmployee(runId: string, employeeId: string): Promise<void> {
-  const r = await fetch(`/api/claims-runs/${runId}/employees/${employeeId}/retry`, { method: "POST" });
-  if (!r.ok) return fail(r, "Could not retry this employee");
+// Every review mutation sends the revision the screen last saw (H9/H10);
+// the server answers 409 when the run moved on — the screen reloads.
+function staleOr(r: Response, fallback: string): Promise<never> {
+  if (r.status === 409) throw new StaleRunError();
+  return fail(r, fallback);
+}
+
+export async function retryClaimEmployee(runId: string, employeeId: string, revision?: number): Promise<void> {
+  const r = await fetch(`/api/claims-runs/${runId}/employees/${employeeId}/retry`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_revision: revision }),
+  });
+  if (!r.ok) return staleOr(r, "Could not retry this employee");
+}
+
+export async function retryCase(runId: string, caseId: string, revision?: number): Promise<void> {
+  const r = await fetch(`/api/claims-runs/${runId}/cases/${caseId}/retry`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_revision: revision }),
+  });
+  if (!r.ok) return staleOr(r, "Could not re-verify this case");
 }
 
 export async function decideClaimFlag(
   runId: string,
   flagId: string,
   decision: "accepted" | "dismissed",
-  note: string
+  note: string,
+  revision?: number,
+  disposition?: Disposition
 ): Promise<void> {
   const r = await fetch(`/api/claims-runs/${runId}/flags/${flagId}/decide`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ decision, note }),
+    body: JSON.stringify({ decision, note, expected_revision: revision, ...(disposition ? { disposition } : {}) }),
   });
-  if (!r.ok) return fail(r, "Could not record the decision");
+  if (!r.ok) return staleOr(r, "Could not record the decision");
 }
 
 export async function correctClaimRow(
   runId: string,
   rowId: string,
   fields: Record<string, string>,
-  reason: string
+  reason: string,
+  revision?: number
 ): Promise<void> {
   const r = await fetch(`/api/claims-runs/${runId}/rows/${rowId}/correct`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fields, reason }),
+    body: JSON.stringify({ fields, reason, expected_revision: revision }),
   });
-  if (!r.ok) return fail(r, "Correction failed");
+  if (!r.ok) return staleOr(r, "Correction failed");
 }
 
 export async function setEmployeeCategory(
@@ -693,14 +724,15 @@ export async function setEmployeeCategory(
   employeeId: string,
   category: string,
   gl: string,
-  reason: string
+  reason: string,
+  revision?: number
 ): Promise<void> {
   const r = await fetch(`/api/claims-runs/${runId}/employees/${employeeId}/category`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ category, gl, reason }),
+    body: JSON.stringify({ category, gl, reason, expected_revision: revision }),
   });
-  if (!r.ok) return fail(r, "Could not set the category");
+  if (!r.ok) return staleOr(r, "Could not set the category");
 }
 
 

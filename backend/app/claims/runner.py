@@ -186,7 +186,13 @@ async def start_verification(run_id: str) -> None:
     db = SessionLocal()
     try:
         run = db.get(ClaimsRun, run_id)
-        _set(db, run, status="verifying", progress={"done": 0, "total": 0})
+        if run is None or run.status != "verifying":
+            # The confirm route moves the run to verifying in its own commit;
+            # anything else asking for verification is out of order (H6/H9).
+            log.warning("claims run %s: verification requested while %s — ignored",
+                        run_id, run.status if run else "missing")
+            return
+        _set(db, run, progress={"done": 0, "total": 0})
         from . import worker
 
         await worker.verify_run(db, run)

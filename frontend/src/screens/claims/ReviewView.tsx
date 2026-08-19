@@ -1,25 +1,39 @@
 import { useMemo, useState } from "react";
 import {
-  ClaimEmployee,
   ClaimEvidence,
   ClaimFlag,
   ClaimRow,
   ClaimsRunDetail,
+  Disposition,
   FlagInfo,
+  StaleRunError,
   claimsFileUrl,
   correctClaimRow,
   decideClaimFlag,
+  retryCase,
   retryClaimEmployee,
+  setClaimant,
   setEmployeeCategory,
 } from "../../api";
 import FieldEditor from "../../components/FieldEditor";
 import FlagCard from "../../components/FlagCard";
+import { ReviewUnit, reviewUnits, unitIdOf, usesCases } from "./units";
 
-// Review: the batch at a glance, then employee by employee — every row
-// with its verdict and its receipt (the flags are annotations on that
-// picture), and the flag cards with their title, what they mean, what to
-// do and the amount at stake. A summary strip filters by kind or by
-// employee.
+// Review: the batch at a glance, then case by case — every line with its
+// verdict and its receipt (the flags are annotations on that picture), and
+// the flag cards with their title, what they mean, what to do and the
+// amount at stake. A summary strip filters by kind or by case. Keyed by
+// Claim Case (hardening H10); an older run keyed by employee renders the
+// same way through `reviewUnits`.
+
+/** A failed mutation: a stale run reloads the screen; anything else is shown. */
+function explain(e: unknown, fallback: string, onChanged: () => void): string {
+  if (e instanceof StaleRunError) {
+    onChanged();
+    return e.message;
+  }
+  return e instanceof Error ? e.message : fallback;
+}
 
 const ROW_FIELDS = [
   { name: "date" }, { name: "item" }, { name: "reason" }, { name: "receipt_included", label: "receipt included (Y/N)" },
@@ -87,12 +101,15 @@ export default function ReviewView({ run, onChanged }: { run: ClaimsRunDetail; o
   const [hideNotes, setHideNotes] = useState(false);
   const [rowsOpen, setRowsOpen] = useState<Record<string, boolean>>({});
 
+  const units = reviewUnits(run);
+  const unitOf = (x: { case_id?: string; employee_id: string }) => unitIdOf(run, x);
   const open = run.flags.filter((f) => f.status === "open");
   const notes = run.flags.filter((f) => f.status === "info");
   const decided = run.flags.filter((f) => !["open", "info"].includes(f.status));
-  const empById = new Map(run.employees.map((e) => [e.id, e]));
+  const empById = new Map(units.map((u) => [u.id, u]));
   const rowById = new Map(run.rows.map((r) => [r.id, r]));
   const evById = new Map(run.evidence.map((e) => [e.id, e]));
+  const blockers = run.output_blockers ?? [];
 
   // The strip: per kind, how many open flags and how many RM at stake.
   const strip = useMemo(() => {
@@ -107,17 +124,17 @@ export default function ReviewView({ run, onChanged }: { run: ClaimsRunDetail; o
   }, [run.flags, run.rows, run.evidence]);
 
   const passes = (f: ClaimFlag) =>
-    (!kindFilter || kindOf(run, f) === kindFilter) && (!empFilter || f.employee_id === empFilter);
+    (!kindFilter || kindOf(run, f) === kindFilter) && (!empFilter || unitOf(f) === empFilter);
   const byStake = (a: ClaimFlag, b: ClaimFlag) =>
     (stakeCents(b, rowById, evById) ?? -1) - (stakeCents(a, rowById, evById) ?? -1);
 
-  const runLevel = open.filter((f) => !f.employee_id && passes(f));
-  const groups = run.employees
+  const runLevel = open.filter((f) => !unitOf(f) && passes(f));
+  const groups = units
     .filter((e) => !empFilter || e.id === empFilter)
     .map((e) => ({
       emp: e,
-      flags: open.filter((f) => f.employee_id === e.id && passes(f)).sort(byStake),
-      notes: hideNotes || (kindFilter && kindFilter !== "note") ? [] : notes.filter((f) => f.employee_id === e.id && passes(f)),
+      flags: open.filter((f) => unitOf(f) === e.id && passes(f)).sort(byStake),
+      notes: hideNotes || (kindFilter && kindFilter !== "note") ? [] : notes.filter((f) => unitOf(f) === e.id && passes(f)),
     }))
     .filter((g) => g.flags.length || g.notes.length || (empFilter === g.emp.id));
   const filtering = !!kindFilter || !!empFilter;
@@ -125,17 +142,23 @@ export default function ReviewView({ run, onChanged }: { run: ClaimsRunDetail; o
 
   return (
     <div>
-      {open.length === 0 ? (
+      {open.length === 0 && blockers.length === 0 ? (
         <div className="card" style={{ borderColor: "var(--accent)" }}>
           <b>All flags resolved — Output unlocked</b>
           <span className="sub">Every decision is in the audit trail. Open the Output tab to copy the listing rows.</span>
+        </div>
+      ) : open.length === 0 ? (
+        <div className="card banner bad">
+          <b>No open flags, but the output is still locked</b>
+          <ul className="muted">{blockers.map((b) => <li key={b}>{b}</li>)}</ul>
+          <span className="sub">Set the claimant on the case named (the server decides, not this screen).</span>
         </div>
       ) : (
         <p className="summary-line">
           <b>{open.length} flag{open.length === 1 ? "" : "s"} need your decision</b>{" "}
           <span className="sub">
-            Accept = it is a real problem, the row is left out of the batch. Dismiss = keep the row, with a note.
-            Fix a value = the AI misread something; the employee is re-checked instantly.
+            Accept = it is a real problem, the line is left out of the batch. Dismiss = keep the line, with a note.
+            Fix a value = the AI misread something; the case is re-checked instantly.
           </span>
         </p>
       )}
@@ -182,7 +205,7 @@ export default function ReviewView({ run, onChanged }: { run: ClaimsRunDetail; o
       {filtering && shownCount === 0 && (
         <p className="sub" style={{ margin: "12px 0" }}>
           No open flags {kindFilter ? `of this kind (${KIND_LABEL[kindFilter]})` : ""}{empFilter && kindFilter ? " for " : ""}
-          {empFilter ? `${empById.get(empFilter)?.name || "this employee"}` : ""}. Clear the filters to see everything.
+          {empFilter ? `${empById.get(empFilter)?.name || empById.get(empFilter)?.label || "this case"}` : ""}. Clear the filters to see everything.
         </p>
       )}
 
@@ -195,14 +218,17 @@ export default function ReviewView({ run, onChanged }: { run: ClaimsRunDetail; o
         </>
       )}
       {groups.map(({ emp, flags, notes: empNotes }) => {
-        const empRows = run.rows.filter((r) => r.employee_id === emp.id);
+        const empRows = run.rows.filter((r) => unitOf(r) === emp.id);
         const isOpen = !!rowsOpen[emp.id];
+        const derived = empRows.some((r) => r.kind === "derived");
         return (
           <div key={emp.id}>
             <p className="grouphead">
-              <b>{emp.name || emp.folder}</b>{" "}
+              <b>{emp.name || emp.label}</b>{" "}
+              <ClaimantChip unit={emp} />
+              {derived && <span className="chip review" title="the lines were built from receipts, not read from a claim summary">lines derived from evidence</span>}{" "}
               <span className="sub" style={{ display: "inline" }}>
-                {emp.er_code} · {flags.length} to decide{empNotes.length ? ` · ${empNotes.length} note(s)` : ""} ·{" "}
+                {emp.identifier} · {flags.length} to decide{empNotes.length ? ` · ${empNotes.length} note(s)` : ""} ·{" "}
                 <button
                   className="btn"
                   style={{ padding: "1px 8px", fontSize: 12 }}
@@ -229,7 +255,7 @@ export default function ReviewView({ run, onChanged }: { run: ClaimsRunDetail; o
           {decided.map((f) => (
             <div key={f.id} className="card row">
               <div className="grow">
-                <b>{describeFlag(run, f.code).title}</b> <span className="sub">{empById.get(f.employee_id)?.name} — {f.reason.slice(0, 160)}</span>
+                <b>{describeFlag(run, f.code).title}</b> <span className="sub">{empById.get(unitOf(f))?.name ?? empById.get(unitOf(f))?.label} — {f.reason.slice(0, 160)}</span>
                 {f.resolution && <span className="sub">→ {f.resolution}</span>}
               </div>
               <span className={`chip ${f.status === "accepted" ? "flag" : "ok"}`}>{f.status.replaceAll("_", " ")}</span>
@@ -241,24 +267,38 @@ export default function ReviewView({ run, onChanged }: { run: ClaimsRunDetail; o
   );
 }
 
-// The employee summary: name, ER code, category + why, rows verified /
-// flagged, total, status — with Re-verify and a category chooser.
+// The claimant's state, as a chip: confirmed by a person, proposed by the
+// investigation, or unknown (nobody to pay yet). Empty for an older run
+// that has no case model.
+function ClaimantChip({ unit }: { unit: ReviewUnit }) {
+  if (!unit.claimant_state) return null;
+  const cls = unit.claimant_state === "confirmed" ? "ok" : unit.claimant_state === "proposed" ? "review" : "flag";
+  const title = `${unit.claimant_basis || unit.claimant_state}${unit.confidence ? ` · grouping confidence ${Math.round(unit.confidence * 100)}%` : ""}`;
+  return <span className={`chip ${cls}`} title={title}>claimant {unit.claimant_state}</span>;
+}
+
+// The case summary: claimant, identifier, category + why, lines verified /
+// flagged, totals (Reported and Calculated Lines, kept apart), status —
+// with Re-verify and a category chooser.
 function EmployeeTable({ run, onChanged, selected, onSelect }: {
   run: ClaimsRunDetail; onChanged: () => void; selected: string | null; onSelect: (id: string) => void;
 }) {
   const [busy, setBusy] = useState("");
   const [editingCat, setEditingCat] = useState<string>("");
   const [error, setError] = useState("");
-  const openFor = (id: string) => run.flags.filter((f) => f.employee_id === id && f.status === "open").length;
+  const units = reviewUnits(run);
+  const openFor = (id: string) => run.flags.filter((f) => unitIdOf(run, f) === id && f.status === "open").length;
+  const derivedFor = (id: string) => run.rows.some((r) => unitIdOf(run, r) === id && r.kind === "derived");
 
-  async function reverify(id: string) {
-    setBusy(id);
+  async function reverify(u: ReviewUnit) {
+    setBusy(u.id);
     setError("");
     try {
-      await retryClaimEmployee(run.id, id);
+      if (u.case_id) await retryCase(run.id, u.case_id, run.revision);
+      else await retryClaimEmployee(run.id, u.employee_id, run.revision);
       onChanged();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not re-verify");
+      setError(explain(e, "Could not re-verify", onChanged));
     } finally {
       setBusy("");
     }
@@ -269,27 +309,30 @@ function EmployeeTable({ run, onChanged, selected, onSelect }: {
       <table className="table">
         <thead>
           <tr>
-            <th>Employee</th><th>ER code</th><th>Category (why)</th><th>Rows</th><th>Total (MYR)</th><th>Status</th><th></th>
+            <th>{usesCases(run) ? "Case / claimant" : "Employee"}</th><th>Identifier</th><th>Category (why)</th><th>Lines</th><th>Totals (MYR)</th><th>Status</th><th></th>
           </tr>
         </thead>
         <tbody>
-          {run.employees.map((e) => (
+          {units.map((e) => (
             <tr key={e.id} className={selected === e.id ? "attention" : ""}>
               <td>
                 <button
                   className="btn"
                   style={{ padding: "2px 8px", fontWeight: 600 }}
                   aria-pressed={selected === e.id}
-                  title={selected === e.id ? "Show every employee" : "Show only this employee's flags"}
+                  title={selected === e.id ? "Show every case" : "Show only this case's flags"}
                   onClick={() => onSelect(e.id)}
                 >
-                  {e.name || e.folder}
+                  {e.name || e.label}
                 </button>
+                <ClaimantChip unit={e} />
+                {e.name && e.label && e.name !== e.label && <span className="sub">{e.label}</span>}
+                {derivedFor(e.id) && <span className="chip review" title="lines built from receipts">derived</span>}
               </td>
-              <td className="mono">{e.er_code || "—"}</td>
+              <td className="mono">{e.identifier || "—"}</td>
               <td>
                 {editingCat === e.id ? (
-                  <CategoryPicker run={run} emp={e} onDone={() => { setEditingCat(""); onChanged(); }} onCancel={() => setEditingCat("")} />
+                  <CategoryPicker run={run} emp={e} onDone={() => { setEditingCat(""); onChanged(); }} onCancel={() => setEditingCat("")} onChanged={onChanged} />
                 ) : (
                   <>
                     {e.category ? <b>{e.category}{e.gl ? ` (${e.gl})` : ""}</b> : <span className="sub">not set</span>}
@@ -307,11 +350,10 @@ function EmployeeTable({ run, onChanged, selected, onSelect }: {
                 {openFor(e.id) ? <span className="sub">{openFor(e.id)} flagged</span> : null}
               </td>
               <td>
-                {e.report_total
-                  ? e.report_total
-                  : e.summary?.rows_total
-                    ? <>{String(e.summary.rows_total)}<span className="sub">from the rows (no report total)</span></>
-                    : "—"}
+                {e.reported_total
+                  ? <>{e.reported_total}<span className="sub">Reported Total (the source's figure)</span></>
+                  : <span className="sub">no Reported Total in the source</span>}
+                {e.lines_total && <span className="sub">lines add up to {e.lines_total}{e.reported_total && e.lines_total !== e.reported_total ? " ≠ reported" : ""}</span>}
               </td>
               <td>
                 <span className={`chip ${e.status === "verified" ? (openFor(e.id) ? "review" : "ok") : e.status === "failed" ? "flag" : "wait"}`}>{e.status}</span>
@@ -319,7 +361,7 @@ function EmployeeTable({ run, onChanged, selected, onSelect }: {
               </td>
               <td>
                 {e.status !== "verifying" && e.status !== "skipped" && (
-                  <button className="btn" disabled={busy === e.id} onClick={() => reverify(e.id)}>
+                  <button className="btn" disabled={busy === e.id} onClick={() => reverify(e)}>
                     {busy === e.id ? "Starting…" : e.status === "failed" ? "Retry" : "Re-verify"}
                   </button>
                 )}
@@ -333,10 +375,10 @@ function EmployeeTable({ run, onChanged, selected, onSelect }: {
   );
 }
 
-function CategoryPicker({ run, emp, onDone, onCancel }: { run: ClaimsRunDetail; emp: ClaimEmployee; onDone: () => void; onCancel: () => void }) {
+function CategoryPicker({ run, emp, onDone, onCancel, onChanged }: { run: ClaimsRunDetail; emp: ReviewUnit; onDone: () => void; onCancel: () => void; onChanged: () => void }) {
   // The client's list: from the profile snapshot if it has one, else the
-  // categories seen on this run's employees, else free text.
-  const seen = Array.from(new Map(run.employees.filter((e) => e.category).map((e) => [e.category, e.gl])).entries());
+  // categories seen on this run's cases, else free text.
+  const seen = Array.from(new Map(reviewUnits(run).filter((e) => e.category).map((e) => [e.category, e.gl])).entries());
   const [category, setCategory] = useState(emp.category);
   const [gl, setGl] = useState(emp.gl);
   const [reason, setReason] = useState("");
@@ -346,10 +388,10 @@ function CategoryPicker({ run, emp, onDone, onCancel }: { run: ClaimsRunDetail; 
     setBusy(true);
     setError("");
     try {
-      await setEmployeeCategory(run.id, emp.id, category, gl, reason);
+      await setEmployeeCategory(run.id, emp.employee_id, category, gl, reason, run.revision);
       onDone();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not set the category");
+      setError(explain(e, "Could not set the category", onChanged));
       setBusy(false);
     }
   }
@@ -382,26 +424,48 @@ function ClaimFlagCard({ run, flag, row, evidence, onChanged, defaultOpen = fals
   const [error, setError] = useState("");
   const info = flag.status === "info";
   const cite = flag.cite || {};
-  const hasPage = !!cite.file;
-  const emp = run.employees.find((e) => e.id === flag.employee_id);
+  const hasPage = !!cite.file && (cite.page ?? 0) > 0;   // a workbook or text file has no page to show
+  const emp = reviewUnits(run).find((e) => e.id === unitIdOf(run, flag));
+  const [claimName, setClaimName] = useState(emp?.name ?? "");
+  const [claimId, setClaimId] = useState(emp?.identifier ?? "");
+  // Some flags are settled by an ACTION, not a note (H9): a file's
+  // disposition, a case's claimant; the card offers that action instead.
+  const artifactFlag = flag.code === "ARTIFACT_UNRESOLVED";
+  const claimantFlag = flag.code === "CLAIMANT_UNKNOWN";
+  const conflictFlag = flag.code === "OWNERSHIP_CONFLICT";
+  const amountFlag = flag.code === "CLAIM_AMOUNT_UNCONFIRMED";
 
-  async function decide(decision: "accepted" | "dismissed") {
+  async function decide(decision: "accepted" | "dismissed", disposition?: Disposition) {
     setBusy(true);
     setError("");
     try {
-      await decideClaimFlag(run.id, flag.id, decision, note);
+      await decideClaimFlag(run.id, flag.id, decision, note, run.revision, disposition);
       onChanged();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not record the decision");
+      setError(explain(e, "Could not record the decision", onChanged));
+      setBusy(false);
+    }
+  }
+
+  async function claim() {
+    setBusy(true);
+    setError("");
+    try {
+      await setClaimant(run.id, run.revision, emp!.case_id, claimName, claimId);
+      onChanged();
+    } catch (e) {
+      setError(explain(e, "Could not set the claimant", onChanged));
       setBusy(false);
     }
   }
 
   const where = hasPage
     ? `${cite.file}, page ${cite.page}${cite.position ? `, ${cite.position}` : ""}`
-    : cite.sheet
+    : cite.file
+      ? cite.file
+      : cite.sheet
       ? `tab ${cite.sheet}${cite.row ? `, row ${cite.row}` : ""}`
-      : flag.employee_id ? "" : "whole batch";
+      : unitIdOf(run, flag) ? "" : "whole batch";
   const rowLine = row
     ? `${row.sheet || "receipts"} row ${row.row}: ${String(row.values.date ?? "")} · ${String(row.values.item_name ?? row.values.item ?? "")} · ${String(row.values.currency ?? "MYR")} ${String(row.values.amount ?? row.values.km ?? "")}${row.values.km ? " km" : ""}`
     : "";
@@ -457,13 +521,37 @@ function ClaimFlagCard({ run, flag, row, evidence, onChanged, defaultOpen = fals
             notes={Object.fromEntries(Object.entries(row.corrections || {}).map(([k]) => [k, "corrected"]))}
             hint="Compare with the page above, then correct the misread value. The change is audited and this employee is re-checked at once."
             onSave={async (changed, reason) => {
-              await correctClaimRow(run.id, row.id, changed, reason);
+              await correctClaimRow(run.id, row.id, changed, reason, run.revision);
               setEditing(false);
               onChanged();
             }}
             onCancel={() => setEditing(false)}
           />
-        ) : info ? null : (
+        ) : info ? null : artifactFlag ? (
+          <div className="actions">
+            <input placeholder="Why — required (goes in the audit trail)" value={note} onChange={(e) => setNote(e.target.value)} />
+            {(["irrelevant", "duplicate", "unreadable"] as Disposition[]).map((d) => (
+              <button key={d} className="btn" disabled={busy || !note.trim()} title={note.trim() ? "" : "Type why first"}
+                onClick={() => decide("dismissed", d)}>
+                Mark {d}
+              </button>
+            ))}
+            <span className="sub" style={{ flexBasis: "100%" }}>
+              A file nobody placed is settled by saying what it is — or by moving it into a case at the map before confirming. A note alone does not release it.
+            </span>
+          </div>
+        ) : claimantFlag && emp?.case_id ? (
+          <div className="actions">
+            <input placeholder="claimant name" value={claimName} onChange={(e) => setClaimName(e.target.value)} />
+            <input placeholder="identifier (ER code / id)" value={claimId} onChange={(e) => setClaimId(e.target.value)} />
+            <button className="btn primary" disabled={busy || !claimName.trim()} onClick={claim}>Set claimant</button>
+            <span className="sub" style={{ flexBasis: "100%" }}>
+              Nobody is paid on a guessed name. Setting the claimant here is audited and releases this case.
+            </span>
+          </div>
+        ) : conflictFlag ? (
+          <p className="sub">Settled at the map only: split the case or move the odd file out, then confirm the grouping again. A note cannot settle who owns what.</p>
+        ) : (
           <div className="actions">
             <input placeholder="Note — required to dismiss; optional to accept" value={note} onChange={(e) => setNote(e.target.value)} />
             <button className="btn warn" disabled={busy} onClick={() => decide("accepted")}
@@ -476,17 +564,19 @@ function ClaimFlagCard({ run, flag, row, evidence, onChanged, defaultOpen = fals
               </button>
             )}
             <button className="btn primary" disabled={busy || !note.trim()} title={note.trim() ? "" : "Type a note first"} onClick={() => decide("dismissed")}>
-              Dismiss — keep the row
+              {amountFlag ? "Confirm these amounts" : "Dismiss — keep the row"}
             </button>
             {emp && (
-              <button className="btn" disabled={busy} onClick={async () => { setBusy(true); try { await retryClaimEmployee(run.id, emp.id); onChanged(); } catch (e) { setError(e instanceof Error ? e.message : "Could not re-verify"); } finally { setBusy(false); } }}>
-                Re-verify employee
+              <button className="btn" disabled={busy} onClick={async () => { setBusy(true); try { if (emp.case_id) await retryCase(run.id, emp.case_id, run.revision); else await retryClaimEmployee(run.id, emp.employee_id, run.revision); onChanged(); } catch (e) { setError(explain(e, "Could not re-verify", onChanged)); } finally { setBusy(false); } }}>
+                Re-verify case
               </button>
             )}
             <span className="sub" style={{ flexBasis: "100%" }}>
-              {rowLevel
-                ? `Accept leaves ${rm(stake) || "this row"} out of the batch · Dismiss keeps it (a note is required) · Fix a value corrects a misread and re-checks this employee at once`
-                : "Acknowledge records this as seen and the run proceeds · Dismiss sets it aside with a note"}
+              {amountFlag
+                ? "Confirm records, with your note, that the receipt totals listed are what should be paid · Acknowledge leaves the case as it is · fix a line's value first if one is wrong"
+                : rowLevel
+                  ? `Accept leaves ${rm(stake) || "this row"} out of the batch · Dismiss keeps it (a note is required) · Fix a value corrects a misread and re-checks this case at once`
+                  : "Acknowledge records this as seen and the run proceeds · Dismiss sets it aside with a note"}
             </span>
           </div>
         )
@@ -510,18 +600,24 @@ const VERDICT_CHIP: Record<string, { cls: string; label: string }> = {
   unchecked: { cls: "wait", label: "unchecked" },
 };
 
-function AllRows({ run, emp, onChanged }: { run: ClaimsRunDetail; emp: ClaimEmployee; onChanged: () => void }) {
+function AllRows({ run, emp, onChanged }: { run: ClaimsRunDetail; emp: ReviewUnit; onChanged: () => void }) {
   const [showPage, setShowPage] = useState<string>("");   // row id whose page is open
   const [editing, setEditing] = useState<string>("");     // row id being fixed
   const evById = new Map(run.evidence.map((e) => [e.id, e]));
-  const rows = run.rows.filter((r) => r.employee_id === emp.id);
+  const rows = run.rows.filter((r) => unitIdOf(run, r) === emp.id);
   const expense = rows.filter((r) => r.kind !== "mileage").sort((a, b) => a.row - b.row);
   const km = rows.filter((r) => r.kind === "mileage").sort((a, b) => a.row - b.row);
   const flagsByRow = new Map<string, ClaimFlag[]>();
-  for (const f of run.flags.filter((f) => f.employee_id === emp.id && f.row_id)) {
+  for (const f of run.flags.filter((f) => unitIdOf(run, f) === emp.id && f.row_id)) {
     flagsByRow.set(f.row_id, [...(flagsByRow.get(f.row_id) || []), f]);
   }
-  const unused = run.evidence.filter((e) => e.employee_id === emp.id && !e.matched_row_id);
+  const unused = run.evidence.filter((e) => unitIdOf(run, e) === emp.id && !e.matched_row_id);
+  const originChip = (r: ClaimRow) =>
+    r.origin === "evidence_derived" || r.kind === "derived"
+      ? <span className="chip review" title="built from a receipt; a proposal until confirmed">derived</span>
+      : r.origin === "reviewer_entered"
+        ? <span className="chip wait" title="a value the reviewer corrected">corrected</span>
+        : null;
 
   function verdictChip(r: ClaimRow) {
     const fl = flagsByRow.get(r.id) || [];
@@ -605,7 +701,7 @@ function AllRows({ run, emp, onChanged }: { run: ClaimsRunDetail; emp: ClaimEmpl
             notes={Object.fromEntries(Object.entries(r.corrections || {}).map(([k]) => [k, "corrected"]))}
             hint="Correct the misread value. The change is audited and this employee is re-checked at once."
             onSave={async (changed, reason) => {
-              await correctClaimRow(run.id, r.id, changed, reason);
+              await correctClaimRow(run.id, r.id, changed, reason, run.revision);
               setEditing("");
               onChanged();
             }}
@@ -625,14 +721,14 @@ function AllRows({ run, emp, onChanged }: { run: ClaimsRunDetail; emp: ClaimEmpl
   return (
     <div className="card" style={{ padding: 0, overflowX: "auto" }}>
       {expense.length > 0 && (
-        <table className="table inner" aria-label={`${emp.name || emp.folder}: every report row`}>
+        <table className="table inner" aria-label={`${emp.name || emp.label}: every report row`}>
           <thead>
             <tr><th>Row</th><th>Date</th><th>Item</th><th>Amount</th><th>Verdict</th><th>Receipt</th><th>Flags</th><th></th></tr>
           </thead>
           <tbody>
             {expense.flatMap((r) => [
               <tr key={r.id} className={excluded(r) ? "bad" : ""} style={excluded(r) ? { opacity: 0.6 } : undefined}>
-                <td className="mono">{r.sheet ? r.row : `receipt ${r.row}`}</td>
+                <td className="mono">{r.sheet ? r.row : `receipt ${r.row}`} {originChip(r)}</td>
                 <td>{String(r.values.date ?? "")}</td>
                 <td>{String(r.values.item_name ?? r.values.item ?? r.values.reason ?? "")}{corrected(r)}</td>
                 <td>{String(r.values.currency ?? "MYR")} {String(r.values.amount ?? "")}{r.values.total && r.values.currency && r.values.currency !== "MYR" ? <span className="sub">= MYR {String(r.values.total)}</span> : null}</td>
@@ -648,7 +744,7 @@ function AllRows({ run, emp, onChanged }: { run: ClaimsRunDetail; emp: ClaimEmpl
         </table>
       )}
       {km.length > 0 && (
-        <table className="table inner" aria-label={`${emp.name || emp.folder}: mileage rows`}>
+        <table className="table inner" aria-label={`${emp.name || emp.label}: mileage rows`}>
           <thead>
             <tr><th>KM row</th><th>Date</th><th>Trip</th><th>km × rate</th><th>Amount</th><th>Verdict</th><th>Map</th><th>Flags</th><th></th></tr>
           </thead>
@@ -671,7 +767,7 @@ function AllRows({ run, emp, onChanged }: { run: ClaimsRunDetail; emp: ClaimEmpl
           </tbody>
         </table>
       )}
-      {rows.length === 0 && <p className="sub" style={{ padding: 10 }}>No rows were read for this employee.</p>}
+      {rows.length === 0 && <p className="sub" style={{ padding: 10 }}>No lines were read for this case.</p>}
       {unused.length > 0 && (
         <p className="sub" style={{ padding: "8px 10px" }}>
           <b style={{ display: "inline" }}>Evidence no row uses:</b>{" "}
