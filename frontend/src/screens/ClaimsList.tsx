@@ -23,7 +23,9 @@ export function claimsStatusLabel(r: ClaimsRunSummary): string {
     case "verifying":
       return `Verifying ${r.employees_done}/${r.employee_count}`;
     case "ready":
-      return r.open_flags ? `${r.open_flags} flags to review` : "Ready";
+      return r.open_flags
+        ? `${r.open_flags} to review${r.notes ? ` · ${r.notes} note${r.notes === 1 ? "" : "s"}` : ""}`
+        : `Ready${r.notes ? ` · ${r.notes} note${r.notes === 1 ? "" : "s"}` : ""}`;
     case "failed":
       return "Failed";
     default:

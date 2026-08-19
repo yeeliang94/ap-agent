@@ -29,7 +29,7 @@ from .. import telemetry
 from ..docsource import SourceUnavailable, get_source
 from ..model_layer import USAGE_LIMITS, create_agent
 from .evidence import ai_call
-from .models import ClaimEmployee, ClaimFlag, ClaimRow, ClaimsRun
+from .models import ClaimEvidence, ClaimEmployee, ClaimFlag, ClaimRow, ClaimsRun
 
 log = logging.getLogger("claims.listing")
 
@@ -270,6 +270,27 @@ def build_outputs(db, run: ClaimsRun) -> dict:
         rows_by_emp.setdefault(r.employee_id, []).append(r)
     excluded_rows = {f.row_id for f in db.query(ClaimFlag).filter(
         ClaimFlag.run_id == run.id, ClaimFlag.status == "accepted") if f.row_id}
+    # Evidence no row used — what will NOT be paid, on the same screen as
+    # what will, with the reviewer's decision on it if any.
+    emp_name = {e.id: (e.name or e.folder) for e in employees}
+    decisions = {}
+    for f in db.query(ClaimFlag).filter(ClaimFlag.run_id == run.id, ClaimFlag.evidence_id != "",
+                                        ClaimFlag.code.in_(("UNCLAIMED_RECEIPT", "MILEAGE_NO_MAP"))):
+        if f.status not in ("open", "info"):
+            decisions[f.evidence_id] = f.status.replace("_", " ") + (f" — {f.resolution}" if f.resolution else "")
+    unused_evidence = []
+    for ev in db.query(ClaimEvidence).filter(ClaimEvidence.run_id == run.id, ClaimEvidence.matched_row_id == ""):
+        v = ev.values or {}
+        if ev.kind == "receipt":
+            what = f"receipt from {v.get('vendor') or '?'} ({v.get('date') or 'no date'})"
+            amount = f"{v.get('currency') or 'MYR'} {v.get('amount') or '?'}"
+        else:
+            what = f"map trip ({v.get('date') or 'no date'}, {v.get('km_printed') or '?'} km)"
+            amount = ""
+        unused_evidence.append({"name": emp_name.get(ev.employee_id, "?"), "what": what,
+                                "where": f"{ev.file} page {ev.page}" + (f", {ev.position}" if ev.position else ""),
+                                "amount": amount, "decision": decisions.get(ev.id, "")})
+    unused_evidence.sort(key=lambda u: (u["name"], u["where"]))
 
     out_rows: list[list[str]] = []
     included, not_included, exclusions = [], [], []
@@ -338,6 +359,7 @@ def build_outputs(db, run: ClaimsRun) -> dict:
                        "difference": f"{(emitted_total - source_total):.2f}",
                        "differences": differences},
             "included": included, "not_included": not_included, "exclusions": exclusions,
+            "unused_evidence": unused_evidence,
             "header_fallback": fallback, "header_note": note, "received_date": run.received_date}
 
 

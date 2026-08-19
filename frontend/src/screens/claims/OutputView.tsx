@@ -78,6 +78,17 @@ export default function OutputView({ run, onGoReview }: { run: ClaimsRunDetail; 
           </>
         )}
       </div>
+      {(out.unused_evidence ?? []).length > 0 && (
+        <div className="card">
+          <b>Evidence not used</b>
+          <span className="sub">Receipts and map trips that support no row — nothing here is paid. Listed so nothing uploaded vanishes silently.</span>
+          <ul className="muted">
+            {(out.unused_evidence ?? []).map((u, i) => (
+              <li key={i}>{u.name} · {u.what} · {u.where}{u.amount ? ` · ${u.amount}` : ""}{u.decision ? ` · ${u.decision}` : ""}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {out.not_included.length > 0 && (
         <div className="card">
           <b>Not included</b>

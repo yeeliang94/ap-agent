@@ -15,6 +15,7 @@ export default function VerifyingView({
   const total = run.employees.length;
   const done = run.employees.filter((e) => ["verified", "failed", "skipped"].includes(e.status)).length;
   const flagsFor = (id: string) => run.flags.filter((f) => f.employee_id === id && f.status === "open").length;
+  const notesFor = (id: string) => run.flags.filter((f) => f.employee_id === id && f.status === "info").length;
 
   async function retry(id: string) {
     setBusy(id);
@@ -51,9 +52,16 @@ export default function VerifyingView({
             {e.status === "pending" && <span className="chip wait">queued</span>}
             {e.status === "verifying" && <span className="chip wait">verifying…</span>}
             {e.status === "verified" && (
-              <span className={`chip ${flagsFor(e.id) ? "review" : "ok"}`}>
-                done · {flagsFor(e.id)} flag{flagsFor(e.id) === 1 ? "" : "s"}
-              </span>
+              <>
+                <span className={`chip ${flagsFor(e.id) ? "review" : "ok"}`}>
+                  done · {flagsFor(e.id)} flag{flagsFor(e.id) === 1 ? "" : "s"}
+                </span>
+                <span className="sub">
+                  {String(e.summary?.rows ?? 0)} row{Number(e.summary?.rows ?? 0) === 1 ? "" : "s"}
+                  {Number(e.summary?.km_rows ?? 0) ? ` · ${String(e.summary?.km_rows)} km row(s)` : ""}
+                  {notesFor(e.id) ? ` · ${notesFor(e.id)} note${notesFor(e.id) === 1 ? "" : "s"}` : ""}
+                </span>
+              </>
             )}
             {e.status === "skipped" && <span className="chip wait">skipped</span>}
             {e.status === "failed" && (

@@ -231,6 +231,8 @@ export interface ClaimsRunSummary {
   employee_count: number;
   employees_done: number;
   open_flags: number;
+  /** Info-level flags (never block) — "4 notes" on the list. */
+  notes: number;
   errors: number;
   warnings: number;
   created_at: string;
@@ -373,6 +375,8 @@ export interface ClaimsOutputs {
   included: { name: string; er_code: string; amount: string; category: string; gl: string }[];
   not_included: { name: string; why: string }[];
   exclusions: { name: string; row: number; amount: string; why: string }[];
+  /** Receipts and map trips no row used — what will NOT be paid, on the same screen as what will. */
+  unused_evidence?: { name: string; what: string; where: string; amount: string; decision: string }[];
   header_fallback: boolean;
   header_note: string;
   received_date: string;

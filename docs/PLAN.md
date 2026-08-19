@@ -6,7 +6,7 @@ H0–H12 are tracked by their checklists.
 **PRD Reference:** [docs/PRD.md](PRD.md) (Flows 1–4, withdrawn 2b/5,
 check catalogue in Flow 3, steering, decisions table)
 
-**Last Updated:** 2026-08-19 (agentic/full-dump scope added; no company recipe)
+**Last Updated:** 2026-08-19 (agentic/full-dump scope added; no company recipe; **Phase 4b R1–R10 done**)
 **Previous plan (invoice pipeline MVP, complete):** [docs/PLAN-MVP.md](PLAN-MVP.md)
 **Agentic/full-dump hardening:** [docs/CLAIMS-AGENT-HARDENING.md](CLAIMS-AGENT-HARDENING.md)
 
@@ -125,9 +125,9 @@ a programmer either.
 - [x] 🟩 Local `.env` OpenAI key still valid (`AP_LIVE_TESTS=1 pytest backend/tests/test_model_layer.py` — 1 passed, 2026-08-18)
 
 *For Phase 4b (added 2026-08-19):*
-- [ ] 🟥 The 2026-08-19 peer-review fixes are committed as their own commit before R1 starts (they are in the working tree, 219 tests green)
-- [ ] 🟥 Owner confirms three defaults: unclaimed-receipt threshold **RM 100**; `SHARED_RECEIPT` is **open** (not a note); the *All rows* table is wanted as the main review surface
-- [ ] 🟥 PRD Flow 3 updated with the new codes as each lands (`REPORT_TOTAL_MISMATCH`, `DUPLICATE_SCAN`, `SHARED_RECEIPT`, the unclaimed threshold)
+- [x] 🟩 The 2026-08-19 peer-review fixes committed as their own commit before R1 (`adcfb7e`, 219 tests green)
+- [x] 🟩 Defaults taken as recommended on the owner's "implement all phases" (2026-08-19): unclaimed-receipt threshold **RM 100**; `SHARED_RECEIPT` is **open**; the *All rows* table is the main review surface — each is a one-line change if the owner wants otherwise
+- [x] 🟩 PRD Flow 3 updated with the new codes and the catalogue (2026-08-19)
 
 ## Tasks
 
@@ -226,56 +226,56 @@ and evidence for the checks) next to the existing scripted-AI pattern in
 must still pass after every step (none of the new flags should fire on the
 clean sample).
 
-- [ ] 🟥 **R1: The flag catalogue as data** — one table the UI, Settings and tests all read.
-  - [ ] 🟥 `profile.py`: `CATALOGUE = {code: {title, meaning, what_to_do, kind, blocks}}` for every code raised anywhere (`checks.py`, `worker.py`, run-level ones); `CHECK_CODES` derived from it; `kind ∈ money | evidence | mileage | structure | note`
-  - [ ] 🟥 `GET /api/claims-settings/catalogue`; run detail includes `catalogue` so the Review screen needs no second call; `api.ts` type
-  - [ ] 🟥 Test: every `code=` literal in `checks.py`/`worker.py`/`routes.py` has a catalogue entry (a small AST/regex scan, so a new flag without words fails CI); the planted-errors sample raises only catalogued codes
+- [x] 🟩 **R1: The flag catalogue as data** — done 2026-08-19 — — one table the UI, Settings and tests all read.
+  - [x] 🟩 `profile.py`: `CATALOGUE = {code: {title, meaning, what_to_do, kind, blocks}}` for every code raised anywhere (`checks.py`, `worker.py`, run-level ones); `CHECK_CODES` derived from it; `kind ∈ money | evidence | mileage | structure | note`
+  - [x] 🟩 `GET /api/claims-settings/catalogue`; run detail includes `catalogue` so the Review screen needs no second call; `api.ts` type
+  - [x] 🟩 Test: every `code=` literal in `checks.py`/`worker.py`/`routes.py` has a catalogue entry (a small AST/regex scan, so a new flag without words fails CI); the planted-errors sample raises only catalogued codes
   - **Verify:** `curl /api/claims-settings/catalogue` lists 15+ codes each with a title and a what-to-do; the coverage test fails when a fake code is added to `checks.py` and passes when it is catalogued.
 
-- [ ] 🟥 **R2: A wrong report total is a flag, not a lost report** (L1 + L2) — the reader stops conflating "I read it wrong" with "the sheet is wrong".
-  - [ ] 🟥 `audit_report`: "lines' totals ≠ total cell" is **soft** when the reading has no other structural problem (rows dated, amounts present, per-row arithmetic mostly right); the feedback text says *if the lines are right, answer the same reading again*; `read_report` accepts a reading that comes back **identical twice** even with soft problems (so the AI is not pushed into moving the span to make the sum work); header gains `total_check: {lines, cell}`
-  - [ ] 🟥 Worker: when `lines ≠ cell` → `REPORT_TOTAL_MISMATCH` (open, employee-level, cites the total cell: "the report's lines add up to 258.60 but the total cell says 258.70"); rows are still extracted and checked; `emp.report_total` = the cell value, so the Output reconciliation names the same RM 0.10 by employee
-  - [ ] 🟥 Uncomputed formulas: when the total cell (or an amount column) is `None` under `data_only=True` and the cell holds a formula in a plain load → `REPORT_UNREADABLE` with the specific reason "the workbook's formulas have no saved values — open it in Excel, save it, and re-upload" (not the generic 3-rounds message)
+- [x] 🟩 **R2: A wrong report total is a flag, not a lost report** — done 2026-08-19 (plus: a dated row with an amount just outside the span is a *missed line*, structural — that is what tells a short span from a typo) — (L1 + L2) — the reader stops conflating "I read it wrong" with "the sheet is wrong".
+  - [x] 🟩 `audit_report`: "lines' totals ≠ total cell" is **soft** when the reading has no other structural problem (rows dated, amounts present, per-row arithmetic mostly right); the feedback text says *if the lines are right, answer the same reading again*; `read_report` accepts a reading that comes back **identical twice** even with soft problems (so the AI is not pushed into moving the span to make the sum work); header gains `total_check: {lines, cell}`
+  - [x] 🟩 Worker: when `lines ≠ cell` → `REPORT_TOTAL_MISMATCH` (open, employee-level, cites the total cell: "the report's lines add up to 258.60 but the total cell says 258.70"); rows are still extracted and checked; `emp.report_total` = the cell value, so the Output reconciliation names the same RM 0.10 by employee
+  - [x] 🟩 Uncomputed formulas: when the total cell (or an amount column) is `None` under `data_only=True` and the cell holds a formula in a plain load → `REPORT_UNREADABLE` with the specific reason "the workbook's formulas have no saved values — open it in Excel, save it, and re-upload" (not the generic 3-rounds message)
   - **Verify:** in-memory sheet whose total is off by 0.10 → rows extracted on round ≤ 2, `REPORT_TOTAL_MISMATCH` open, `report_total` = the cell, reconciliation lists the employee; a sheet with formula cells never opened in Excel → the specific message; the sample e2e still passes with no new flag.
 
-- [ ] 🟥 **R3: Rows the reader may skip** (L3) — subtotal / section rows inside the line span.
-  - [ ] 🟥 `ReportReading.skip_rows: list[int]` (+ `why`), same on `KMReading`; `extract_rows` / `extract_trips` leave them out; audit: a skipped row that carries a date **and** an amount and no total/subtotal-like label → structural problem ("row 12 looks like a claim line, not a subtotal")
-  - [ ] 🟥 `_REPORT_INSTRUCTIONS` / `_KM_INSTRUCTIONS` mention skip_rows in one sentence
+- [x] 🟩 **R3: Rows the reader may skip** — done 2026-08-19 — (L3) — subtotal / section rows inside the line span.
+  - [x] 🟩 `ReportReading.skip_rows: list[int]` (+ `why`), same on `KMReading`; `extract_rows` / `extract_trips` leave them out; audit: a skipped row that carries a date **and** an amount and no total/subtotal-like label → structural problem ("row 12 looks like a claim line, not a subtotal")
+  - [x] 🟩 `_REPORT_INSTRUCTIONS` / `_KM_INSTRUCTIONS` mention skip_rows in one sentence
   - **Verify:** in-memory sheet with a "Meals subtotal" row between lines verifies on round ≤ 2 with the subtotal skipped and the sum equal to the grand total; skipping a real line is rejected by the audit; existing report tests unchanged.
 
-- [ ] 🟥 **R4: The same receipt on two pages** (S1) — inside one employee.
-  - [ ] 🟥 `run_checks`: after matching, group receipts by (vendor normalised, date, amount, currency); a group with ≥ 2 members matched to **different** rows → `DUPLICATE_SCAN` (open) on each of those rows, citing both pages ("the same receipt appears on page 2 and page 5 — one receipt or two? if one, one of these rows is a double claim")
-  - [ ] 🟥 Tie-break: candidates that are value-identical are not sent to the AI (it cannot tell them apart); take the first, let `DUPLICATE_SCAN` speak — one request saved per such row
+- [x] 🟩 **R4: The same receipt on two pages** — done 2026-08-19 — (S1) — inside one employee.
+  - [x] 🟩 `run_checks`: after matching, group receipts by (vendor normalised, date, amount, currency); a group with ≥ 2 members matched to **different** rows → `DUPLICATE_SCAN` (open) on each of those rows, citing both pages ("the same receipt appears on page 2 and page 5 — one receipt or two? if one, one of these rows is a double claim")
+  - [x] 🟩 Tie-break: candidates that are value-identical are not sent to the AI (it cannot tell them apart); take the first, let `DUPLICATE_SCAN` speak — one request saved per such row
   - **Verify:** dict test: two rows RM 45 + the Grab receipt on pages 2 and 5 → both rows flagged with both pages cited; one row + duplicate page → one match, one `UNCLAIMED_RECEIPT` note, no `DUPLICATE_SCAN`; two genuinely different same-value receipts (different vendors) → untouched; check can be switched off per client.
 
-- [ ] 🟥 **R5: One receipt, two employees** (S2) — the only pass that sees the whole batch.
-  - [ ] 🟥 `_finish_run`: over every **matched** receipt in the run, group by (vendor normalised, date, amount, currency) across employees; ≥ 2 employees → `SHARED_RECEIPT` (open) on each employee's row, citing the other employee, file and page; idempotent by (code, row_id, evidence_id) like the correction re-check; a re-verified employee's flags are re-derived at the next close
+- [x] 🟩 **R5: One receipt, two employees** — done 2026-08-19 — (S2) — the only pass that sees the whole batch.
+  - [x] 🟩 `_finish_run`: over every **matched** receipt in the run, group by (vendor normalised, date, amount, currency) across employees; ≥ 2 employees → `SHARED_RECEIPT` (open) on each employee's row, citing the other employee, file and page; idempotent by (code, row_id, evidence_id) like the correction re-check; a re-verified employee's flags are re-derived at the next close
   - **Verify:** DB test with two employees each matched to the same dinner receipt → two flags naming each other; a retry of one employee does not duplicate them; the sample (no shared receipts) raises none.
 
-- [ ] 🟥 **R6: Unclaimed receipts that matter** (S5) — a large receipt no row claims is how a missed line looks.
-  - [ ] 🟥 Profile field `unclaimed_receipt_threshold` (MYR, default 100, snapshot per run as the others); `UNCLAIMED_RECEIPT` is **open** at/above it with the catalogue's stronger wording ("supports no row — was a line missed? Acknowledge, or fix a row so it matches"), a note below
-  - [ ] 🟥 Settings → Claims (Step 15) will show the field; until then it is settable through the existing profile PUT
+- [x] 🟩 **R6: Unclaimed receipts that matter** — done 2026-08-19 — (S5) — a large receipt no row claims is how a missed line looks.
+  - [x] 🟩 Profile field `unclaimed_receipt_threshold` (MYR, default 100, snapshot per run as the others); `UNCLAIMED_RECEIPT` is **open** at/above it with the catalogue's stronger wording ("supports no row — was a line missed? Acknowledge, or fix a row so it matches"), a note below
+  - [x] 🟩 Settings → Claims (Step 15) will show the field; until then it is settable through the existing profile PUT
   - **Verify:** dict test: RM 240 unclaimed → open; RM 12 → info; threshold 300 in the profile flips the first to info; the sample's unclaimed amounts (all small) stay notes so the verifier is unchanged.
 
-- [ ] 🟥 **R7 (UI): Flag cards that explain themselves** — the same card, with words.
-  - [ ] 🟥 `FlagCard` takes `title`, `meaning`, `whatToDo` from the catalogue (`run.catalogue[code]`); header shows the amount at stake for row-level flags ("RM 45.00 at stake"); *Accept* names it ("Accept — leave RM 45.00 out"); one line under the actions says what each button does; the decided-flags list uses titles, not codes
-  - [ ] 🟥 The evidence preview opens by itself for the first open flag of each employee (the rest stay on *Show page*), so the reviewer's first look is at the page, not a code
+- [x] 🟩 **R7 (UI): Flag cards that explain themselves** — done 2026-08-19 (one commit with R8/R9: same component) — — the same card, with words.
+  - [x] 🟩 `FlagCard` takes `title`, `meaning`, `whatToDo` from the catalogue (`run.catalogue[code]`); header shows the amount at stake for row-level flags ("RM 45.00 at stake"); *Accept* names it ("Accept — leave RM 45.00 out"); one line under the actions says what each button does; the decided-flags list uses titles, not codes
+  - [x] 🟩 The evidence preview opens by itself for the first open flag of each employee (the rest stay on *Show page*), so the reviewer's first look is at the page, not a code
   - **Verify:** browser, sample run: every card shows title / meaning / what-to-do / amount; no `SNAKE_CASE` visible anywhere on Review; screenshot kept.
 
-- [ ] 🟥 **R8 (UI): The summary strip + filters** — the batch at a glance.
-  - [ ] 🟥 Above the employee table: one chip per **kind** with count and RM at stake ("5 need a receipt · RM 340"), plus *notes*; click a chip → only those cards; click an employee's name in the table → only theirs; *hide notes* toggle; cards sorted by amount at stake within an employee; state in the component; empty state written
+- [x] 🟩 **R8 (UI): The summary strip + filters** — done 2026-08-19 — — the batch at a glance.
+  - [x] 🟩 Above the employee table: one chip per **kind** with count and RM at stake ("5 need a receipt · RM 340"), plus *notes*; click a chip → only those cards; click an employee's name in the table → only theirs; *hide notes* toggle; cards sorted by amount at stake within an employee; state in the component; empty state written
   - **Verify:** browser, the 12-flag sample run: chip counts equal the cards shown; filtering by kind then by employee narrows correctly; clearing returns everything; keyboard reachable.
 
-- [ ] 🟥 **R9 (UI): Every row, not just the flagged ones** — the review surface.
-  - [ ] 🟥 Per employee an expandable **All rows** table from data already in the run detail: row · date · item · amount · **verdict chip** (matched ✓ / no receipt / uncertain / duplicate / receipt-optional / excluded / unchecked) · evidence (vendor · page · position; *show* opens the highlighted page inline) · the flags on that row (title) · *Fix a value* (same `FieldEditor` and endpoint); excluded rows greyed with the decision; corrected fields marked
-  - [ ] 🟥 Mileage rows in their own small table: date · km · rate · amount · map trip's printed km · verdict; unclaimed map trips listed under it
+- [x] 🟩 **R9 (UI): Every row, not just the flagged ones** — done 2026-08-19 — — the review surface.
+  - [x] 🟩 Per employee an expandable **All rows** table from data already in the run detail: row · date · item · amount · **verdict chip** (matched ✓ / no receipt / uncertain / duplicate / receipt-optional / excluded / unchecked) · evidence (vendor · page · position; *show* opens the highlighted page inline) · the flags on that row (title) · *Fix a value* (same `FieldEditor` and endpoint); excluded rows greyed with the decision; corrected fields marked
+  - [x] 🟩 Mileage rows in their own small table: date · km · rate · amount · map trip's printed km · verdict; unclaimed map trips listed under it
   - **Verify:** browser, Aegene Ong on the sample: 8 rows with the right verdicts, the corrected row marked, the excluded row greyed, *show* on a matched row highlights the right third; a *Fix a value* from this table re-checks and the verdict chip changes without a reload; screenshot kept.
 
-- [ ] 🟥 **R10: Verifying / Output / list touches + docs + verifier** — the rest of the surface, and proof.
-  - [ ] 🟥 Verifying chips: "done · 8 rows · 2 flags · 1 note" (from `emp.summary`) and the failure reason inline (exists) — no new data
-  - [ ] 🟥 Output tab: an **Evidence not used** section (unclaimed receipts and map trips, with amounts, decided or not) beside *Excluded rows* and the reconciliation differences, so what will *not* be paid is on the same screen as what will
-  - [ ] 🟥 Claims list status chip: "12 to review · 4 notes"
-  - [ ] 🟥 PRD Flow 3 + this plan's implementation notes: the new codes and the threshold; `verify_claims_run.py` asserts none of the new flags fire on the clean sample and that every raised code is catalogued
+- [x] 🟩 **R10: Verifying / Output / list touches + docs + verifier** — done 2026-08-19 (live verifier run pending an owner-triggered run: it needs the real model) — — the rest of the surface, and proof.
+  - [x] 🟩 Verifying chips: "done · 8 rows · 2 flags · 1 note" (from `emp.summary`) and the failure reason inline (exists) — no new data
+  - [x] 🟩 Output tab: an **Evidence not used** section (unclaimed receipts and map trips, with amounts, decided or not) beside *Excluded rows* and the reconciliation differences, so what will *not* be paid is on the same screen as what will
+  - [x] 🟩 Claims list status chip: "12 to review · 4 notes"
+  - [x] 🟩 PRD Flow 3 + this plan's implementation notes: the new codes and the threshold; `verify_claims_run.py` asserts none of the new flags fire on the clean sample and that every raised code is catalogued
   - **Verify:** browser screenshots of Verifying, Output, list; `ALL CHECKS PASSED` twice; PRD lists every code in `CATALOGUE` (a doc test greps them).
 
 ### Phase 5: Steering v1 — the few things a client needs to say

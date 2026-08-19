@@ -126,6 +126,15 @@ def main() -> int:
     flags = run["flags"]
     for f in flags:
         check(bool(f["cite"]) or f["code"] in ("NO_REPORT", "CATEGORY_UNCLEAR"), f"flag {f['code']} cites a place")
+    # Phase 4b: every raised code has words in the catalogue, and none of
+    # the new robustness flags fires on the clean sample.
+    catalogue = run.get("catalogue") or {}
+    for code in sorted({f["code"] for f in flags}):
+        check(code in catalogue and bool(catalogue[code].get("title")), f"flag {code} is catalogued with a title")
+    for code in ("DUPLICATE_SCAN", "SHARED_RECEIPT", "REPORT_TOTAL_MISMATCH"):
+        check(not any(f["code"] == code for f in flags), f"{code} does not fire on the clean sample")
+    check(not any(f["code"] == "UNCLAIMED_RECEIPT" and f["status"] == "open" for f in flags),
+          "no unclaimed receipt on the sample reaches the RM 100 threshold")
     total_false = 0
     for e in run["employees"]:
         t = by_name[e["name"]]

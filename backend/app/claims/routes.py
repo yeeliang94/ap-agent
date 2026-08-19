@@ -576,7 +576,7 @@ def _flag_dict(f: ClaimFlag) -> dict:
 def _tallies(db, run_ids: list[str]) -> dict[str, dict]:
     if not run_ids:
         return {}
-    tally = {rid: {"employees": 0, "open_flags": 0, "errors": 0, "warnings": 0,
+    tally = {rid: {"employees": 0, "open_flags": 0, "notes": 0, "errors": 0, "warnings": 0,
                    "employees_done": 0} for rid in run_ids}
     for rid, n in (db.query(ClaimEmployee.run_id, func.count(ClaimEmployee.id))
                    .filter(ClaimEmployee.run_id.in_(run_ids)).group_by(ClaimEmployee.run_id)):
@@ -586,10 +586,10 @@ def _tallies(db, run_ids: list[str]) -> dict[str, dict]:
                            ClaimEmployee.status.in_(("verified", "failed", "skipped")))
                    .group_by(ClaimEmployee.run_id)):
         tally[rid]["employees_done"] = n
-    for rid, n in (db.query(ClaimFlag.run_id, func.count(ClaimFlag.id))
-                   .filter(ClaimFlag.run_id.in_(run_ids), ClaimFlag.status == "open")
-                   .group_by(ClaimFlag.run_id)):
-        tally[rid]["open_flags"] = n
+    for rid, status, n in (db.query(ClaimFlag.run_id, ClaimFlag.status, func.count(ClaimFlag.id))
+                           .filter(ClaimFlag.run_id.in_(run_ids), ClaimFlag.status.in_(("open", "info")))
+                           .group_by(ClaimFlag.run_id, ClaimFlag.status)):
+        tally[rid]["open_flags" if status == "open" else "notes"] = n
     for rid, level, n in (db.query(RunEvent.run_id, RunEvent.level, func.count(RunEvent.id))
                           .filter(RunEvent.run_id.in_(run_ids),
                                   RunEvent.level.in_(("warning", "error")))
@@ -604,7 +604,7 @@ def _summary(run: ClaimsRun, counts: dict) -> dict:
             "progress": run.progress, "folder": run.folder_url or "zip upload",
             "employee_count": counts.get("employees") or n_map,
             "employees_done": counts.get("employees_done", 0),
-            "open_flags": counts.get("open_flags", 0),
+            "open_flags": counts.get("open_flags", 0), "notes": counts.get("notes", 0),
             "errors": counts.get("errors", 0), "warnings": counts.get("warnings", 0),
             "created_at": run.created_at.isoformat()}
 

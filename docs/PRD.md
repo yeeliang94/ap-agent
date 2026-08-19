@@ -301,7 +301,15 @@ comparison and every sum.
   the map; row dates fall inside the `ER(...)` period. An audit failure goes
   back to the AI with the mismatch, up to 3 rounds — the same loop the
   listing reader uses. Still failing after 3 rounds → flag
-  `REPORT_UNREADABLE`; the worker continues with receipts only.
+  `REPORT_UNREADABLE`; the worker continues with receipts only. Two
+  refinements *(Phase 4b)*: when the lines are otherwise sound but do not
+  add up to the total cell, the lines are **kept** and a person sees
+  `REPORT_TOTAL_MISMATCH` (a typo in the total, or a missed line — a dated
+  row with an amount just outside the span is caught as structural); a
+  reading the AI answers identically twice is accepted early. Subtotal or
+  heading rows inside the span may be named in `skip_rows` (never a dated
+  row with an amount). A workbook whose formulas have no saved values is
+  named as such ("open it in Excel, save, re-upload").
 - Mileage tab (if the map names one): same method. Rows are trips: date,
   description / from–to, km, rate, amount. Code checks each row: km × rate
   = amount (→ `MILEAGE_ARITHMETIC` when off), and the rate equals one of
@@ -360,8 +368,19 @@ comparison and every sum.
   that expense item as receipt-optional (e.g. Mobile Allowance) → an
   informational note instead *(decided: allowed for named items only)*.
 - A receipt may support only one row. A second use → `DUPLICATE_RECEIPT` on
-  both rows. Receipts matched to no row → `UNCLAIMED_RECEIPT` (warning, not
-  a blocker).
+  both rows. Receipts matched to no row → `UNCLAIMED_RECEIPT` — a note
+  below the client's threshold (profile `unclaimed_receipt_threshold`,
+  default RM 100), an open flag at or above it (a large receipt no row
+  claims is how a missed line looks). The same receipt by value (vendor,
+  date, amount, currency) on two pages, each supporting a different row →
+  `DUPLICATE_SCAN` on both (one receipt scanned twice, or two real ones — a
+  person tells). The same receipt matched under two employees → at run
+  close, `SHARED_RECEIPT` on both. Value-identical candidates skip the AI
+  tie-break.
+- **Every flag code has words** (title, one-line meaning, what to do, kind:
+  money / evidence / mileage / structure / note) in one backend catalogue
+  the Review screen, the Settings toggles and the tests read; a flag never
+  reaches a person as a bare code.
 - Foreign-currency rows *(decided: accept the typed rate, check the
   arithmetic)*: receipt currency must equal the row's; the row's rate must
   be present and not 1; amount × rate must equal the MYR total → else
