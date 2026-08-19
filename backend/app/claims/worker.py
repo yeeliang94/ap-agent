@@ -23,6 +23,7 @@ from openpyxl import load_workbook
 from .. import config, telemetry
 from ..db import SessionLocal
 from ..model_layer import USAGE_LIMITS, create_agent
+from . import cases as cases_mod
 from . import category as category_mod
 from . import checks as checks_mod
 from . import evidence as evidence_mod
@@ -124,7 +125,8 @@ def _shared_receipt_flags(s, run_id: str, profile: dict) -> int:
             as_dict = lambda x: {"file": x.file, "page": x.page, "position": x.position, "values": x.values or {}}  # noqa: E731
             v = e.values or {}
             s.add(ClaimFlag(
-                run_id=run_id, employee_id=e.employee_id, row_id=e.matched_row_id, evidence_id=e.id,
+                run_id=run_id, employee_id=e.employee_id, case_id=e.case_id or cases_mod.case_id_for_employee(s, e.employee_id),
+                row_id=e.matched_row_id, evidence_id=e.id,
                 code="SHARED_RECEIPT",
                 reason=(f"The receipt from {v.get('vendor', '?')} ({v.get('date') or 'no date'}, "
                         f"{v.get('currency', 'MYR')} {v.get('amount')}) at {checks_mod._where(as_dict(e))}"
@@ -267,6 +269,7 @@ async def verify_employee(run_id: str, employee_id: str) -> None:
         if emp is None or emp.status == "skipped":
             return
         emp.status, emp.error = "verifying", ""
+        cases_mod.sync_case_from_employee(s, emp)
         s.commit()
         # A retry starts clean: the previous attempt's rows, evidence and
         # open flags go; decided flags are kept for the record.
@@ -292,6 +295,7 @@ async def verify_employee(run_id: str, employee_id: str) -> None:
         emp.status = "verified"
         emp.summary = {**(emp.summary or {}), "seconds": round(time.monotonic() - started, 1),
                        "requests": usage.requests, "tokens": usage.tokens}
+        cases_mod.sync_case_from_employee(s, emp)
         s.commit()
         n_flags = s.query(ClaimFlag).filter(ClaimFlag.employee_id == employee_id,
                                             ClaimFlag.status == "open").count()
@@ -314,6 +318,7 @@ def _fail_employee(s, run_id: str, emp: ClaimEmployee, reason: str, started: flo
     emp.status, emp.error = "failed", reason
     emp.summary = {**(emp.summary or {}), "seconds": round(time.monotonic() - started, 1),
                    "requests": usage.requests, "tokens": usage.tokens}
+    cases_mod.sync_case_from_employee(s, emp)
     s.commit()
 
 
@@ -330,6 +335,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
     files = _files_dir(run.id)
     roles = emp.roles or {}
     notes: list[tuple[str, str]] = []
+    case_id = cases_mod.sync_case_from_employee(s, emp).id
     context = run_context_for(run)
     if context:
         notes.append(("INFO", f"the run's instructions/playbook ({len(context)} chars) were shown to the "
@@ -490,20 +496,20 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
                                          (pages_read, files_read), TieBreak(usage))
     for r, rd in zip(rows, row_dicts):
         verdict, eid = result["verdicts"].get(r["id"], ("unchecked", ""))
-        s.add(ClaimRow(id=r["id"], run_id=run.id, employee_id=emp.id, kind=r["kind"], sheet=r["sheet"],
+        s.add(ClaimRow(id=r["id"], run_id=run.id, employee_id=emp.id, case_id=case_id, kind=r["kind"], sheet=r["sheet"],
                        row=r["row"], values=rd["values"],
                        verdict="matched" if r["kind"] == "derived" else verdict,
                        matched_evidence_id=r.get("matched_evidence_id") or eid))
     for ed in ev_dicts:
-        s.add(ClaimEvidence(id=ed["id"], run_id=run.id, employee_id=emp.id, kind=ed["kind"], file=ed["file"],
+        s.add(ClaimEvidence(id=ed["id"], run_id=run.id, employee_id=emp.id, case_id=case_id, kind=ed["kind"], file=ed["file"],
                             page=ed["page"], position=ed["position"], values=ed["values"],
                             confidence=ed["confidence"],
                             matched_row_id=result["matches"].get(ed["id"], "")
                             or next((r["id"] for r in rows if r.get("matched_evidence_id") == ed["id"]), "")))
     for f in flags:
-        s.add(ClaimFlag(run_id=run.id, employee_id=emp.id, **f))
+        s.add(ClaimFlag(run_id=run.id, employee_id=emp.id, case_id=case_id, **f))
     for f in result["flags"]:
-        s.add(ClaimFlag(run_id=run.id, employee_id=emp.id, **f))
+        s.add(ClaimFlag(run_id=run.id, employee_id=emp.id, case_id=case_id, **f))
     for level, text in notes + [("INFO", n) for n in result["notes"]]:
         telemetry.record(s, run.id, "verify", telemetry.WARNING if level == "WARNING" else telemetry.INFO,
                          "EMPLOYEE_NOTE", f"{emp.name or emp.folder}: {text}")
@@ -525,7 +531,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
             emp.category_basis = (f"{judgment.category}: quoted \"{judgment.quoted_text}\" — {judgment.why}"
                                   + (f" (rule: {profile.get('category_rule')})" if profile.get("category_rule") else ""))
         else:
-            s.add(ClaimFlag(run_id=run.id, employee_id=emp.id, code="CATEGORY_UNCLEAR",
+            s.add(ClaimFlag(run_id=run.id, employee_id=emp.id, case_id=case_id, code="CATEGORY_UNCLEAR",
                             reason=("The listing category for this employee could not be settled"
                                     + (f": {judgment.why}" if judgment else " (the judge failed)")
                                     + (f" (best guess: {judgment.category})" if judgment and judgment.category else "")
@@ -536,7 +542,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
             if judgment and judgment.category:
                 emp.category_basis = f"unsure — best guess {judgment.category}: {judgment.why}"
     elif not categories:
-        s.add(ClaimFlag(run_id=run.id, employee_id=emp.id, code="CATEGORY_UNCLEAR",
+        s.add(ClaimFlag(run_id=run.id, employee_id=emp.id, case_id=case_id, code="CATEGORY_UNCLEAR",
                         reason="No category list is known for this client (no Expense Types tab in the "
                                "report and none in the profile). Choose the category on the employee's "
                                "summary, or add the client's list in Settings → Claims.",
@@ -560,6 +566,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
                    "flagged": len({f["row_id"] for f in result["flags"] if f["status"] == "open" and f["row_id"]}),
                    "open_flags": open_flags, "purpose": (header or {}).get("purpose", ""),
                    "categories_from": "report" if categories and not profile.get("categories") else ("profile" if categories else "")}
+    cases_mod.sync_case_from_employee(s, emp)
     s.commit()
 
 

@@ -18,9 +18,12 @@ from sqlalchemy import func
 from .. import settings_store, telemetry
 from ..db import SessionLocal
 from ..models import AuditEvent, RunEvent
+from .. import config
+from . import cases as cases_mod
 from . import profile as profile_mod
 from . import runner
-from .models import ClaimEmployee, ClaimEvidence, ClaimFlag, ClaimRow, ClaimsRun
+from .models import (ClaimCase, ClaimEmployee, ClaimEvidence, ClaimEvidenceAssignment, ClaimFlag,
+                     ClaimInvestigation, ClaimRow, ClaimSourceArtifact, ClaimToolExecution, ClaimsRun)
 
 router = APIRouter(prefix="/claims-runs")
 log = logging.getLogger("claims.routes")
@@ -160,6 +163,11 @@ def get_claims_run(run_id: str) -> dict:
             "flags": [_flag_dict(f) for f in flags],
             # The words for every code on screen (title, meaning, what to do).
             "catalogue": _catalogue_payload()["codes"],
+            "revision": run.revision or 0,
+            # The case model (H2): cases, artifacts, assignments and the
+            # investigation record. Hidden while CLAIMS_CASE_MODEL is off
+            # (the employee fields above stay authoritative for the UI).
+            **(_case_model_payload(db, run_id) if config.CLAIMS_CASE_MODEL else {}),
             # The human gate, enforced server-side: no output leaves while
             # any flag is undecided. Built fresh from the reviewed state
             # (code only, Decimal) and kept on the run for the record.
@@ -167,6 +175,31 @@ def get_claims_run(run_id: str) -> dict:
         }
     finally:
         db.close()
+
+
+def _case_model_payload(db, run_id: str) -> dict:
+    cases = db.query(ClaimCase).filter(ClaimCase.run_id == run_id).order_by(ClaimCase.label).all()
+    artifacts = db.query(ClaimSourceArtifact).filter(ClaimSourceArtifact.run_id == run_id) \
+        .order_by(ClaimSourceArtifact.path).all()
+    assignments = db.query(ClaimEvidenceAssignment).filter(ClaimEvidenceAssignment.run_id == run_id).all()
+    inv = db.query(ClaimInvestigation).filter(ClaimInvestigation.run_id == run_id) \
+        .order_by(ClaimInvestigation.created_at.desc(), ClaimInvestigation.id.desc()).first()
+    tool_counts: dict[str, dict] = {}
+    for tool, err, n in (db.query(ClaimToolExecution.tool, ClaimToolExecution.error_code, func.count(ClaimToolExecution.id))
+                         .filter(ClaimToolExecution.run_id == run_id)
+                         .group_by(ClaimToolExecution.tool, ClaimToolExecution.error_code)):
+        t = tool_counts.setdefault(tool, {"calls": 0, "failed": 0})
+        t["calls"] += n
+        if err:
+            t["failed"] += n
+    return {"cases": [cases_mod.case_dict(c) for c in cases],
+            "artifacts": [cases_mod.artifact_dict(a) for a in artifacts],
+            "assignments": [cases_mod.assignment_dict(a) for a in assignments],
+            "investigation": cases_mod.investigation_dict(inv),
+            "tool_summary": tool_counts,
+            "artifact_counts": {"total": len(artifacts),
+                                "unresolved": sum(1 for a in artifacts if a.disposition == "unresolved"),
+                                "needs_review": sum(1 for a in artifacts if a.needs_confirmation)}}
 
 
 def _outputs_if_unlocked(db, run: ClaimsRun, open_flags: list) -> dict:
@@ -281,6 +314,20 @@ async def confirm_map(run_id: str, body: dict) -> dict:
                                  status="skipped" if e.get("skip") else "pending",
                                  error="skipped by the reviewer at the map" if e.get("skip") else ""))
             n += 1
+        # The case model (H2), written beside the employees: the confirmed
+        # map as a normalized result — cases and claimants CONFIRMED by the
+        # reviewer, artifacts dispositioned, assignments confirmed — then
+        # each case tied to its employee record.
+        from . import manifest as manifest_mod
+        from .investigator import contracts as C
+        from .investigator import legacy
+
+        request = C.InvestigationRequest(run_id=run_id, workspace=str(runner.workspace_for(run_id)),
+                                         manifest=manifest_mod.from_dicts(run.manifest or []),
+                                         instructions=run.instructions or "", profile_snapshot=run.snapshot or {})
+        cases_mod.store_result(db, run, legacy.from_map(request, clean, confirmed=True), confirmed=True)
+        cases_mod.link_employees(db, run)
+        cases_mod.bump_revision(run)
         db.add(AuditEvent(run_id=run_id, actor="reviewer", action="map_confirmed",
                           detail=(f"{n} employee(s); " + ("; ".join(changes) if changes
                                   else "no changes to the proposed map"))[:2000]))
@@ -364,6 +411,8 @@ async def retry_employee(run_id: str, employee_id: str) -> dict:
         if emp.status == "pending" and run.status == "verifying":
             raise HTTPException(400, "This employee is already queued; the run will get to them.")
         emp.status, emp.error = "pending", ""
+        cases_mod.sync_case_from_employee(db, emp)
+        cases_mod.bump_revision(run)
         db.add(AuditEvent(run_id=run_id, actor="reviewer", action="employee_reverify",
                           detail=f"{emp.name or emp.folder}: re-verify requested"))
         db.commit()
@@ -397,6 +446,7 @@ async def decide_claim_flag(run_id: str, flag_id: str, body: dict) -> dict:
         flag.status, flag.resolution = decision, note
         run = db.get(ClaimsRun, run_id)
         run.outputs = {}  # withdrawn; rebuilt from the reviewed state on next read
+        cases_mod.bump_revision(run)
         db.add(AuditEvent(run_id=run_id, actor="reviewer", action=f"flag_{decision}",
                           detail=f"[{flag.code}] {flag.reason[:200]} — note: {note or 'none'}"))
         db.commit()
@@ -505,7 +555,8 @@ async def correct_claim_row(run_id: str, row_id: str, body: dict) -> dict:
             if key in open_now:
                 open_now[key].reason, open_now[key].basis, open_now[key].cite = fd["reason"], fd["basis"], fd["cite"]
             elif key not in decided:
-                db.add(ClaimFlag(run_id=run_id, employee_id=emp.id, **fd))
+                db.add(ClaimFlag(run_id=run_id, employee_id=emp.id, case_id=cases_mod.case_id_for_employee(db, emp.id), **fd))
+        cases_mod.bump_revision(run)
         db.add(AuditEvent(run_id=run_id, actor="system", action="employee_rechecked",
                           detail=f"{emp.name or emp.folder} after correcting "
                                  f"{', '.join(sorted(changed)) or 'nothing (retry)'}: "
@@ -540,6 +591,8 @@ def set_employee_category(run_id: str, employee_id: str, body: dict) -> dict:
         db.add(AuditEvent(run_id=run_id, actor="reviewer", action="category_set",
                           detail=f"{emp.name or emp.folder}: {old!r} -> {(category, gl)!r} — {reason}"))
         run.outputs = {}
+        cases_mod.sync_case_from_employee(db, emp)
+        cases_mod.bump_revision(run)
         db.commit()
         return {"ok": True}
     finally:
@@ -556,20 +609,20 @@ def _employee_dict(e: ClaimEmployee) -> dict:
 
 
 def _row_dict(r: ClaimRow) -> dict:
-    return {"id": r.id, "employee_id": r.employee_id, "kind": r.kind, "sheet": r.sheet,
+    return {"id": r.id, "employee_id": r.employee_id, "case_id": r.case_id, "kind": r.kind, "sheet": r.sheet,
             "row": r.row, "values": r.values, "corrections": r.corrections,
             "matched_evidence_id": r.matched_evidence_id, "verdict": r.verdict}
 
 
 def _evidence_dict(e: ClaimEvidence) -> dict:
-    return {"id": e.id, "employee_id": e.employee_id, "kind": e.kind, "file": e.file,
+    return {"id": e.id, "employee_id": e.employee_id, "case_id": e.case_id, "kind": e.kind, "file": e.file,
             "page": e.page, "position": e.position, "values": e.values,
             "confidence": e.confidence, "matched_row_id": e.matched_row_id}
 
 
 def _flag_dict(f: ClaimFlag) -> dict:
-    return {"id": f.id, "employee_id": f.employee_id, "row_id": f.row_id,
-            "evidence_id": f.evidence_id, "code": f.code, "reason": f.reason,
+    return {"id": f.id, "employee_id": f.employee_id, "case_id": f.case_id, "row_id": f.row_id,
+            "evidence_id": f.evidence_id, "artifact_id": f.artifact_id, "code": f.code, "reason": f.reason,
             "basis": f.basis, "cite": f.cite, "status": f.status, "resolution": f.resolution}
 
 

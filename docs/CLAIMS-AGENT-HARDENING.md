@@ -660,11 +660,19 @@ and rollback switch.
 
 ### H2 — Additive storage migration
 
-- [ ] Add schema versioning and idempotent claims migrations.
-- [ ] Add Claim Cases, Source Artifacts, Evidence Assignments, investigations,
-  and tool executions.
-- [ ] Backfill existing runs and dual-write compatibility ids.
-- [ ] Add old-run rendering and rollback tests.
+- [x] Add schema versioning and idempotent claims migrations
+  (`claims/migrations.py`, `claims_schema` table; run from `init_db`, 2026-08-19).
+- [x] Add Claim Cases, Source Artifacts, Evidence Assignments, investigations,
+  and tool executions (`claim_cases`, `claim_source_artifacts`,
+  `claim_evidence_assignments`, `claim_investigations`, `claim_tool_executions`;
+  `case_id` on rows/evidence/flags; `manifest` and `revision` on runs).
+- [x] Backfill existing runs and dual-write compatibility ids (`claims/cases.py`:
+  every ClaimEmployee has a mirrored ClaimCase; rows/evidence/flags carry both
+  ids; confirm-map stores the confirmed result and links cases to employees).
+- [x] Add old-run rendering and rollback tests (`tests/test_claims_migration.py`:
+  a pre-migration database migrates once and reopens unchanged; run detail
+  carries `cases`/`artifacts`/`assignments`/`investigation`/`tool_summary`;
+  `CLAIMS_CASE_MODEL=0` hides them with storage unchanged).
 - **Exit:** a pre-migration database opens, migrates once, opens again unchanged,
   and old/new run detail is equivalent.
 

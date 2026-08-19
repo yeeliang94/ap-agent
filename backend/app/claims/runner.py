@@ -38,14 +38,11 @@ OBJECTIVE = ("Check the expense records and all supporting evidence, group what 
 
 
 def store_investigation(db, run: ClaimsRun, result) -> None:
-    """Persist the normalized result on the run (H1: on the survey record;
-    H2 moves it to its own tables). Kept small: the plan and the artifact
-    dispositions, not the map twice."""
-    run.survey = {**(run.survey or {}),
-                  "investigation": {"plan": result.plan.model_dump(),
-                                    "artifacts": [a.model_dump() for a in result.artifacts],
-                                    "cases": [c.model_dump() for c in result.cases],
-                                    "assignments": [a.model_dump() for a in result.assignments]}}
+    """Persist the normalized result: artifacts, proposed cases and
+    assignments, the plan and the tool record (H2 tables)."""
+    from . import cases as cases_mod
+
+    cases_mod.store_result(db, run, result, confirmed=False)
     db.commit()
 
 
@@ -139,7 +136,7 @@ async def process_run(run_id: str) -> None:
                 "could not map folder — the survey listing is shown so you can add "
                 "instructions and start again") from exc
         claim_map, warnings, notes = result.map, list(result.warnings), list(result.notes)
-        run.survey = {**survey, "manifest": manifest_mod.to_dicts(manifest)}
+        run.manifest = manifest_mod.to_dicts(manifest)
         store_investigation(db, run, result)
         for level, text in notes:
             telemetry.record(db, run_id, "map",

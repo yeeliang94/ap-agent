@@ -46,6 +46,11 @@ def init_db() -> None:
 
     config.ensure_dirs()
     Base.metadata.create_all(engine)
+    # The claims module's additive, idempotent migrations (versioned; the
+    # ALTER-TABLE pattern below cannot backfill related tables).
+    from .claims.migrations import run_migrations
+
+    run_migrations(engine)
 
     # Tiny migration: databases created before the runs.snapshot column
     # need it added (create_all only creates missing TABLES, not columns).
