@@ -92,6 +92,25 @@ async def verify_run(db, run: ClaimsRun) -> None:
     _finish_run(run.id, started)
 
 
+def _report_total_flags(header: dict, tab: str) -> list[dict]:
+    """REPORT_TOTAL_MISMATCH when the report's lines were read and checked
+    but do not add up to its total cell — the lines are kept and paid; a
+    person confirms which figure is right."""
+    check = (header or {}).get("total_check")
+    if not check:
+        return []
+    cell = (header or {}).get("total_cell") or ""
+    row_no = int("".join(ch for ch in cell if ch.isdigit()) or 0)
+    return [checks_mod._flag(
+        "REPORT_TOTAL_MISMATCH",
+        f"The report's {check['column']} column adds up to {check['lines']} but its total cell "
+        f"{cell} says {check['cell']} — the lines were read and checked and are what the listing "
+        "will pay; the total is usually a typo, sometimes a line the reader missed. Compare the two "
+        "on the report; acknowledge if the lines are right, or fix the file and re-verify.",
+        "universal rule: the lines and the total cell must agree; a person settles which is right",
+        {"sheet": tab, "row": row_no})]
+
+
 def _batch_categories(run: ClaimsRun) -> list[dict]:
     files = _files_dir(run.id)
     for e in (run.map or {}).get("employees", []):
@@ -269,7 +288,21 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
         if wb is not None:
             categories = report_reader.read_categories(wb) or list(profile.get("categories") or [])
             tab = roles.get("report_tab")
-            if tab in wb.sheetnames:
+            uncomputed = report_reader.uncomputed_formulas(path, tab) if tab in wb.sheetnames else 0
+            if tab in wb.sheetnames and uncomputed:
+                # A workbook written by a script and never opened in Excel:
+                # every formula reads as empty. No amount of re-reading
+                # helps; the fix is the file's, so say exactly that.
+                flags.append(checks_mod._flag("REPORT_UNREADABLE",
+                                              f"The report tab {tab!r} of {roles['report_file']} has {uncomputed} "
+                                              "formula cell(s) with no saved value — the workbook was never "
+                                              "opened and saved in Excel, so its totals read as empty. Open "
+                                              "it in Excel, save it, re-upload and re-verify. Continuing with "
+                                              "receipts only.",
+                                              "universal rule: a report that cannot be read is said so, never guessed",
+                                              {"sheet": tab, "row": 0}))
+                notes.append(("WARNING", f"Report tab {tab!r}: {uncomputed} formula cell(s) with no saved value"))
+            elif tab in wb.sheetnames:
                 try:
                     r_rows, header, r_notes = await report_reader.read_report(
                         wb[tab], emp.name, emp.er_code, usage)
@@ -277,6 +310,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
                     for r in r_rows:
                         rows.append({"kind": "expense", "sheet": tab, "row": r["row"], "values": r})
                     report_ok = True
+                    flags += _report_total_flags(header, tab)
                 except report_reader.ReportUnreadable as exc:
                     flags.append(checks_mod._flag("REPORT_UNREADABLE",
                                                   f"The report tab {tab!r} of {roles['report_file']} could not be "

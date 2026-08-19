@@ -248,7 +248,47 @@ def _norm_currency(text: str) -> str:
 
 # ---- extraction + audit ---------------------------------------------------------
 
-STRUCTURE, SOFT = "structure", "soft"
+STRUCTURE, SOFT, TOTAL = "structure", "soft", "total"
+
+
+def total_check(ws, reading: ReportReading, rows: list[dict]) -> dict | None:
+    """The lines' sum against the total cell, both as cent strings, or None
+    when the total cell holds no number: {"lines", "cell", "column"}."""
+    if not reading.total_cell:
+        return None
+    total = money(ws[reading.total_cell].value)
+    if total is None:
+        return None
+    col = "total" if reading.columns.total else "amount"
+    summed = sum((Decimal(row[col]) for row in rows if row.get(col) is not None), Decimal("0"))
+    return {"lines": str(cents(summed)), "cell": str(cents(total)), "column": col}
+
+
+def uncomputed_formulas(path, tab: str, max_rows: int = 400) -> int:
+    """How many cells of the tab hold a formula with no saved value — a
+    workbook written by a script and never opened in Excel. Reading such a
+    tab with data_only=True yields None everywhere a number should be."""
+    from openpyxl import load_workbook
+
+    try:
+        with_formulas = load_workbook(path, read_only=True)
+        with_values = load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        return 0
+    try:
+        if tab not in with_formulas.sheetnames:
+            return 0
+        n = 0
+        rows_f = with_formulas[tab].iter_rows(min_row=1, max_row=max_rows, values_only=True)
+        rows_v = with_values[tab].iter_rows(min_row=1, max_row=max_rows, values_only=True)
+        for row_f, row_v in zip(rows_f, rows_v):
+            for f, v in zip(row_f, row_v):
+                if isinstance(f, str) and f.startswith("=") and v is None:
+                    n += 1
+        return n
+    finally:
+        with_formulas.close()
+        with_values.close()
 
 
 def extract_rows(ws, reading: ReportReading) -> list[dict]:
@@ -316,17 +356,38 @@ def audit_report(ws, reading: ReportReading, rows: list[dict], employee_name: st
         problems.append((STRUCTURE, f"amount × rate ≠ total on {len(off)} of {len(rows)} lines "
                                     f"(e.g. row {off[0]['row']}) — the amount / rate / total columns "
                                     "are probably wrong"))
+    # A dated row with an amount just outside the span — between the
+    # headings and first_row, or between last_row and the total — is a
+    # line the reading missed. That is what tells a short span from a
+    # mistyped total: with it, the total mismatch below stays structural.
+    total_row = int("".join(ch for ch in (reading.total_cell or "") if ch.isdigit()) or 0)
+    outside = list(range(reading.header_row + 1, reading.first_row))
+    if total_row > reading.last_row:
+        outside += list(range(reading.last_row + 1, total_row))
+    for r in outside:
+        raw_date = _val(ws, cols.date, r)
+        if raw_date is not None and cell_date(raw_date) and money(_val(ws, cols.amount, r)) is not None:
+            problems.append((STRUCTURE, f"row {r} has a date and an amount but is outside "
+                                        f"first_row..last_row — extend the span to include it"))
+            break
     if reading.total_cell:
-        total = money(ws[reading.total_cell].value)
-        if total is None:
+        check = total_check(ws, reading, rows)
+        if check is None:
             problems.append((STRUCTURE, f"total_cell {reading.total_cell} holds no number"))
-        else:
-            col = "total" if cols.total else "amount"
-            summed = sum((Decimal(row[col]) for row in rows if row.get(col) is not None), Decimal("0"))
-            if cents(summed) != cents(total):
-                problems.append((STRUCTURE, f"the {len(rows)} lines' {col}s sum to {cents(summed)} but "
-                                            f"{reading.total_cell} holds {cents(total)} — a line is "
-                                            "missing from the span, or the total cell is wrong"))
+        elif check["lines"] != check["cell"]:
+            # A wrong span usually shows other structural signs (undated
+            # rows, no amounts). When the reading is otherwise sound, the
+            # mismatch is more likely the employee's total than the
+            # reader's span — so it is TOTAL, not STRUCTURE: fed back once
+            # (a missed line is the other cause), accepted if the reading
+            # comes back the same, and then flagged for a person.
+            sound = not any(k == STRUCTURE for k, _ in problems)
+            problems.append((TOTAL if sound else STRUCTURE,
+                             f"the {len(rows)} lines' {check['column']}s sum to {check['lines']} but "
+                             f"{reading.total_cell} holds {check['cell']} — either a line is missing "
+                             "from first_row..last_row (extend the span), or the total cell is mistyped. "
+                             "If your reading is right, answer the same reading again and the mismatch "
+                             "will be flagged for a person."))
     else:
         problems.append((STRUCTURE, "total_cell is missing — name the cell holding the report total"))
     if reading.name_cell:
@@ -359,6 +420,7 @@ async def read_report(ws, employee_name: str, er_code: str, usage=None) -> tuple
     feedback = ""
     notes: list[tuple[str, str]] = []
     problems: list[tuple[str, str]] = []
+    previous: dict | None = None
     for round_no in range(1, MAX_ROUNDS + 1):
         if usage is not None:
             usage.reserve()
@@ -372,17 +434,28 @@ async def read_report(ws, employee_name: str, er_code: str, usage=None) -> tuple
         except Exception as exc:
             rows, problems = [], [(STRUCTURE, f"applying your reading failed: {exc}")]
         structural = [t for k, t in problems if k == STRUCTURE]
-        soft = [t for k, t in problems if k == SOFT]
-        if not structural and (not soft or round_no == MAX_ROUNDS):
+        soft = [t for k, t in problems if k in (SOFT, TOTAL)]
+        # A reading with only soft problems is accepted on the last round —
+        # or as soon as the AI, shown the problem, answers the SAME reading
+        # again: it has looked and stands by it, and pushing further only
+        # tempts it to move the span to make a typo add up.
+        same_again = previous is not None and reading.model_dump() == previous
+        previous = reading.model_dump()
+        if not structural and (not soft or round_no == MAX_ROUNDS or same_again):
+            check = total_check(ws, reading, rows)
             header = {
                 "name": _text(ws, reading.name_cell), "period": _text(ws, reading.period_cell),
                 "purpose": _text(ws, reading.purpose_cell),
-                "total": str(cents(money(ws[reading.total_cell].value))) if reading.total_cell else None,
+                "total": check["cell"] if check else None,
+                "total_cell": reading.total_cell,
+                # set only when the lines do not add up to the total cell
+                "total_check": check if check and check["lines"] != check["cell"] else None,
                 "columns": reading.columns.model_dump(), "header_row": reading.header_row,
                 "observations": list(reading.observations),
             }
             notes.append(("INFO", f"Report tab {ws.title!r}: {len(rows)} line(s), total "
-                                  f"{header['total']}, confirmed on round {round_no}."))
+                                  f"{header['total']}, confirmed on round {round_no}"
+                                  + (" (same reading twice)" if same_again else "") + "."))
             for text in soft:
                 notes.append(("WARNING", f"Report tab {ws.title!r}: {text}"))
             return rows, header, notes
