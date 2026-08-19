@@ -259,6 +259,8 @@ def _finish_run(run_id: str, started: float) -> bool:
     s = SessionLocal()
     try:
         run = s.get(ClaimsRun, run_id)
+        if run is None or run.status == "failed":
+            return False  # cancelled or failed meanwhile: nothing partial becomes ready (H11)
         employees = s.query(ClaimEmployee).filter(ClaimEmployee.run_id == run_id).all()
         if any(e.status in ("pending", "verifying") for e in employees):
             return False
@@ -299,6 +301,9 @@ def _finish_run(run_id: str, started: float) -> bool:
                          + f"; {n_flags} open flag(s); AI cost {cost} request(s), {tokens} tokens.")
         telemetry.record(s, run_id, "run", telemetry.INFO, "RUN_READY",
                          "Run is ready for review.")
+        from . import retention
+
+        retention.prune_tool_output(run_id)  # the investigation's scratch; the snapshot stays
         return True
     finally:
         s.close()
@@ -314,6 +319,8 @@ async def verify_employee(run_id: str, employee_id: str) -> None:
         emp = s.get(ClaimEmployee, employee_id)
         if emp is None or emp.status == "skipped":
             return
+        if run is None or run.status == "failed":
+            return  # the run was cancelled or failed: this worker does not start (H11)
         emp.status, emp.error = "verifying", ""
         cases_mod.sync_case_from_employee(s, emp)
         s.commit()

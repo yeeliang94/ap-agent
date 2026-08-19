@@ -41,6 +41,25 @@ log = logging.getLogger("claims.investigator")
 ADAPTER = "investigator"
 MAX_ROUNDS = 3
 PROMPT_VERSION = "h5.1"
+TOOLS_VERSION = "h4.1"
+
+# The harness of every investigation in flight, by run id, so a cancel or
+# a run failure stops its outstanding tool calls (H11).
+ACTIVE_TOOLS: dict[str, InvestigationTools] = {}
+
+
+def cancel_run(run_id: str) -> bool:
+    tools = ACTIVE_TOOLS.get(run_id)
+    if tools is None:
+        return False
+    tools.cancel()
+    return True
+
+
+def versions() -> dict[str, str]:
+    """What produced a result — recorded with it for reproducibility."""
+    return {"adapter": ADAPTER, "prompt": PROMPT_VERSION, "tools": TOOLS_VERSION,
+            "judge_model": config.JUDGE_MODEL, "extract_model": config.EXTRACT_MODEL}
 
 INSTRUCTIONS = (
     "You are the claims investigator for an accounts-payable reviewer. You are given a batch of files "
@@ -112,6 +131,14 @@ async def investigate(request: InvestigationRequest, tools: InvestigationTools |
     if tools is None:
         tools = ToolHarness(request.workspace, request.manifest, request.budget,
                             sandbox=_sandbox(), python_enabled=config.CLAIMS_PYTHON_SANDBOX)
+    ACTIVE_TOOLS[request.run_id] = tools
+    try:
+        return await _investigate(request, tools, started)
+    finally:
+        ACTIVE_TOOLS.pop(request.run_id, None)
+
+
+async def _investigate(request: InvestigationRequest, tools: InvestigationTools, started: float) -> InvestigationResult:
     hint, facts = strategies.choose_hint(request.manifest)
     prompt = _prompt(request, hint, facts)
     usage = Usage(cap=request.budget.model_requests)
@@ -272,7 +299,8 @@ def normalize(proposal: InvestigationProposal, request: InvestigationRequest, to
     strategy = strategies.finalize(hint, valid_cases)
     plan = InvestigationPlan(strategy=strategy, objective=request.objective or request.instructions,
                              steps=list(proposal.plan_steps)[:20], assumptions=list(proposal.assumptions)[:20],
-                             questions=list(proposal.questions)[:20], rounds=rounds, adapter=ADAPTER)
+                             questions=list(proposal.questions)[:20], rounds=rounds, adapter=ADAPTER,
+                             versions=versions())
     warnings = list(problems)
     if proposal.injection_seen:
         warnings.append("Text that tried to instruct the AI was found in the files and ignored: "

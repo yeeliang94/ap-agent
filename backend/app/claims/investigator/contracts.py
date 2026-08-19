@@ -240,6 +240,8 @@ class InvestigationPlan(BaseModel):
     questions: list[str] = Field(default_factory=list)
     rounds: int = 0
     adapter: str = ""
+    # What produced it: adapter, prompt and tool versions, model names (H11).
+    versions: dict[str, str] = Field(default_factory=dict)
 
 
 class InvestigationRequest(BaseModel):

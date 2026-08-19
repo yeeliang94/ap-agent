@@ -841,12 +841,23 @@ and rollback switch.
 
 ### H11 — Security, audit, and operational hardening
 
-- [ ] Threat-model file ingestion, prompt injection, tool use, sandboxing,
-  telemetry, and output injection.
-- [ ] Add replay bundles: manifest, versions, plan, tool hashes, calculations,
-  reviewer decisions, and final output.
-- [ ] Add recovery for restart, cancellation, partial tool failure, and retry.
-- [ ] Document cost/time budgets and retention controls.
+- [x] Threat-model file ingestion, prompt injection, tool use, sandboxing,
+  telemetry, and output injection (`docs/THREAT-MODEL-CLAIMS.md`: every finding
+  fixed with its pinning test, or explicitly accepted; 2026-08-19).
+- [x] Add replay bundles: manifest, versions, plan, tool hashes, calculations,
+  reviewer decisions, and final output (`claims/replay.py`,
+  `GET /claims-runs/{id}/replay[?verify=1]`; the verifier re-evaluates every
+  recorded calculation, checks cited files against the manifest, rebuilds the
+  output and re-sums the TSV and each case's lines; versions recorded on the
+  plan; `calculate` records expression = value).
+- [x] Add recovery for restart, cancellation, partial tool failure, and retry
+  (`POST /claims-runs/{id}/cancel` cancels the active harness and fails the run;
+  workers do not start on a failed run and a failed run is never closed as
+  ready; restart reconciliation and per-case retry as delivered;
+  `tests/test_claims_replay.py`).
+- [x] Document cost/time budgets and retention controls
+  (`docs/OPERATIONS-CLAIMS.md`; `claims/retention.py` prunes the investigation's
+  scratch at run close and on demand; the snapshot is kept).
 - **Exit:** threat-model findings fixed or explicitly accepted; replay reproduces
   all material totals.
 

@@ -244,6 +244,55 @@ def _outputs_if_unlocked(db, run: ClaimsRun, open_flags: list) -> dict:
     return outputs
 
 
+@router.get("/{run_id}/replay")
+def get_replay_bundle(run_id: str, verify: bool = False) -> dict:
+    """The replay bundle (H11): manifest, versions, plan, tool hashes and
+    calculations, decisions, cases, lines, flags and the final output —
+    and, with ?verify=1, the verifier's report re-deriving the money."""
+    from . import replay
+
+    db = SessionLocal()
+    try:
+        run = db.get(ClaimsRun, run_id)
+        if not run:
+            raise HTTPException(404, "No such claims run.")
+        if verify:
+            return replay.verify_bundle(db, run)
+        return replay.build_bundle(db, run)
+    finally:
+        db.close()
+
+
+@router.post("/{run_id}/cancel")
+def cancel_claims_run(run_id: str, body: dict | None = None) -> dict:
+    """Stop a run that is still working (H11): outstanding tool calls are
+    cancelled, the workers stop at their next step, and the run is marked
+    failed with the reason — nothing partial becomes 'ready'. A resting
+    run (map_ready / ready) cannot be cancelled: there is nothing running."""
+    from .investigator import investigator as agentic
+    from .models import IN_PROGRESS_STATUSES
+
+    db = SessionLocal()
+    try:
+        run = db.get(ClaimsRun, run_id)
+        if not run:
+            raise HTTPException(404, "No such claims run.")
+        if run.status not in IN_PROGRESS_STATUSES:
+            raise HTTPException(400, f"Only a run that is still working can be cancelled (this one is {run.status}).")
+        _revision_check(run, body or {})
+        cancelled_tools = agentic.cancel_run(run_id)
+        run.status, run.error = "failed", "cancelled by the reviewer"
+        cases_mod.bump_revision(run)
+        db.add(AuditEvent(run_id=run_id, actor="reviewer", action="run_cancelled",
+                          detail="cancelled while " + (run.progress or {}).get("what", "working")))
+        db.commit()
+        telemetry.record(db, run_id, "run", telemetry.WARNING, "RUN_CANCELLED",
+                         "Run cancelled by the reviewer" + ("; outstanding tool calls stopped." if cancelled_tools else "."))
+        return {"ok": True, "status": "failed", "tools_cancelled": cancelled_tools}
+    finally:
+        db.close()
+
+
 @router.get("/{run_id}/events")
 def get_claims_run_events(run_id: str, level: str = "") -> list[dict]:
     db = SessionLocal()

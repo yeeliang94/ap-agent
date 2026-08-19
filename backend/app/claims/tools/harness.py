@@ -127,11 +127,16 @@ class ToolHarness:
         result.elapsed_ms = int((time.monotonic() - started) * 1000)
         result.provenance.setdefault("artifact_ids", [])
         result.provenance.setdefault("hashes", [])
+        note = (result.error or "")[:300]
+        if result.ok and tool == "calculate":
+            # the calculation itself, so the replay bundle can re-evaluate it
+            note = f"{result.data.get('expression', '')} = {result.data.get('value', '')}"[:300]
+        elif result.ok and tool == "compare_tables":
+            note = f"op {args[0] if args else ''}"[:300]
         self._executions.append(ToolExecution(
             id=f"t{len(self._executions) + 1:04d}", tool=tool, elapsed_ms=result.elapsed_ms,
             input_hashes=[_hash(args)], output_hash=_hash(result.data) if result.ok else "",
-            truncated=result.truncated, error_code=result.error_code,
-            note=(result.error or "")[:300]))
+            truncated=result.truncated, error_code=result.error_code, note=note))
         return result
 
     def _write_handle(self, data: bytes, suffix: str) -> str:
@@ -260,7 +265,7 @@ class ToolHarness:
         def run():
             data = tables_mod.compare_tables(spec)
             return ToolResult(data=data, truncated=bool(data.get("truncated")))
-        return await self._call("compare_tables", (_hash(spec),), run)
+        return await self._call("compare_tables", (str(spec.get("op", "")), _hash(spec)), run)
 
     async def run_python(self, code: str, input_artifact_ids: list[str]) -> ToolResult:
         ids = tuple(str(i) for i in (input_artifact_ids or []))

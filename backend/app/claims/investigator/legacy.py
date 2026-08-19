@@ -36,6 +36,12 @@ _ROLE_MAP = {
 }
 
 
+def _judge_model() -> str:
+    from ... import config
+
+    return config.JUDGE_MODEL
+
+
 def case_id_for(run_id: str, label: str) -> str:
     """Deterministic per run and folder, so a re-run of the map (or a
     retry) does not mint a second id for the same case."""
@@ -134,6 +140,7 @@ def from_map(request: InvestigationRequest, claim_map: dict, warnings: list[str]
     plan = InvestigationPlan(strategy="structured", objective=request.objective or request.instructions,
                              steps=["survey the folder tree", "peek inside every file",
                                     "map subfolders to employees (AI proposes, code audits)"],
-                             rounds=int(claim_map.get("rounds") or 0), adapter=ADAPTER)
+                             rounds=int(claim_map.get("rounds") or 0), adapter=ADAPTER,
+                             versions={"adapter": ADAPTER, "judge_model": _judge_model()})
     return InvestigationResult(artifacts=artifacts, cases=cases, assignments=assignments,
                                plan=plan, map=claim_map, warnings=list(warnings or []))
