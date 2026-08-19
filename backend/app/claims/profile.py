@@ -43,6 +43,9 @@ PROFILE_DEFAULTS: dict = {
     "receipt_date_window_days": 0,
     # expense items allowed to say "receipt included = N"
     "receipt_optional_items": [],
+    # MYR; a receipt no row uses is a NOTE below this and an OPEN flag at or
+    # above it (a large unclaimed receipt is how a missed line looks)
+    "unclaimed_receipt_threshold": "100",
     # a mileage line on the report is recognised by this text in its item
     "mileage_item_pattern": "mileage",
     # [{"item": "Taxi", "gl": "713070"}, ...] — the client's category list

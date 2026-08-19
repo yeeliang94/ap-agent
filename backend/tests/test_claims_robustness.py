@@ -360,3 +360,39 @@ def test_shared_receipt_check_can_be_off(Session):
     assert worker._finish_run(run.id, 0.0) is True
     assert s.query(ClaimFlag).filter(ClaimFlag.run_id == run.id, ClaimFlag.code == "SHARED_RECEIPT").count() == 0
     s.close()
+
+
+# ---- R6: unclaimed receipts that matter ------------------------------------------------
+
+def test_unclaimed_receipt_blocks_at_or_above_the_threshold():
+    rows = [_row("r1", "2026-07-01", "45.00")]
+    ev = [_receipt("e1", "2026-07-01", "45.00"),
+          _receipt("e2", "2026-07-02", "240.00", page=2, vendor="Hilton"),
+          _receipt("e3", "2026-07-02", "12.00", page=3, vendor="7-Eleven")]
+    res = _checks(rows, ev)  # default threshold RM 100
+    unc = {f["evidence_id"]: f for f in res["flags"] if f["code"] == "UNCLAIMED_RECEIPT"}
+    assert unc["e2"]["status"] == "open" and "RM 100" in unc["e2"]["reason"] and "missed line" in unc["e2"]["reason"]
+    assert unc["e3"]["status"] == "info"
+    # the client's threshold moves the line
+    res = _checks(rows, ev, {**PROFILE, "unclaimed_receipt_threshold": "300"})
+    unc = {f["evidence_id"]: f for f in res["flags"] if f["code"] == "UNCLAIMED_RECEIPT"}
+    assert unc["e2"]["status"] == "info" and unc["e3"]["status"] == "info"
+    res = _checks(rows, ev, {**PROFILE, "unclaimed_receipt_threshold": "10"})
+    unc = {f["evidence_id"]: f for f in res["flags"] if f["code"] == "UNCLAIMED_RECEIPT"}
+    assert unc["e2"]["status"] == "open" and unc["e3"]["status"] == "open"
+
+
+def test_threshold_is_saved_through_settings_and_validated(monkeypatch, tmp_path):
+    from app import settings_store
+    from app.claims import routes as claims_routes
+    engine = create_engine(f"sqlite:///{tmp_path / 's.sqlite3'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    S = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    for module in (claims_routes, profile, settings_store):
+        monkeypatch.setattr(module, "SessionLocal", S)
+    client = TestClient(app)
+    assert client.put("/api/claims-settings", json={"profile": {"unclaimed_receipt_threshold": "abc"}}).status_code == 400
+    r = client.put("/api/claims-settings", json={"profile": {"unclaimed_receipt_threshold": "250"}})
+    assert r.status_code == 200
+    assert client.get("/api/claims-settings").json()["profile"]["unclaimed_receipt_threshold"] == "250"
+    assert profile.PROFILE_DEFAULTS["unclaimed_receipt_threshold"] == "100"

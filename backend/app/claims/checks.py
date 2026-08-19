@@ -386,15 +386,25 @@ async def run_checks(rows: list[dict], evidence: list[dict], profile: dict, empl
                                    "universal rule: one receipt supports one row; two pages with the same vendor, "
                                    "date, amount and currency are shown to a person",
                                    _ev_cite(e), row_id=rid, evidence_id=e["id"]))
+    threshold = _dec(profile.get("unclaimed_receipt_threshold")) or Decimal("100")
     for e in receipts:
         if e["id"] not in matches and on("UNCLAIMED_RECEIPT"):
             ev = e["values"]
+            amount = _dec(ev.get("amount"))
+            big = amount is not None and amount >= threshold
             flags.append(_flag("UNCLAIMED_RECEIPT",
                                f"A receipt from {ev.get('vendor', '?')} ({ev.get('date') or 'no date'}, "
                                f"{ev.get('currency', 'MYR')} {ev.get('amount')}) at {_where(e)} supports no "
-                               f"row of the report{_conf_note(e)}. Nothing to pay — noted so it is not lost.",
-                               "universal rule: nothing uploaded vanishes silently",
-                               _ev_cite(e), evidence_id=e["id"], status=INFO))
+                               f"row of the report{_conf_note(e)}. "
+                               + (f"It is at or above the client's RM {threshold} threshold — a receipt this "
+                                  "size that no row claims is how a missed line looks. Was a line left off the "
+                                  "report, or is a row misread? Acknowledge, or fix the row so it matches."
+                                  if big else "Nothing to pay — noted so it is not lost."),
+                               "universal rule: nothing uploaded vanishes silently"
+                               + ("; " + profile_mod.basis_for(profile, "unclaimed_receipt_threshold",
+                                                               f"unclaimed receipts at or above RM {threshold} need a decision")
+                                  if big else ""),
+                               _ev_cite(e), evidence_id=e["id"], status=OPEN if big else INFO))
 
     # ---- mileage: report lines ↔ KM rows ------------------------------------------
     unpaired_km = list(km_rows)

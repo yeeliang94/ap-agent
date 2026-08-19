@@ -692,6 +692,14 @@ def update_claims_settings(body: dict) -> dict:
                 if not isinstance(items, list) or not all(isinstance(i, str) for i in items):
                     raise HTTPException(400, f"{key} must be a list of expense item names.")
                 merged[key] = [i.strip() for i in items if i.strip()][:200]
+        if "unclaimed_receipt_threshold" in profile_in:
+            try:
+                thr = Decimal(str(profile_in["unclaimed_receipt_threshold"]).strip() or "0")
+                if not thr.is_finite() or thr < 0 or thr > 1_000_000:
+                    raise InvalidOperation
+            except InvalidOperation:
+                raise HTTPException(400, "unclaimed receipt threshold must be an amount in MYR, e.g. 100.")
+            merged["unclaimed_receipt_threshold"] = f"{thr.normalize():f}"
         if "mileage_item_pattern" in profile_in:
             pat = str(profile_in["mileage_item_pattern"]).strip()
             if not pat or len(pat) > 60:
