@@ -31,6 +31,24 @@ from .models import IN_PROGRESS_STATUSES, ClaimsRun
 log = logging.getLogger("claims.runner")
 
 
+# The reviewer's standing objective for every investigation; the run's
+# instructions are added to it, never replace it.
+OBJECTIVE = ("Check the expense records and all supporting evidence, group what belongs "
+             "together, reconcile every line and total, and show anything that does not agree.")
+
+
+def store_investigation(db, run: ClaimsRun, result) -> None:
+    """Persist the normalized result on the run (H1: on the survey record;
+    H2 moves it to its own tables). Kept small: the plan and the artifact
+    dispositions, not the map twice."""
+    run.survey = {**(run.survey or {}),
+                  "investigation": {"plan": result.plan.model_dump(),
+                                    "artifacts": [a.model_dump() for a in result.artifacts],
+                                    "cases": [c.model_dump() for c in result.cases],
+                                    "assignments": [a.model_dump() for a in result.assignments]}}
+    db.commit()
+
+
 def workspace_for(run_id: str) -> Path:
     """runs/<id>/claims/ — the run's private copy of everything."""
     return config.RUNS_DIR / run_id / "claims"
@@ -97,20 +115,32 @@ async def process_run(run_id: str) -> None:
                 "Nothing that looks like a claims batch was found in the folder: "
                 "no subfolders and no readable files.")
 
-        # ---- map (AI proposes, code audits) ----------------------------
-        from . import mapping
+        # ---- investigate: manifest, then the adapter behind the seam --------
+        # (H1) Every file is hashed into the immutable manifest first; the
+        # investigator (legacy structured-folder mapper, or the tool-using
+        # agent when CLAIMS_AGENTIC_INVESTIGATION is on) proposes the map /
+        # cases; code audits; a person confirms.
+        from . import investigator
+        from . import manifest as manifest_mod
 
         _set(db, run, status="mapping", progress={})
         started = time.monotonic()
         try:
-            claim_map, warnings, notes = await mapping.propose_map(
-                survey, dest, snapshot=run.snapshot, instructions=run.instructions)
+            manifest = await asyncio.to_thread(manifest_mod.build_manifest, dest, files)
+            request = investigator.InvestigationRequest(
+                run_id=run_id, workspace=str(workspace_for(run_id)), manifest=manifest,
+                instructions=run.instructions or "", objective=OBJECTIVE,
+                profile_snapshot=run.snapshot or {}, survey=survey)
+            result = await investigator.investigate(request)
         except Exception as exc:
             telemetry.record_failure(db, run_id, "map", "MAP_FAILED",
                                      "Could not map the folder", exc)
             raise RuntimeError(
                 "could not map folder — the survey listing is shown so you can add "
                 "instructions and start again") from exc
+        claim_map, warnings, notes = result.map, list(result.warnings), list(result.notes)
+        run.survey = {**survey, "manifest": manifest_mod.to_dicts(manifest)}
+        store_investigation(db, run, result)
         for level, text in notes:
             telemetry.record(db, run_id, "map",
                              telemetry.WARNING if level == "WARNING" else telemetry.INFO,

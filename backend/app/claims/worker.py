@@ -317,11 +317,24 @@ def _fail_employee(s, run_id: str, emp: ClaimEmployee, reason: str, started: flo
     s.commit()
 
 
+def run_context_for(run: ClaimsRun) -> str:
+    """The run's instructions + the client's playbook, as the readers and
+    the category judge see them (H1). Steering only: the audits and the
+    checks never read this."""
+    parts = [(run.instructions or "").strip(), ((run.snapshot or {}).get("playbook") or "").strip()]
+    return report_reader.run_context("\n\n".join(p for p in parts if p))
+
+
 async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage) -> None:
     profile = profile_mod.profile_of(run.snapshot)
     files = _files_dir(run.id)
     roles = emp.roles or {}
     notes: list[tuple[str, str]] = []
+    context = run_context_for(run)
+    if context:
+        notes.append(("INFO", f"the run's instructions/playbook ({len(context)} chars) were shown to the "
+                              "report reader, the page reader and the category judge (steering only; the "
+                              "audits and checks are unchanged)"))
     rows: list[dict] = []
     header: dict = {}
     categories: list[dict] = []
@@ -373,7 +386,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
             km_tab = roles.get("mileage_tab")
             if km_tab and km_tab in wb.sheetnames and km_tab != tab:
                 try:
-                    trips_rows, k_notes = await report_reader.read_km(wb[km_tab], usage)
+                    trips_rows, k_notes = await report_reader.read_km(wb[km_tab], usage, context=context)
                     notes += k_notes
                     for t in trips_rows:
                         rows.append({"kind": "mileage", "sheet": km_tab, "row": t["row"], "values": t})
@@ -399,7 +412,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
             notes.append(("WARNING", f"{rel}: file missing from the workspace"))
             continue
         try:
-            r, t, pages, n = await evidence_mod.read_bundle(path, rel, usage, page_sem)
+            r, t, pages, n = await evidence_mod.read_bundle(path, rel, usage, page_sem, context=context)
         except Exception as exc:
             reason = telemetry.describe_failure(exc)
             notes.append(("WARNING", f"{rel}: could not be read ({reason})"))
@@ -503,7 +516,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
         try:
             judgment, gl = await category_mod.judge_category(
                 categories, header.get("purpose", "") if header else "", row_values,
-                profile.get("category_rule") or "", examples, usage)
+                profile.get("category_rule") or "", examples, usage, context=context)
         except Exception as exc:
             judgment, gl = None, ""
             notes.append(("WARNING", f"category judgement failed: {telemetry.describe_failure(exc)}"))
@@ -571,9 +584,9 @@ class TieBreak:
                             f"{c.get('position')}" for i, c in enumerate(candidates))
                 + "\nWhich candidate is this row's receipt, judging by the row's reason and the "
                   "vendors? Answer -1 if you cannot tell.")
+        self.usage.reserve()  # the budget is checked before any model is built
         agent = create_agent("judge", Pick, "Pick the receipt that supports the row, or -1 if unsure.",
                              temperature=0)
-        self.usage.reserve()
         result = await evidence_mod.ai_call(agent.run(text, usage_limits=USAGE_LIMITS), "the receipt tie-break")
         self.usage.add(result)
         i = result.output.index

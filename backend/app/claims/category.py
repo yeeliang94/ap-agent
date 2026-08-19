@@ -50,7 +50,8 @@ _INSTRUCTIONS = (
 
 
 async def judge_category(categories: list[dict], purpose: str, rows: list[dict],
-                         rule: str, examples: list[str], usage=None) -> tuple[CategoryJudgment, str]:
+                         rule: str, examples: list[str], usage=None,
+                         context: str = "") -> tuple[CategoryJudgment, str]:
     """Returns (judgment, gl). The category is validated against the list
     by code; an off-list answer is treated as unsure."""
     listing = "\n".join(f"- {c['item']}" + (f" (GL {c['gl']})" if c.get("gl") else "")
@@ -64,6 +65,7 @@ async def judge_category(categories: list[dict], purpose: str, rows: list[dict],
               f"# The report's lines (date | item | reason | amount)\n{lines}\n")
     if examples:
         prompt += "\n# How this client categorised similar reports before\n" + "\n".join(f"- {e}" for e in examples[:12])
+    prompt += context or ""
     agent = create_agent("judge", CategoryJudgment, _INSTRUCTIONS, temperature=0)
     if usage is not None:
         usage.reserve()

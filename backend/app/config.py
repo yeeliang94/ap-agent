@@ -52,6 +52,27 @@ MAX_FILE_MB = 20         # any single document, uncompressed
 MAX_BATCH_FILES = 200    # documents per batch
 
 
+# --- Claims hardening switches (CLAIMS-AGENT-HARDENING.md, "Feature switches") ---
+# Migrations are additive and unconditional; these gate what is READ,
+# ROUTED and SHOWN, never what is stored. "1/true/yes/on" turns one on.
+def _flag(name: str, default: str) -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+# Case fields and case routes on the HTTP contract (off = employee fields
+# stay authoritative for the UI; storage unchanged).
+CLAIMS_CASE_MODEL = _flag("CLAIMS_CASE_MODEL", "1")
+# New runs investigate with the tool-using agent (off = the delivered
+# structured-folder mapper; old runs are never reinterpreted).
+CLAIMS_AGENTIC_INVESTIGATION = _flag("CLAIMS_AGENTIC_INVESTIGATION", "0")
+# Map & Group actions for a flat folder dump (off = a flat folder behaves
+# as today: root files are classified, not grouped).
+CLAIMS_FULL_DUMP_GROUPING = _flag("CLAIMS_FULL_DUMP_GROUPING", "0")
+# run_python in the tool allowlist (off = absent; TOOL_UNAVAILABLE where
+# an investigation genuinely needs it).
+CLAIMS_PYTHON_SANDBOX = _flag("CLAIMS_PYTHON_SANDBOX", "0")
+
+
 def ensure_dirs() -> None:
     """Create the data folders on first start so nothing crashes on a fresh clone."""
     RUNS_DIR.mkdir(parents=True, exist_ok=True)

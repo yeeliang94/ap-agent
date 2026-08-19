@@ -223,7 +223,8 @@ class Usage:
 
 
 async def read_bundle(path: Path, rel_path: str, usage: Usage,
-                      sem: asyncio.Semaphore | None = None) -> tuple[list[dict], list[dict], list[dict], list[str]]:
+                      sem: asyncio.Semaphore | None = None,
+                      context: str = "") -> tuple[list[dict], list[dict], list[dict], list[str]]:
     """Read every page of one receipt bundle.
 
     Returns (receipts, trips, pages, notes):
@@ -233,6 +234,8 @@ async def read_bundle(path: Path, rel_path: str, usage: Usage,
                  km_printed (text or None), confidence
       pages    — one dict per page: file, page, kind, why
       notes    — plain lines for the diary
+    context is the run's instructions (report_reader.run_context), shown
+    with every page and never trusted over what the page prints.
     """
     agent = create_agent("extract", PageRead, _INSTRUCTIONS)
     sem = sem or page_semaphore()
@@ -244,7 +247,7 @@ async def read_bundle(path: Path, rel_path: str, usage: Usage,
 
     async def one(idx: int, png: bytes):
         async with sem:
-            return await _read_page(agent, path, idx + 1, png, usage)
+            return await _read_page(agent, path, idx + 1, png, usage, context)
 
     # Every page read finishes (or fails fast at the budget) before the
     # first failure is raised, so no read is left running unobserved.
@@ -262,9 +265,9 @@ async def read_bundle(path: Path, rel_path: str, usage: Usage,
     return receipts, trips, pages, notes
 
 
-async def _read_page(agent, path: Path, page_no: int, png: bytes, usage: Usage):
+async def _read_page(agent, path: Path, page_no: int, png: bytes, usage: Usage, context: str = ""):
     """One page: classify + read; receipts pages twice; maps at full res."""
-    prompt = ["Read this page.", BinaryContent(data=png, media_type="image/png")]
+    prompt = ["Read this page." + (context or ""), BinaryContent(data=png, media_type="image/png")]
     usage.reserve()
     first = await ai_call(agent.run(prompt, usage_limits=USAGE_LIMITS), f"reading {path.name} p.{page_no}")
     usage.add(first)

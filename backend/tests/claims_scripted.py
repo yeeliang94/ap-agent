@@ -147,15 +147,15 @@ def install(monkeypatch, survey_of, t: dict | None = None) -> dict:
 
     real_read_report, real_read_km = report_reader.read_report, report_reader.read_km
 
-    async def fake_read_report(ws, name, er, usage=None):
+    async def fake_read_report(ws, name, er, usage=None, context=""):
         monkeypatch.setattr(report_reader, "create_agent",
                             lambda *a, **k: ScriptedAgent([good_report_reading(ws)] * report_reader.MAX_ROUNDS))
-        return await real_read_report(ws, name, er, usage)
+        return await real_read_report(ws, name, er, usage, context=context)
 
-    async def fake_read_km(ws, usage=None):
+    async def fake_read_km(ws, usage=None, context=""):
         monkeypatch.setattr(report_reader, "create_agent",
                             lambda *a, **k: ScriptedAgent([good_km_reading(ws)] * report_reader.MAX_ROUNDS))
-        return await real_read_km(ws, usage)
+        return await real_read_km(ws, usage, context=context)
     monkeypatch.setattr(report_reader, "read_report", fake_read_report)
     monkeypatch.setattr(report_reader, "read_km", fake_read_km)
 
@@ -166,7 +166,8 @@ def install(monkeypatch, survey_of, t: dict | None = None) -> dict:
         for tr in e["map_trips"]:
             by_file.setdefault(f"{e['folder']}/{tr['file']}", {"receipts": [], "trips": []})["trips"].append(tr)
 
-    async def fake_read_bundle(path, rel_path, usage, sem=None):
+    async def fake_read_bundle(path, rel_path, usage, sem=None, context=""):
+        holder.setdefault("page_contexts", []).append(context)
         usage.requests += 1
         n_pages = batch_source.page_count(path) or 1
         found = by_file.get(rel_path, {"receipts": [], "trips": []})
@@ -188,7 +189,8 @@ def install(monkeypatch, survey_of, t: dict | None = None) -> dict:
     cat_by_purpose = {e["purpose"]: (e["category"], e["gl"]) for e in t["employees"]}
     cat_by_name = {e["name"]: (e["category"], e["gl"]) for e in t["employees"]}
 
-    async def fake_judge(categories, purpose, rows, rule, examples, usage=None):
+    async def fake_judge(categories, purpose, rows, rule, examples, usage=None, context=""):
+        holder.setdefault("judge_contexts", []).append(context)
         cat, gl = cat_by_purpose.get(purpose, ("", ""))
         if not cat:
             # a no-report employee has no purpose; the sample's judge would

@@ -639,12 +639,21 @@ and rollback switch.
 
 ### H1 — Deep interface and normalized contracts
 
-- [ ] Add `investigator/contracts.py` with request/result and normalized domain
-  models.
-- [ ] Put the existing structured-folder pipeline behind the new interface.
-- [ ] Add in-memory InvestigationTools and contract tests.
-- [ ] Pass current-run instructions into investigation and case verification.
-- [ ] Freeze the baseline invariants above as adapter-neutral contract tests.
+- [x] Add `investigator/contracts.py` with request/result and normalized domain
+  models (2026-08-19).
+- [x] Put the existing structured-folder pipeline behind the new interface
+  (`investigator/legacy.py`; the runner builds the hashed manifest and calls
+  `investigator.investigate`; `CLAIMS_AGENTIC_INVESTIGATION` selects the adapter).
+- [x] Add in-memory InvestigationTools (`tools/fake.py`, with the real Decimal
+  calculator and table comparison behind it) and contract tests
+  (`tests/test_investigator_contracts.py`).
+- [x] Pass current-run instructions into investigation and case verification:
+  the report/KM readers, the page reader and the category judge see them as
+  marked steering text; the checks and audits never read them; the diary
+  records that they were shown.
+- [x] Freeze the baseline invariants above as adapter-neutral contract tests
+  (`test_investigator_contracts.py` plus the delivered `test_claims_*` suites,
+  which run unchanged through the seam).
 - **Exit:** current Client A passes through the new interface with empty
   instructions without changing observable results; with instructions supplied,
   every difference is logged and reviewed, not assumed harmless.

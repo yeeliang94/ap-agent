@@ -428,14 +428,29 @@ def audit_report(ws, reading: ReportReading, rows: list[dict], employee_name: st
     return problems
 
 
-async def read_report(ws, employee_name: str, er_code: str, usage=None) -> tuple[list[dict], dict, list[tuple[str, str]]]:
+def run_context(text: str) -> str:
+    """The reviewer's instructions for this run, as the readers see them
+    (H1): appended to the grid or page, plainly marked as steering — they
+    say where to look and never override the sheet's own arithmetic or a
+    page's own figures. Empty when there are none."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    return ("\n\n# Instructions for this run (from the reviewer; they steer where to look and "
+            "what to expect, and never override what the sheet or page itself says)\n" + text[:4000])
+
+
+async def read_report(ws, employee_name: str, er_code: str, usage=None,
+                      context: str = "") -> tuple[list[dict], dict, list[tuple[str, str]]]:
     """The reason/act loop for the report tab.
 
     Returns (rows, header, notes): the extracted lines, the header facts
     (name, period, purpose, total), and (level, text) notes for the diary.
-    Raises ReportUnreadable when the STRUCTURE never verifies.
+    Raises ReportUnreadable when the STRUCTURE never verifies. `context`
+    is the run's instructions (run_context), shown but never trusted over
+    the audit.
     """
-    grid = grid_text(ws)
+    grid = grid_text(ws) + run_context(context)
     agent = create_agent("judge", ReportReading, _REPORT_INSTRUCTIONS, temperature=0)
     feedback = ""
     notes: list[tuple[str, str]] = []
@@ -550,11 +565,11 @@ def audit_km(ws, reading: KMReading, trips: list[dict]) -> list[str]:
     return problems
 
 
-async def read_km(ws, usage=None) -> tuple[list[dict], list[tuple[str, str]]]:
+async def read_km(ws, usage=None, context: str = "") -> tuple[list[dict], list[tuple[str, str]]]:
     """The reason/act loop for the KM tab. Returns (trips, notes). A tab
     that never verifies raises ReportUnreadable (the worker records it and
     treats the employee as having no readable trips)."""
-    grid = grid_text(ws)
+    grid = grid_text(ws) + run_context(context)
     agent = create_agent("judge", KMReading, _KM_INSTRUCTIONS, temperature=0)
     feedback = ""
     problems: list[str] = []
