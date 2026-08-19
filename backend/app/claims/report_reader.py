@@ -88,6 +88,10 @@ class ReportReading(BaseModel):
     period_cell: str | None = Field(default=None, pattern=_CELL)
     purpose_cell: str | None = Field(default=None, pattern=_CELL,
                                      description="the cell holding the report's stated business reason / purpose")
+    skip_rows: list[int] = Field(default_factory=list, max_length=40,
+                                 description="rows INSIDE first_row..last_row that are not expense lines "
+                                             "(a subtotal, a section heading, a blank-with-a-note); a "
+                                             "dated row with an amount is never a skip")
     why: str = Field(max_length=300)
     observations: list[str] = Field(default_factory=list, max_length=10)
 
@@ -118,6 +122,8 @@ class KMReading(BaseModel):
     first_row: int | None = Field(default=None, ge=1)
     last_row: int | None = Field(default=None, ge=1)
     total_cell: str | None = Field(default=None, pattern=_CELL)
+    skip_rows: list[int] = Field(default_factory=list, max_length=40,
+                                 description="rows inside first_row..last_row that are not trips (a subtotal, a heading)")
     why: str = Field(max_length=300)
 
 
@@ -129,7 +135,9 @@ _REPORT_INSTRUCTIONS = (
     "which single cells hold the total, the employee's name, the period, "
     "and the report's stated business reason / purpose.\n"
     "- The expense lines are the dated rows under the column headings; "
-    "first_row..last_row spans them all (blank rows inside are fine).\n"
+    "first_row..last_row spans them all (blank rows inside are fine). A "
+    "subtotal or section-heading row INSIDE the span goes in skip_rows — "
+    "never a dated row with an amount.\n"
     "- amount is the per-receipt amount in the row's currency; total is the "
     "home-currency (MYR) figure; rate is the exchange rate. If the sheet "
     "has only one money column, name it as amount and leave total null.\n"
@@ -145,7 +153,8 @@ _KM_INSTRUCTIONS = (
     "is a grid of cells labelled like 'F5: 12.4'. Answer with structure only: "
     "which column is the date, from, to, purpose, vehicle, km, rate per km, "
     "amount; which rows are the trips (first_row..last_row); which cell holds "
-    "the total if any. If the tab has headings but no trip rows, answer "
+    "the total if any; subtotal or heading rows inside the span go in "
+    "skip_rows. If the tab has headings but no trip rows, answer "
     "has_trips=false."
 )
 
@@ -296,7 +305,10 @@ def extract_rows(ws, reading: ReportReading) -> list[dict]:
     A row is a line when it has a date or an amount."""
     cols = reading.columns
     rows = []
+    skip = set(reading.skip_rows or [])
     for r in range(reading.first_row, reading.last_row + 1):
+        if r in skip:
+            continue
         d = cell_date(_val(ws, cols.date, r)) if _val(ws, cols.date, r) is not None else None
         amount = money(_val(ws, cols.amount, r))
         total = money(_val(ws, cols.total, r)) if cols.total else None
@@ -333,6 +345,14 @@ def audit_report(ws, reading: ReportReading, rows: list[dict], employee_name: st
         problems.append((STRUCTURE, "header_row must be above first_row"))
     if not rows:
         problems.append((STRUCTURE, "no expense lines found in first_row..last_row"))
+    for r in reading.skip_rows or []:
+        if not (reading.first_row <= r <= reading.last_row):
+            problems.append((STRUCTURE, f"skip_rows names row {r}, which is outside first_row..last_row"))
+            continue
+        raw_date = _val(ws, cols.date, r) if cols.date else None
+        if raw_date is not None and cell_date(raw_date) and money(_val(ws, cols.amount, r)) is not None:
+            problems.append((STRUCTURE, f"row {r} is in skip_rows but has a date and an amount — it looks "
+                                        "like an expense line, not a subtotal"))
     if problems:
         return problems
     for row in rows:
@@ -473,7 +493,10 @@ def extract_trips(ws, reading: KMReading) -> list[dict]:
     if not reading.has_trips or cols is None or reading.first_row is None or reading.last_row is None:
         return []
     trips = []
+    skip = set(reading.skip_rows or [])
     for r in range(reading.first_row, reading.last_row + 1):
+        if r in skip:
+            continue
         km = money(_val(ws, cols.km, r))
         amount = money(_val(ws, cols.amount, r))
         raw_date = _val(ws, cols.date, r)
@@ -503,6 +526,10 @@ def audit_km(ws, reading: KMReading, trips: list[dict]) -> list[str]:
         return ["name the date, km and amount columns (or answer has_trips=false)"]
     if not trips:
         return ["no trip rows found in first_row..last_row"]
+    for r in reading.skip_rows or []:
+        raw_date = _val(ws, cols.date, r)
+        if raw_date is not None and cell_date(raw_date) and money(_val(ws, cols.km, r)) is not None:
+            problems.append(f"row {r} is in skip_rows but has a date and km — it looks like a trip")
     for t in trips:
         if not t["date"]:
             problems.append(f"row {t['row']}: no readable date")

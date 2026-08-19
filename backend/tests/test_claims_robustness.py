@@ -193,3 +193,28 @@ def test_a_missed_line_is_told_apart_from_a_typo(monkeypatch):
     with pytest.raises(report_reader.ReportUnreadable) as exc:
         asyncio.run(report_reader.read_report(ws, "Aegene Ong", "ER(01JUL26-21JUL26)"))
     assert "outside" in str(exc.value)
+
+
+# ---- R3: rows the reader may skip ------------------------------------------------
+
+def test_subtotal_row_inside_the_span_can_be_skipped(monkeypatch):
+    wb, ws, last, total_row = _report_sheet(LINES, 73.90)
+    # push a "Meals subtotal" row in between lines 2 and 3
+    ws.insert_rows(9)
+    ws["B9"], ws["H9"] = "Meals subtotal", 63.90  # no date: a subtotal, not a line
+    last, total_row = last + 1, total_row + 1
+    ws[f"H{total_row}"] = 73.90
+    naive = _reading(last, total_row)                      # sum includes the subtotal → 137.80
+    with_skip = _reading(last, total_row, skip_rows=[9])   # subtotal left out → 73.90
+    agent = _Scripted([naive, with_skip])
+    monkeypatch.setattr(report_reader, "create_agent", lambda *a, **k: agent)
+    rows, header, _ = asyncio.run(report_reader.read_report(ws, "Aegene Ong", "ER(01JUL26-21JUL26)"))
+    assert len(agent.prompts) == 2
+    assert [r["row"] for r in rows] == [7, 8, 10] and header["total_check"] is None
+    # skipping a REAL line is refused
+    bad = _reading(last, total_row, skip_rows=[9, 10])
+    agent = _Scripted([bad, bad, bad])
+    monkeypatch.setattr(report_reader, "create_agent", lambda *a, **k: agent)
+    with pytest.raises(report_reader.ReportUnreadable) as exc:
+        asyncio.run(report_reader.read_report(ws, "Aegene Ong", "ER(01JUL26-21JUL26)"))
+    assert "row 10 is in skip_rows" in str(exc.value)
