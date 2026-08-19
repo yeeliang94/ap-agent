@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from .investigator import contracts as C
-from .investigator.legacy import case_id_for
+from .investigator.contracts import assignment_id_for, case_id_for
 from . import profile as profile_mod
 from .models import (ClaimCase, ClaimEmployee, ClaimEvidenceAssignment, ClaimFlag, ClaimInvestigation,
                      ClaimSourceArtifact, ClaimToolExecution, ClaimsRun)
@@ -353,14 +353,14 @@ def new_case_id(run_id: str, seed: str) -> str:
     return case_id_for(run_id, seed)
 
 
-def _assign(s, run: ClaimsRun, art: ClaimSourceArtifact, case: ClaimCase | None, actor: str, why: str) -> None:
+def _assign(s, run: ClaimsRun, art: ClaimSourceArtifact, case: ClaimCase | None, actor: str, why: str) -> str | None:
     """Move a file into a case (or out of every case): the artifact's case,
     its assignment record (reviewer decision, confirmed), its disposition
     (used inside a case; unresolved when moved out unless the reviewer set
     a disposition before)."""
     old_case = art.case_id
     art.case_id = case.id if case else ""
-    key = "s" + __import__("hashlib").sha256(f"{art.case_id}\0{art.artifact_id}".encode()).hexdigest()[:10] if case else ""
+    key = assignment_id_for(art.case_id, art.artifact_id) if case else ""
     for rec in s.query(ClaimEvidenceAssignment).filter(ClaimEvidenceAssignment.run_id == run.id,
                                                        ClaimEvidenceAssignment.artifact_id == art.artifact_id):
         if not case or rec.case_id != case.id:
@@ -378,7 +378,7 @@ def _assign(s, run: ClaimsRun, art: ClaimSourceArtifact, case: ClaimCase | None,
     elif art.disposition == "used":
         art.disposition, art.disposition_by, art.needs_confirmation = "unresolved", "", 1
         art.disposition_reason = "moved out of its case by the reviewer; say what it is or move it into another case"
-    return None if old_case == art.case_id else old_case
+    return None if old_case == art.case_id else old_case  # the case it left, for the caller's audit line
 
 
 def create_case(s, run: ClaimsRun, label: str, artifact_ids: list[str], actor: str = "reviewer") -> ClaimCase:

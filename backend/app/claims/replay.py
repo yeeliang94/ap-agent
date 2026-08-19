@@ -112,7 +112,7 @@ def verify_bundle(db, run: ClaimsRun) -> dict:
             problems.append("published emitted total differs from a rebuild")
         amount_idx = (bundle["listing_headers"].get("roles") or {}).get("amount")
         if amount_idx is None and published.get("header_fallback"):
-            amount_idx = 4
+            amount_idx = listing_mod.FALLBACK_ROLES.index("amount")
         if amount_idx is not None:
             total = Decimal("0")
             for line in published["tsv"].split("\n")[1:]:
@@ -160,6 +160,19 @@ def acceptance_gates(db, run: ClaimsRun) -> dict:
                                                                   "PURPOSE_UNKNOWN", "CATEGORY_UNCLEAR", "REPORT_UNREADABLE")]
     rows_uncited = [r for r in rows if not r.sheet and r.kind != "derived"]
     ev_uncited = [e for e in evidence if not e.file]
+    # Evidence reuse across cases is SILENT when two matched receipts with
+    # the same value fingerprint sit in different cases and no SHARED_RECEIPT
+    # flag (any status) names them.
+    from . import checks as checks_mod
+
+    groups: dict[tuple, set[str]] = {}
+    for e in evidence:
+        if e.kind == "receipt" and e.matched_row_id:
+            groups.setdefault(checks_mod._receipt_key({"values": e.values or {}, "id": e.id}), set()).add(e.case_id or e.employee_id)
+    shared_named = {f.evidence_id for f in flags if f.code == "SHARED_RECEIPT"}
+    silent = [k for k, cases_ in groups.items() if len(cases_) > 1 and not any(
+        e.id in shared_named for e in evidence if e.kind == "receipt" and e.matched_row_id
+        and checks_mod._receipt_key({"values": e.values or {}, "id": e.id}) == k)]
     reuse = [f for f in flags if f.code in ("SHARED_RECEIPT", "DUPLICATE_RECEIPT") and f.status == "open"]
     ai_confirmed = [c for c in cases if c.claimant_state == "confirmed" and "reviewer" not in (c.claimant_basis or "")
                     and "confirmed map" not in (c.claimant_basis or "")]
@@ -174,7 +187,7 @@ def acceptance_gates(db, run: ClaimsRun) -> dict:
                                   "flags_uncited": len(uncited), "rows_uncited": len(rows_uncited), "evidence_uncited": len(ev_uncited)},
         "arithmetic_reconciles": {"ok": bool(out) and bool((out.get("totals") or {}).get("match")),
                                   "reported_missing_named": (out.get("totals") or {}).get("reported_missing")},
-        "no_silent_evidence_reuse": {"ok": True, "open_reuse_flags": len(reuse)},
+        "no_silent_evidence_reuse": {"ok": not silent, "silent_reuse_groups": len(silent), "open_reuse_flags": len(reuse)},
         "no_automatic_owner_confirmation": {"ok": not ai_confirmed, "cases": [c.label for c in ai_confirmed]},
         "open_flags": len(open_flags), "false_flag_budget": f"≤ 1 open false flag per confirmed case ({len(payable)} cases)",
     }

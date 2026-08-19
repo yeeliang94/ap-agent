@@ -457,6 +457,8 @@ export interface ClaimArtifact {
   disposition_by: "" | "adapter" | "reviewer";
   needs_confirmation: boolean;
   case_id: string;
+  /** Identity signals found in this file (ER code, name, folder), each with where. */
+  signals?: { kind: string; value: string; strength: "strong" | "weak"; cite: Record<string, unknown> }[];
 }
 
 export interface ClaimAssignment {
@@ -473,6 +475,12 @@ export interface ClaimAssignment {
 
 export interface Grouping {
   problems: string[];
+  /** The problems that belong to one case, by case id (the rest are run-wide). */
+  by_case?: Record<string, string[]>;
+  /** Regrouping actions (create/merge/split/move/role) are on only when the
+   *  server's CLAIMS_FULL_DUMP_GROUPING switch is on; the gate, claimant and
+   *  dispositions always are. */
+  actions_enabled?: boolean;
   counts: {
     artifacts: number;
     dispositioned: number;
@@ -795,11 +803,23 @@ export function setArtifactRole(runId: string, revision: number, artifactId: str
     { role, remember, expected_revision: revision }, "Could not set the file's role");
 }
 
-export async function setArtifactDisposition(runId: string, artifactId: string, disposition: Disposition, reason: string) {
+export async function setArtifactDisposition(runId: string, revision: number, artifactId: string, disposition: Disposition, reason: string) {
   const r = await fetch(`/api/claims-runs/${runId}/artifacts/${artifactId}/disposition`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ disposition, reason }),
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ disposition, reason, expected_revision: revision }),
   });
+  if (r.status === 409) throw new StaleRunError();
   if (!r.ok) return fail(r, "Could not settle the file");
+}
+
+export async function setCaseCategory(
+  runId: string, caseId: string, category: string, gl: string, reason: string, revision?: number
+): Promise<void> {
+  const r = await fetch(`/api/claims-runs/${runId}/cases/${caseId}/category`, {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ category, gl, reason, expected_revision: revision }),
+  });
+  if (!r.ok) return staleOr(r, "Could not set the category");
 }
 
 export async function confirmGrouping(runId: string, revision: number): Promise<{ ok: boolean; cases: number; revision: number }> {

@@ -35,6 +35,7 @@ MAX_CALC_OPS = 200
 
 
 class ToolResult(BaseModel):
+    call_id: str = ""        # the ToolExecution id this result was recorded under
     ok: bool = True
     data: Any = None
     citations: list[Citation] = Field(default_factory=list)

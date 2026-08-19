@@ -24,7 +24,7 @@ from app.claims.models import ClaimCase, ClaimsRun
 
 from . import claims_scripted as scripted
 from .test_claims_baseline import client, db, run_client_a  # noqa: F401
-from .test_claims_grouping import _flat_dump_run
+from .test_claims_grouping import _flat_dump_run, _settle_stray
 
 needs_sample = pytest.mark.skipif(not scripted.GEN.is_dir(), reason="run samples/generate_claims_sample.py first")
 
@@ -49,8 +49,9 @@ def test_pinned_listing_columns():
 @pytest.mark.asyncio
 async def test_unconfirmed_claimant_is_never_paid_and_the_gate_is_server_side(db, monkeypatch):
     run_id = await _flat_dump_run(db, monkeypatch, claimants=False)
+    _settle_stray(run_id)
     got = client.get(f"/api/claims-runs/{run_id}").json()
-    client.post(f"/api/claims-runs/{run_id}/confirm-grouping", json={"expected_revision": got["revision"]})
+    assert client.post(f"/api/claims-runs/{run_id}/confirm-grouping", json={"expected_revision": got["revision"]}).status_code == 200
     from app.claims import runner
 
     await runner.start_verification(run_id)

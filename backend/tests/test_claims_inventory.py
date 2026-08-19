@@ -122,11 +122,13 @@ def test_unresolved_artifacts_block_until_the_reviewer_settles_them(db):
     r = client.post(f"/api/claims-runs/ru/flags/{flag.id}/decide", json={"decision": "dismissed", "note": "meh"})
     assert r.status_code == 400
     r = client.post("/api/claims-runs/ru/artifacts/a1/disposition", json={"disposition": "used", "reason": "x"})
+    assert r.status_code == 400 and "expected_revision is required" in r.text   # every case route takes the revision
+    r = client.post("/api/claims-runs/ru/artifacts/a1/disposition", json={"disposition": "used", "reason": "x", "expected_revision": 0})
     assert r.status_code == 400 and "inside a case" in r.text
-    r = client.post("/api/claims-runs/ru/artifacts/a1/disposition", json={"disposition": "irrelevant", "reason": ""})
+    r = client.post("/api/claims-runs/ru/artifacts/a1/disposition", json={"disposition": "irrelevant", "reason": "", "expected_revision": 0})
     assert r.status_code == 400 and "reason" in r.text
     r = client.post("/api/claims-runs/ru/artifacts/a1/disposition",
-                    json={"disposition": "irrelevant", "reason": "personal notes"})
+                    json={"disposition": "irrelevant", "reason": "personal notes", "expected_revision": 0})
     assert r.status_code == 200 and r.json()["artifact"]["disposition_by"] == "reviewer"
     s = db()
     flag = s.get(ClaimFlag, flag.id)

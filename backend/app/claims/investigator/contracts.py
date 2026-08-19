@@ -30,6 +30,28 @@ from pydantic import BaseModel, Field, model_validator
 
 # ---- vocabulary --------------------------------------------------------------
 
+DEFAULT_OBJECTIVE = ("Check the expense records and all supporting evidence, group what belongs together, "
+                     "reconcile every line and total, and show anything that does not agree.")
+# Artifact roles that are kept inside a case but never read as evidence.
+IGNORABLE_ROLES = ("approval", "report_copy", "listing", "roster", "policy")
+# The dispositions a reviewer may set by hand (used = inside a case; unresolved = not settled).
+REVIEWER_DISPOSITIONS = ("irrelevant", "unreadable", "duplicate")
+
+
+def case_id_for(run_id: str, label: str) -> str:
+    """Deterministic per run and grouping label, so a re-proposal or a
+    retry does not mint a second id for the same case."""
+    import hashlib
+
+    return "c" + hashlib.sha256(f"{run_id}\0{label}".encode()).hexdigest()[:10]
+
+
+def assignment_id_for(case_id: str, artifact_or_evidence_id: str) -> str:
+    """Deterministic per case + evidence/file."""
+    import hashlib
+
+    return "s" + hashlib.sha256(f"{case_id}\0{artifact_or_evidence_id}".encode()).hexdigest()[:10]
+
 Disposition = Literal["used", "duplicate", "irrelevant", "unreadable", "unresolved"]
 TERMINAL_DISPOSITIONS = ("used", "duplicate", "irrelevant", "unreadable")
 InspectionState = Literal["not_inspected", "inspected", "failed"]
@@ -240,8 +262,10 @@ class InvestigationPlan(BaseModel):
     questions: list[str] = Field(default_factory=list)
     rounds: int = 0
     adapter: str = ""
-    # What produced it: adapter, prompt and tool versions, model names (H11).
+    # What produced it: adapter, prompt and tool versions, model names (H11),
+    # and the budget it ran under.
     versions: dict[str, str] = Field(default_factory=dict)
+    budget: dict[str, int] = Field(default_factory=dict)
 
 
 class InvestigationRequest(BaseModel):

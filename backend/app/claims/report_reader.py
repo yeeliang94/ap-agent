@@ -447,10 +447,10 @@ async def read_report(ws, employee_name: str, er_code: str, usage=None,
     Returns (rows, header, notes): the extracted lines, the header facts
     (name, period, purpose, total), and (level, text) notes for the diary.
     Raises ReportUnreadable when the STRUCTURE never verifies. `context`
-    is the run's instructions (run_context), shown but never trusted over
-    the audit.
+    is the run's instructions already wrapped by run_context() (the worker
+    wraps once for every reader), shown but never trusted over the audit.
     """
-    grid = grid_text(ws) + run_context(context)
+    grid = grid_text(ws) + (context or "")
     agent = create_agent("judge", ReportReading, _REPORT_INSTRUCTIONS, temperature=0)
     feedback = ""
     notes: list[tuple[str, str]] = []
@@ -569,7 +569,7 @@ async def read_km(ws, usage=None, context: str = "") -> tuple[list[dict], list[t
     """The reason/act loop for the KM tab. Returns (trips, notes). A tab
     that never verifies raises ReportUnreadable (the worker records it and
     treats the employee as having no readable trips)."""
-    grid = grid_text(ws) + run_context(context)
+    grid = grid_text(ws) + (context or "")
     agent = create_agent("judge", KMReading, _KM_INSTRUCTIONS, temperature=0)
     feedback = ""
     problems: list[str] = []

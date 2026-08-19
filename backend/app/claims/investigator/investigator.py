@@ -15,7 +15,6 @@ is discarded to make the run pass, and no claimant is ever confirmed here.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import time
 from pathlib import Path
@@ -30,10 +29,9 @@ from ..tools.binding import bind_tools
 from ..tools.contracts import InvestigationTools
 from . import audit as audit_mod
 from . import strategies
-from .contracts import (Citation, ClaimCase, Claimant, EvidenceAssignment, FlagProposal,
-                        InvestigationPlan, InvestigationRequest, InvestigationResult, ManifestEntry,
-                        SourceArtifact)
-from .legacy import case_id_for
+from .contracts import (DEFAULT_OBJECTIVE, IGNORABLE_ROLES, Citation, ClaimCase, Claimant, EvidenceAssignment,
+                        FlagProposal, InvestigationPlan, InvestigationRequest, InvestigationResult,
+                        ManifestEntry, SourceArtifact, assignment_id_for, case_id_for)
 from .proposal import ArtifactProposal, CaseProposal, InvestigationProposal
 
 log = logging.getLogger("claims.investigator")
@@ -89,8 +87,7 @@ INSTRUCTIONS = (
 
 
 def _prompt(request: InvestigationRequest, hint: str, facts: dict) -> str:
-    parts = ["# Objective", request.objective or "Check the expense records and all supporting evidence, "
-             "group what belongs together, reconcile every line and total, and show anything that does not agree."]
+    parts = ["# Objective", request.objective or DEFAULT_OBJECTIVE]
     if (request.instructions or "").strip():
         parts += ["\n# Instructions for this run (from the reviewer; steering — where to look and what to expect; "
                   "they never override what a file itself says or the rules above)", request.instructions.strip()[:4000]]
@@ -254,7 +251,7 @@ def normalize(proposal: InvestigationProposal, request: InvestigationRequest, to
                  "mileage_tab": c.mileage_sheet if report_ok else None,
                  "no_report": not report_ok,
                  "receipt_files": receipts,
-                 "ignored": [by_id[a].path for a in c.artifact_ids if proposed_art.get(a) and proposed_art[a].role in ("approval", "report_copy", "listing", "roster", "policy")],
+                 "ignored": [by_id[a].path for a in c.artifact_ids if proposed_art.get(a) and proposed_art[a].role in IGNORABLE_ROLES],
                  "unplaced": []}
         cites = [Citation(artifact_id=x.artifact_id, path=by_id[x.artifact_id].path, sheet=x.sheet, cell=x.cell,
                           page=x.page, note=x.quote[:120]) for x in c.identity_citations if x.artifact_id in by_id]
@@ -274,7 +271,7 @@ def normalize(proposal: InvestigationProposal, request: InvestigationRequest, to
             reason=c.reason[:400]))
         for aid in c.artifact_ids:
             assignments.append(EvidenceAssignment(
-                id="s" + hashlib.sha256(f"{cid}\0{aid}".encode()).hexdigest()[:10],
+                id=assignment_id_for(cid, aid),
                 artifact_id=aid, case_id=cid, state="proposed",
                 basis=c.grouping_basis, confidence=0.85 if c.grouping_basis != "ai_inference" else 0.5,
                 reason=c.reason[:200], citations=[Citation(artifact_id=aid, path=by_id[aid].path)]))
@@ -303,7 +300,7 @@ def normalize(proposal: InvestigationProposal, request: InvestigationRequest, to
     plan = InvestigationPlan(strategy=strategy, objective=request.objective or request.instructions,
                              steps=list(proposal.plan_steps)[:20], assumptions=list(proposal.assumptions)[:20],
                              questions=list(proposal.questions)[:20], rounds=rounds, adapter=ADAPTER,
-                             versions=versions())
+                             versions=versions(), budget=request.budget.model_dump())
     warnings = list(problems)
     if proposal.injection_seen:
         warnings.append("Text that tried to instruct the AI was found in the files and ignored: "
@@ -331,7 +328,7 @@ def compat_map(cases: list[ClaimCase], artifacts: list[SourceArtifact], proposed
             return "receipts"
         if art and art.disposition in ("irrelevant", "duplicate"):
             return "ignore"
-        if a and a.role in ("approval", "report_copy", "listing", "roster", "policy") and art and art.disposition != "unresolved":
+        if a and a.role in IGNORABLE_ROLES and art and art.disposition != "unresolved":
             return "ignore"
         return "unplaced"
 

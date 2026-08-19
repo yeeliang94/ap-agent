@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { ClaimsRunDetail, StaleRunError, retryCase, retryClaimEmployee } from "../../api";
-import { ReviewUnit, reviewUnits, unitIdOf } from "./units";
+import { ClaimsRunDetail, StaleRunError } from "../../api";
+import { ReviewUnit, retryUnit, reviewUnits, unitIdOf } from "./units";
 
 // Watch the workers without refreshing: one chip per case, an overall
 // bar, and a Retry for a case whose worker failed. Keyed by Claim Case
@@ -24,8 +24,7 @@ export default function VerifyingView({
     setBusy(u.id);
     setError("");
     try {
-      if (u.case_id) await retryCase(run.id, u.case_id, run.revision);
-      else await retryClaimEmployee(run.id, u.employee_id, run.revision);
+      await retryUnit(run, u);
       onChanged();
     } catch (e) {
       if (e instanceof StaleRunError) onChanged();

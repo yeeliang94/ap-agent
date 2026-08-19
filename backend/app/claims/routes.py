@@ -197,9 +197,17 @@ def _case_model_payload(db, run_id: str) -> dict:
             t["failed"] += n
     from . import grouping
 
+    run = db.get(ClaimsRun, run_id)
+    signals = grouping.signals_for(run, artifacts)
+    gate = grouping.gate(db, run)
+    gate["actions_enabled"] = bool(config.CLAIMS_FULL_DUMP_GROUPING)
     return {"cases": [cases_mod.case_dict(c) for c in cases],
-            "grouping": grouping.gate(db, db.get(ClaimsRun, run_id)),
-            "artifacts": [cases_mod.artifact_dict(a) for a in artifacts],
+            "grouping": gate,
+            "artifacts": [{**cases_mod.artifact_dict(a), "signals": signals.get(a.artifact_id, [])} for a in artifacts],
+            # Evidence Items (the normalized name): the worker's page inventory
+            # keyed by artifact, for callers that speak the new contract.
+            "evidence_items": [_evidence_item_dict(e, {a.path: a.artifact_id for a in artifacts})
+                               for e in db.query(ClaimEvidence).filter(ClaimEvidence.run_id == run_id).all()],
             "assignments": [cases_mod.assignment_dict(a) for a in assignments],
             "investigation": cases_mod.investigation_dict(inv),
             "shadow_investigation": cases_mod.investigation_dict(shadow),
@@ -464,9 +472,21 @@ def get_claims_file(run_id: str, path: str, page: int = 1, highlight: str = "",
 # each other. Each action is audited, refreshes the grouping controls
 # (conflicts, unknown claimants, case roles) and bumps the revision.
 
-def _revision_check(run: ClaimsRun, body: dict) -> None:
+def _case_routes_on() -> None:
+    """The case routes exist only while CLAIMS_CASE_MODEL is on (off = the
+    employee fields and routes stay authoritative; storage unchanged)."""
+    if not config.CLAIMS_CASE_MODEL:
+        raise HTTPException(404, "The case model is switched off on this server.")
+
+
+def _revision_check(run: ClaimsRun, body: dict, required: bool = False) -> None:
+    """Every mutation carries the revision the screen last saw. The new
+    case routes REQUIRE it; the delivered routes accept its absence (an
+    older screen keeps working) but refuse a stale value."""
     expected = body.get("expected_revision")
     if expected is None:
+        if required:
+            raise HTTPException(400, "expected_revision is required: send the revision your screen loaded.")
         return
     try:
         expected = int(expected)
@@ -484,6 +504,7 @@ def _grouping_action(run_id: str, body: dict, action: str, fn, statuses: tuple =
     revision."""
     from . import grouping
 
+    _case_routes_on()
     db = SessionLocal()
     try:
         run = db.get(ClaimsRun, run_id)
@@ -491,7 +512,7 @@ def _grouping_action(run_id: str, body: dict, action: str, fn, statuses: tuple =
             raise HTTPException(404, "No such claims run.")
         if run.status not in statuses:
             raise HTTPException(400, f"This can be changed while the run is {' or '.join(statuses)} (it is {run.status}).")
-        _revision_check(run, body)
+        _revision_check(run, body, required=True)
         try:
             detail = fn(db, run)
         except cases_mod.GroupingError as exc:
@@ -506,9 +527,18 @@ def _grouping_action(run_id: str, body: dict, action: str, fn, statuses: tuple =
         db.close()
 
 
+def _regrouping_on() -> None:
+    """Create / merge / split / move / role are the full-dump grouping
+    actions: off = a flat folder behaves as today (classified, not
+    regrouped on screen); the gate, claimant and dispositions stay."""
+    if not config.CLAIMS_FULL_DUMP_GROUPING:
+        raise HTTPException(400, "Regrouping at the map is switched off on this server (CLAIMS_FULL_DUMP_GROUPING).")
+
+
 @router.post("/{run_id}/cases")
 def create_case(run_id: str, body: dict) -> dict:
     """body = {label, artifact_ids: [...], expected_revision}"""
+    _regrouping_on()
     ids = [str(a) for a in (body.get("artifact_ids") or [])]
 
     def fn(db, run):
@@ -551,6 +581,8 @@ def set_case_claimant(run_id: str, case_id: str, body: dict) -> dict:
 @router.post("/{run_id}/cases/{case_id}/merge")
 def merge_case(run_id: str, case_id: str, body: dict) -> dict:
     """body = {into: case_id, expected_revision}"""
+    _regrouping_on()
+
     def fn(db, run):
         c = cases_mod.merge_cases(db, run, case_id, str(body.get("into", "")))
         return f"case {case_id} merged into {c.label}"
@@ -560,6 +592,8 @@ def merge_case(run_id: str, case_id: str, body: dict) -> dict:
 @router.post("/{run_id}/cases/{case_id}/split")
 def split_case(run_id: str, case_id: str, body: dict) -> dict:
     """body = {artifact_ids: [...], label, expected_revision}"""
+    _regrouping_on()
+
     def fn(db, run):
         c = cases_mod.split_case(db, run, case_id, [str(a) for a in (body.get("artifact_ids") or [])],
                                  str(body.get("label", "")))
@@ -570,6 +604,8 @@ def split_case(run_id: str, case_id: str, body: dict) -> dict:
 @router.post("/{run_id}/artifacts/{artifact_id}/move")
 def move_artifact(run_id: str, artifact_id: str, body: dict) -> dict:
     """body = {case_id ("" = out of every case), expected_revision}"""
+    _regrouping_on()
+
     def fn(db, run):
         cases_mod.move_artifact(db, run, artifact_id, str(body.get("case_id", "")))
         return f"file {artifact_id} moved to case {body.get('case_id') or '(none)'}"
@@ -584,6 +620,7 @@ def set_artifact_role(run_id: str, artifact_id: str, body: dict) -> dict:
     """The reviewer says what a file IS (its role); with remember=true the
     file-name pattern → role goes into the client profile (the delivered
     'remember for <client>'). body = {role, remember?, expected_revision}"""
+    _regrouping_on()
     role = str(body.get("role", "")).strip()
     if role not in ARTIFACT_ROLES:
         raise HTTPException(400, f"role must be one of {', '.join(ARTIFACT_ROLES)}.")
@@ -591,7 +628,7 @@ def set_artifact_role(run_id: str, artifact_id: str, body: dict) -> dict:
     def fn(db, run):
         art = cases_mod._artifact(db, run.id, artifact_id)
         art.proposed_role, art.role_reason = role, "set by the reviewer at the map"
-        if role in ("approval", "report_copy", "listing", "roster", "policy") and art.disposition == "unresolved":
+        if role in IGNORABLE_ROLES and art.disposition == "unresolved":
             art.disposition, art.disposition_by, art.needs_confirmation = "irrelevant", "reviewer", 0
             art.disposition_reason = f"a {role.replace('_', ' ')}: nothing to verify in it"
         if body.get("remember"):
@@ -621,6 +658,7 @@ async def confirm_grouping(run_id: str, body: dict) -> dict:
     """The one primary action of Map & Group: confirm the grouping and
     start verification. body = {expected_revision}. Refused (400) with the
     reasons while the gate is shut."""
+    _case_routes_on()
     db = SessionLocal()
     try:
         run = db.get(ClaimsRun, run_id)
@@ -628,7 +666,7 @@ async def confirm_grouping(run_id: str, body: dict) -> dict:
             raise HTTPException(404, "No such claims run.")
         if run.status != "map_ready":
             raise HTTPException(400, f"The grouping can be confirmed while the run waits at the map (it is {run.status}).")
-        _revision_check(run, body)
+        _revision_check(run, body, required=True)
         try:
             n, gate = cases_mod.confirm_grouping(db, run)
         except cases_mod.GroupingError as exc:
@@ -722,15 +760,25 @@ async def decide_claim_flag(run_id: str, flag_id: str, body: dict) -> dict:
             # what releases the control (H3). The decision route accepts
             # the disposition inline so the flag card can offer it.
             disposition = str(body.get("disposition", "")).strip()
-            if disposition not in ("irrelevant", "unreadable", "duplicate"):
+            if disposition not in REVIEWER_DISPOSITIONS:
                 raise HTTPException(400, "Say what this file is: disposition must be irrelevant, unreadable "
                                          "or duplicate (with a note) — that is what settles an unplaced file.")
-            _set_disposition(db, run_id, flag.artifact_id, disposition, note or decision, actor="reviewer")
+            if not note:
+                raise HTTPException(400, "A short note is required — it is the reason recorded with the disposition.")
+            _set_disposition(db, run_id, flag.artifact_id, disposition, note, actor="reviewer")
             db.commit()
             return {"ok": True, "disposition": disposition}
         flag.status, flag.resolution = decision, note
         run = db.get(ClaimsRun, run_id)
         run.outputs = {}  # withdrawn; rebuilt from the reviewed state on next read
+        if flag.code == "CLAIM_AMOUNT_UNCONFIRMED" and decision == "accepted" and flag.case_id:
+            # "It is a real problem" on derived amounts means: these amounts
+            # are not payable as they stand — the case is left out of the
+            # listing (named under not_included), never paid on a guess.
+            case = db.get(ClaimCase, flag.case_id)
+            if case is not None:
+                case.state = "excluded"
+                case.reason = (case.reason + "; excluded in review: derived amounts not confirmed")[:400]
         cases_mod.bump_revision(run)
         db.add(AuditEvent(run_id=run_id, actor="reviewer", action=f"flag_{decision}",
                           detail=f"[{flag.code}] {flag.reason[:200]} — note: {note or 'none'}"))
@@ -740,7 +788,9 @@ async def decide_claim_flag(run_id: str, flag_id: str, body: dict) -> dict:
         db.close()
 
 
-DISPOSITIONS = ("used", "duplicate", "irrelevant", "unreadable")
+from .investigator.contracts import IGNORABLE_ROLES, REVIEWER_DISPOSITIONS  # noqa: E402
+
+DISPOSITIONS = ("used", *REVIEWER_DISPOSITIONS)
 
 
 def _set_disposition(db, run_id: str, artifact_id: str, disposition: str, reason: str, actor: str) -> ClaimSourceArtifact:
@@ -782,6 +832,8 @@ def set_artifact_disposition(run_id: str, artifact_id: str, body: dict) -> dict:
             raise HTTPException(404, "No such claims run.")
         if run.status not in ("map_ready", "verifying", "ready"):
             raise HTTPException(400, f"Files can be settled once the map is proposed (the run is {run.status}).")
+        _case_routes_on()
+        _revision_check(run, body, required=True)
         art = _set_disposition(db, run_id, artifact_id, str(body.get("disposition", "")).strip(),
                                str(body.get("reason", "")).strip(), actor="reviewer")
         db.commit()
@@ -906,6 +958,21 @@ async def correct_claim_row(run_id: str, row_id: str, body: dict) -> dict:
         db.close()
 
 
+@router.put("/{run_id}/cases/{case_id}/category")
+def set_case_category(run_id: str, case_id: str, body: dict) -> dict:
+    """The case-keyed twin of the employee category route (H10)."""
+    _case_routes_on()
+    db = SessionLocal()
+    try:
+        case = db.get(ClaimCase, case_id)
+        if not case or case.run_id != run_id or not case.legacy_employee_id:
+            raise HTTPException(404, "No such case in this run.")
+        emp_id = case.legacy_employee_id
+    finally:
+        db.close()
+    return set_employee_category(run_id, emp_id, body)
+
+
 @router.put("/{run_id}/employees/{employee_id}/category")
 def set_employee_category(run_id: str, employee_id: str, body: dict) -> dict:
     """The reviewer sets the listing category (CATEGORY_UNCLEAR, or a
@@ -960,6 +1027,13 @@ def _row_dict(r: ClaimRow) -> dict:
             "matched_evidence_id": r.matched_evidence_id, "verdict": r.verdict}
 
 
+def _evidence_item_dict(e: ClaimEvidence, artifact_of: dict) -> dict:
+    return {"id": e.id, "artifact_id": artifact_of.get(e.file, ""), "case_id": e.case_id, "kind": e.kind,
+            "values": e.values, "confidence": e.confidence, "extraction_method": "page read (AI, twice for receipts)",
+            "citation": {"artifact_id": artifact_of.get(e.file, ""), "path": e.file, "page": e.page,
+                         "position": e.position}, "line_id": e.matched_row_id}
+
+
 def _evidence_dict(e: ClaimEvidence) -> dict:
     return {"id": e.id, "employee_id": e.employee_id, "case_id": e.case_id, "kind": e.kind, "file": e.file,
             "page": e.page, "position": e.position, "values": e.values,
@@ -997,9 +1071,16 @@ def _tallies(db, run_ids: list[str]) -> dict[str, dict]:
     return tally
 
 
+# The target state names (CLAIMS-AGENT-HARDENING.md, "State machine"): the
+# HTTP `stage` field speaks them while `status` keeps the delivered names
+# the screens poll on during the migration.
+STAGE_OF = {"mapping": "investigating", "map_ready": "group_ready"}
+
+
 def _summary(run: ClaimsRun, counts: dict) -> dict:
     n_map = sum(1 for e in (run.map or {}).get("employees", []) if e.get("is_employee"))
-    return {"id": run.id, "client": run.client, "status": run.status, "error": run.error,
+    return {"id": run.id, "client": run.client, "status": run.status, "stage": STAGE_OF.get(run.status, run.status),
+            "error": run.error,
             "progress": run.progress, "folder": run.folder_url or "zip upload",
             "employee_count": counts.get("employees") or n_map,
             "employees_done": counts.get("employees_done", 0),

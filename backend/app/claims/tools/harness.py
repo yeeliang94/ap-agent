@@ -133,9 +133,11 @@ class ToolHarness:
             note = f"{result.data.get('expression', '')} = {result.data.get('value', '')}"[:300]
         elif result.ok and tool == "compare_tables":
             note = f"op {args[0] if args else ''}"[:300]
+        result.call_id = f"t{len(self._executions) + 1:04d}"
         self._executions.append(ToolExecution(
-            id=f"t{len(self._executions) + 1:04d}", tool=tool, elapsed_ms=result.elapsed_ms,
-            input_hashes=[_hash(args)], output_hash=_hash(result.data) if result.ok else "",
+            id=result.call_id, tool=tool, elapsed_ms=result.elapsed_ms,
+            input_hashes=[_hash(args), *result.provenance.get("hashes", [])],
+            output_hash=_hash(result.data) if result.ok else "",
             truncated=result.truncated, error_code=result.error_code, note=note))
         return result
 
@@ -187,6 +189,7 @@ class ToolHarness:
                 return ToolResult.failure("NOT_FOUND", "no such artifact id in the manifest")
             if m.media_type != "workbook":
                 return ToolResult.failure("BAD_INPUT", f"{m.path} is a {m.media_type}, not a workbook")
+            self._bytes_read += m.size
             data = wb_mod.read_cells(self._path(m), sheet, cell_range)
             return ToolResult(data=data, provenance=self._prov(m),
                               citations=[Citation(artifact_id=m.id, path=m.path, sheet=sheet, cell=data["range"])])
@@ -218,6 +221,7 @@ class ToolHarness:
                 png, w, h = docs_mod.render_page(self._path(m), int(page))
             except IndexError:
                 return ToolResult.failure("BAD_INPUT", f"{m.path} has no page {page}")
+            self._bytes_read += len(png)
             handle = self._write_handle(png, ".png")
             return ToolResult(data={"handle": handle, "width": w, "height": h, "page": int(page)}, handle=handle,
                               provenance=self._prov(m), citations=[Citation(artifact_id=m.id, path=m.path, page=int(page))])
@@ -235,6 +239,7 @@ class ToolHarness:
                 png, w, h = docs_mod.crop_page(self._path(m), int(page), list(region))
             except IndexError:
                 return ToolResult.failure("BAD_INPUT", f"{m.path} has no page {page}")
+            self._bytes_read += len(png)
             handle = self._write_handle(png, ".png")
             return ToolResult(data={"handle": handle, "width": w, "height": h}, handle=handle, provenance=self._prov(m),
                               citations=[Citation(artifact_id=m.id, path=m.path, page=int(page), region=[int(v) for v in region])])
@@ -308,7 +313,8 @@ class ToolHarness:
             result = ToolResult(data={"recorded": len(self._proposals)})
         result.elapsed_ms = int((time.monotonic() - started) * 1000)
         result.provenance = {"artifact_ids": [], "hashes": []}
-        self._executions.append(ToolExecution(id=f"t{len(self._executions) + 1:04d}", tool="record_proposal",
+        result.call_id = f"t{len(self._executions) + 1:04d}"
+        self._executions.append(ToolExecution(id=result.call_id, tool="record_proposal",
                                               elapsed_ms=result.elapsed_ms, input_hashes=[_hash((kind, payload))],
                                               output_hash=_hash(result.data) if result.ok else "",
                                               error_code=result.error_code, note=(result.error or "")[:300]))

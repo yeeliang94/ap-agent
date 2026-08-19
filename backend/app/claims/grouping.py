@@ -21,11 +21,11 @@ from pathlib import Path
 
 from . import profile as profile_mod
 from . import survey as survey_mod
+from .investigator.contracts import IGNORABLE_ROLES
 from .models import ClaimCase, ClaimFlag, ClaimSourceArtifact, ClaimsRun
 
 _NAME_PREFIX = re.compile(r"^([A-Z][A-Za-z.'\-]+(?: [A-Z][A-Za-z.'\-]+){1,3})_")
 _LABELS = ("name", "employee", "claimant", "staff", "requestor", "requester")
-MATERIAL_TYPES = ("workbook", "pdf", "image")
 
 
 def _fold(text: str) -> str:
@@ -135,7 +135,7 @@ def roles_for_case(case: ClaimCase, artifacts: list[ClaimSourceArtifact], survey
             "receipt_files": [a.path for a in mine if a.media_type in ("pdf", "image")
                               and a.disposition in ("used", "unresolved")
                               and a.proposed_role in ("receipts", "unknown", "other")],
-            "ignored": [a.path for a in mine if a.proposed_role in ("approval", "report_copy", "listing", "roster", "policy")
+            "ignored": [a.path for a in mine if a.proposed_role in IGNORABLE_ROLES
                         or a.disposition in ("irrelevant", "duplicate")],
             "unplaced": [a.path for a in mine if a.disposition == "unresolved"]}
 
@@ -159,9 +159,9 @@ def refresh(s, run: ClaimsRun) -> dict:
             report_use[rf] = report_use.get(rf, 0) + 1
     shared = {a.artifact_id for a in artifacts if report_use.get(a.path, 0) > 1}
     for c in cases:
-        shared = [aid for aid in (c.artifact_ids or []) if aid != "" and any(
+        own_report = [aid for aid in (c.artifact_ids or []) if aid != "" and any(
             a.artifact_id == aid and a.media_type == "workbook" and a.path == (c.roles or {}).get("report_file") for a in artifacts)]
-        c.artifact_ids = sorted({*[a.artifact_id for a in artifacts if a.case_id == c.id], *shared})
+        c.artifact_ids = sorted({*[a.artifact_id for a in artifacts if a.case_id == c.id], *own_report})
         if c.state == "excluded":
             continue
         why = conflict_in(c, artifacts, signals, shared)
@@ -169,6 +169,11 @@ def refresh(s, run: ClaimsRun) -> dict:
             key = ("OWNERSHIP_CONFLICT", c.id)
             live.add(key)
             f = existing.get(key)
+            if c.claimant_state == "proposed":
+                # conflicting strong signals force Claimant = unknown: the
+                # proposed name stays visible as a suggestion, never as a state
+                c.claimant_state = "unknown"
+                c.claimant_basis = (c.claimant_basis + "; set to unknown: the files carry conflicting identity signals")[:400]
             reason = (f"Case {c.label or c.id}: {why}. Two people could own this — split the case, move the "
                       "odd file out, or set the claimant with a note.")
             if f is None:
@@ -210,29 +215,44 @@ def gate(s, run: ClaimsRun) -> dict:
     for f in s.query(ClaimFlag).filter(ClaimFlag.run_id == run.id, ClaimFlag.code == "OWNERSHIP_CONFLICT",
                                         ClaimFlag.status == "open"):
         problems.append(f.reason.split(". ")[0])
-    material_unresolved = [a for a in artifacts if a.disposition == "unresolved" and a.media_type in MATERIAL_TYPES]
+    # Every unresolved file shuts the gate: "potentially material" is not a
+    # judgment code makes from a file type it could not read (an approval
+    # e-mail is a .msg; an instruction can sit in a .txt).
+    material_unresolved = [a for a in artifacts if a.disposition == "unresolved"]
+    by_case: dict[str, list[str]] = {}
     for a in material_unresolved[:20]:
-        problems.append(f"{a.path}: a {a.media_type} nobody has placed — move it into a case, or mark it "
+        problems.append(f"{a.path}: a file ({a.media_type}) nobody has placed — move it into a case, or mark it "
                         "irrelevant / duplicate / unreadable")
+        if a.case_id:
+            by_case.setdefault(a.case_id, []).append(problems[-1])
     to_verify = [c for c in cases if c.state != "excluded"]
+    conflicts = 0
+    for f in s.query(ClaimFlag).filter(ClaimFlag.run_id == run.id, ClaimFlag.code == "OWNERSHIP_CONFLICT",
+                                        ClaimFlag.status == "open"):
+        conflicts += 1
+        by_case.setdefault(f.case_id, []).append(f.reason.split(". ")[0])
     for c in to_verify:
         roles = c.roles or {}
+        mine: list[str] = []
         if not roles.get("no_report") and not roles.get("report_file"):
-            problems.append(f"{c.label}: choose the claim summary workbook and its sheet, or mark 'no summary'")
+            mine.append(f"{c.label}: choose the claim summary workbook and its sheet, or mark 'no summary'")
         elif not roles.get("no_report") and not roles.get("report_tab"):
-            problems.append(f"{c.label}: choose the sheet of {Path(roles['report_file']).name} that holds the lines")
+            mine.append(f"{c.label}: choose the sheet of {Path(roles['report_file']).name} that holds the lines")
         if roles.get("no_report") and not roles.get("receipt_files"):
-            problems.append(f"{c.label}: no summary and no receipt files — nothing to verify; move files in or exclude it")
+            mine.append(f"{c.label}: no summary and no receipt files — nothing to verify; move files in or exclude it")
+        problems += mine
+        if mine:
+            by_case.setdefault(c.id, []).extend(mine)
     from . import source as source_mod
 
     if len(to_verify) > source_mod.MAX_CASES_PER_RUN:
         problems.append(f"{len(to_verify)} cases to verify — more than the {source_mod.MAX_CASES_PER_RUN} one run may hold")
-    return {"problems": problems,
+    return {"problems": problems, "by_case": by_case,
             "counts": {"artifacts": len(artifacts),
                        "dispositioned": sum(1 for a in artifacts if a.disposition != "unresolved"),
                        "unresolved": sum(1 for a in artifacts if a.disposition == "unresolved"),
                        "material_unresolved": len(material_unresolved),
                        "cases": len(cases), "to_verify": len(to_verify),
                        "claimants_confirmed": sum(1 for c in to_verify if c.claimant_state == "confirmed"),
-                       "conflicts": sum(1 for p in problems if "Two people" in p or "different" in p)},
+                       "conflicts": conflicts},
             "ok": not problems}

@@ -21,7 +21,7 @@ from .. import config
 
 log = logging.getLogger("claims.retention")
 
-TOOL_OUTPUT_DIR = "tool_output"
+from .tools.harness import OUTPUT_DIR as TOOL_OUTPUT_DIR  # noqa: E402 — one name for the scratch area
 
 
 def prune_tool_output(run_id: str) -> int:

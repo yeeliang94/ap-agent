@@ -22,7 +22,7 @@ from app.claims.models import ClaimEmployee, ClaimEvidence, ClaimFlag, ClaimRow,
 
 from . import claims_scripted as scripted
 from .test_claims_baseline import client, db  # noqa: F401
-from .test_claims_grouping import _flat_dump_run
+from .test_claims_grouping import _flat_dump_run, _settle_stray
 
 needs_sample = pytest.mark.skipif(not scripted.GEN.is_dir(), reason="run samples/generate_claims_sample.py first")
 
@@ -37,6 +37,8 @@ async def test_evidence_only_lines_are_proposals_until_confirmed(db, monkeypatch
     assert got["investigation"]["plan"]["strategy"] == "evidence_only"
     case = got["cases"][0]
     assert case["roles"]["no_report"] and case["claimant"]["state"] == "proposed"
+    _settle_stray(run_id)
+    got = client.get(f"/api/claims-runs/{run_id}").json()
     r = client.post(f"/api/claims-runs/{run_id}/confirm-grouping", json={"expected_revision": got["revision"]})
     assert r.status_code == 200, r.text
     await runner.start_verification(run_id)

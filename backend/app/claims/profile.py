@@ -187,6 +187,7 @@ CATALOGUE: dict[str, dict] = {
     "ARTIFACT_UNRESOLVED": {
         "title": "A file nobody has placed", "kind": "structure", "blocks": "open",
         "toggle": False, "identity": ("artifact_id",),
+        "cites": "the file itself ({file, page 1})",
         "meaning": "A file in the batch has no disposition yet: it was not read as a report or receipts, "
                    "and no one has said it is irrelevant, unreadable or a duplicate. Nothing uploaded "
                    "vanishes silently, so it blocks the output until settled.",
@@ -195,6 +196,7 @@ CATALOGUE: dict[str, dict] = {
     "CLAIMANT_UNKNOWN": {
         "title": "Nobody knows whose claim this is", "kind": "structure", "blocks": "open",
         "toggle": False, "identity": ("case_id",),
+        "cites": "the case ({what: case id}); the case's files are listed on the Map & Group screen",
         "meaning": "The case has lines or evidence but no confirmed claimant: the files carry no name or "
                    "code, or only weak hints. A payment cannot go to a guessed person.",
         "what_to_do": "Set the claimant on the case (from a roster, the approval e-mail, or by asking), "
@@ -202,6 +204,7 @@ CATALOGUE: dict[str, dict] = {
     "OWNERSHIP_CONFLICT": {
         "title": "Two people could own this", "kind": "structure", "blocks": "open",
         "toggle": False, "identity": ("case_id",),
+        "cites": "the case ({what: case id}) and the first conflicting file ({file})",
         "meaning": "Strong identity signals in the case's files point at different people (two names, or "
                    "a name and a code that belong to someone else).",
         "what_to_do": "Look at the cited files; split the case, move the evidence, or set the claimant "
@@ -209,12 +212,14 @@ CATALOGUE: dict[str, dict] = {
     "UNASSIGNED_EVIDENCE": {
         "title": "Evidence that belongs to no case", "kind": "note", "blocks": "info",
         "identity": ("evidence_id", "artifact_id"),
+        "cites": "the evidence page ({file, page, position})",
         "meaning": "A receipt or file was read but could not be placed with any case on a sound basis. "
                    "It is listed so it is not lost; nothing is paid on it.",
         "what_to_do": "If it belongs to someone, move it into their case at the map; otherwise leave it."},
     "CLAIM_AMOUNT_UNCONFIRMED": {
         "title": "Amounts taken from receipts, not from a claim", "kind": "money", "blocks": "open",
         "toggle": False, "identity": ("case_id",),
+        "cites": "the first derived line's receipt page ({file, page, position}); every line is listed in the reason",
         "meaning": "The case's lines were built from receipts because no claim summary states what is claimed. "
                    "A receipt total is a proposal, not an approved amount — one confirmation per case, with "
                    "every derived line listed.",
@@ -223,6 +228,7 @@ CATALOGUE: dict[str, dict] = {
     "PURPOSE_UNKNOWN": {
         "title": "No stated purpose", "kind": "note", "blocks": "info",
         "identity": ("case_id",),
+        "cites": "the case ({what: case label})",
         "meaning": "No file of this case states the purpose of the expenses; the lines were built from evidence. "
                    "Recorded so the gap is visible — the category decision (CATEGORY_UNCLEAR when it could not "
                    "be settled) is what blocks.",
@@ -230,12 +236,14 @@ CATALOGUE: dict[str, dict] = {
     "NO_SUMMARY": {
         "title": "No claim summary — lines derived from evidence", "kind": "structure", "blocks": "open",
         "identity": ("case_id",),
+        "cites": "the first receipt page ({file, page, position}), or the case ({what}) when none",
         "meaning": "No expense report or claim list was found for this case, so the lines to pay were built "
                    "from the receipts and maps found (the delivered NO_REPORT, for any input shape).",
         "what_to_do": "Confirm the derived list is what should be paid; acknowledge, or fix values."},
     "TOOL_UNAVAILABLE": {
         "title": "A tool this investigation needed is switched off", "kind": "structure", "blocks": "open",
         "toggle": False, "identity": ("what",),
+        "cites": "the tool and call ({what: tool:call id})",
         "meaning": "The investigation genuinely needed a capability that is not enabled here (for example "
                    "the isolated Python sandbox), so part of it could not be done.",
         "what_to_do": "Do that part by hand and acknowledge, or enable the tool where policy allows and "
@@ -243,12 +251,14 @@ CATALOGUE: dict[str, dict] = {
     "TOOL_FAILED": {
         "title": "A read failed during the investigation", "kind": "structure", "blocks": "open",
         "toggle": False, "identity": ("what",),
+        "cites": "the tool and call ({what: tool:call id}), or 'budget'",
         "meaning": "A tool call (a workbook, document, search or calculation) failed or was cut short, so "
                    "the investigation may be incomplete for the named file.",
         "what_to_do": "Open the file named; if it is fine, re-verify; if not, mark it unreadable."},
     "SANDBOX_LIMIT": {
         "title": "A calculation was stopped at its limit", "kind": "structure", "blocks": "open",
         "toggle": False, "identity": ("what",),
+        "cites": "the sandbox call ({what: run_python:call id})",
         "meaning": "Model-written Python hit a time, memory or output limit and was killed; nothing it "
                    "produced was used.",
         "what_to_do": "Nothing to trust here; the rest of the run stands. Acknowledge, or re-run."},

@@ -1,4 +1,4 @@
-import { ClaimCase, ClaimEmployee, ClaimsRunDetail } from "../../api";
+import { ClaimCase, ClaimEmployee, ClaimsRunDetail, retryCase, retryClaimEmployee } from "../../api";
 
 // The review surface is keyed by Claim Case (hardening H10). A run from
 // before the case model — or one served with CLAIMS_CASE_MODEL off — has
@@ -62,4 +62,10 @@ export function reviewUnits(run: ClaimsRunDetail): ReviewUnit[] {
 /** The unit a flag / row / evidence item belongs to ("" = whole batch). */
 export function unitIdOf(run: ClaimsRunDetail, x: { case_id?: string; employee_id: string }): string {
   return usesCases(run) ? (x.case_id ?? "") : x.employee_id;
+}
+
+/** Re-run one unit's worker: the case route when the run speaks cases,
+ *  the delivered employee route otherwise. */
+export function retryUnit(run: ClaimsRunDetail, u: ReviewUnit): Promise<void> {
+  return u.case_id ? retryCase(run.id, u.case_id, run.revision) : retryClaimEmployee(run.id, u.employee_id, run.revision);
 }

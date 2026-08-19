@@ -76,6 +76,9 @@ export default function GroupView({
     return m;
   }, [survey, artifacts]);
   const readOnly = run.status !== "map_ready";
+  // Regrouping (create/merge/split/move/role) is a server switch; the gate,
+  // claimant, report sheet and dispositions are always available.
+  const canRegroup = !readOnly && grouping?.actions_enabled !== false;
   const byCase = useMemo(() => {
     const m = new Map<string, ClaimArtifact[]>();
     for (const a of artifacts) m.set(a.case_id, [...(m.get(a.case_id) ?? []), a]);
@@ -125,7 +128,7 @@ export default function GroupView({
   function settle(a: ClaimArtifact, disposition: Disposition) {
     const reason = window.prompt(`Why is ${fileName(a.path)} ${DISPOSITION_LABEL[disposition]}? (goes in the audit trail)`);
     if (reason === null) return;
-    act(() => setArtifactDisposition(run.id, a.id, disposition, reason));
+    act(() => setArtifactDisposition(run.id, run.revision, a.id, disposition, reason));
   }
 
   function splitSelected(c: ClaimCase) {
@@ -146,6 +149,13 @@ export default function GroupView({
           {inv.plan.rounds ? ` · settled on round ${inv.plan.rounds}` : ""}
           {inv.plan.steps?.length ? ` · steps: ${inv.plan.steps.slice(0, 6).join(" → ")}` : ""}
           {inv.plan.questions?.length ? ` · open questions: ${inv.plan.questions.join("; ")}` : ""}
+          {run.tool_summary && Object.keys(run.tool_summary).length > 0
+            ? ` · tools: ${Object.values(run.tool_summary).reduce((n, t) => n + t.calls, 0)} call(s)` +
+              (Object.values(run.tool_summary).some((t) => t.failed)
+                ? `, ${Object.values(run.tool_summary).reduce((n, t) => n + t.failed, 0)} failed — see the TOOL_FAILED flags`
+                : "")
+            : ""}
+          {!canRegroup && !readOnly ? " · regrouping actions are switched off on this server (files can still be settled, claimants set, the sheet chosen)" : ""}
         </p>
       )}
       {run.map_warnings.length > 0 && (
@@ -201,7 +211,7 @@ export default function GroupView({
               const conflict = openConflicts.find((f) => f.case_id === c.id);
               const d = draftOf(c);
               const open = !!expanded[c.id];
-              const problems = (grouping?.problems ?? []).filter((p) => p.startsWith(c.label));
+              const problems = grouping?.by_case?.[c.id] ?? [];
               return (
                 <RowGroup key={c.id}>
                   <tr className={conflict || unresolved.length || problems.length ? "attention" : c.state === "excluded" ? "detail" : ""}>
@@ -280,7 +290,7 @@ export default function GroupView({
                         onChange={(ev) => act(() => updateCase(run.id, run.revision, c.id, { state: ev.target.checked ? "excluded" : "proposed" }))} />
                     </td>
                     <td>
-                      {!readOnly && cases.length > 1 && (
+                      {canRegroup && cases.length > 1 && (
                         <select aria-label={`merge ${c.label} into`} value="" disabled={busy}
                           onChange={(ev) => ev.target.value && window.confirm(`Merge ${c.label} into ${cases.find((x) => x.id === ev.target.value)?.label}?`) &&
                             act(() => mergeCase(run.id, run.revision, c.id, ev.target.value))}>
@@ -298,9 +308,9 @@ export default function GroupView({
                       <td colSpan={9}>
                         <p className="basis">Why this case: {c.reason || c.grouping_basis}
                           {c.claimant.basis ? ` · claimant: ${c.claimant.basis}` : ""}</p>
-                        <FileTable files={files} run={run} cases={cases} readOnly={readOnly} busy={busy}
+                        <FileTable files={files} run={run} cases={cases} readOnly={readOnly} canRegroup={canRegroup} busy={busy}
                           selected={selected} setSelected={setSelected} act={act} settle={settle} tabsOf={tabsOf} />
-                        {!readOnly && files.length > 1 && (
+                        {canRegroup && files.length > 1 && (
                           <div className="actions">
                             <button className="btn" disabled={busy || !files.some((a) => selected[a.id])} onClick={() => splitSelected(c)}>
                               Split selected files into a new case
@@ -333,9 +343,9 @@ export default function GroupView({
         <p className="sub">Every file sits inside a case.</p>
       ) : (
         <div className="card" style={{ padding: 0, overflowX: "auto" }}>
-          <FileTable files={pool} run={run} cases={cases} readOnly={readOnly} busy={busy}
+          <FileTable files={pool} run={run} cases={cases} readOnly={readOnly} canRegroup={canRegroup} busy={busy}
             selected={selected} setSelected={setSelected} act={act} settle={settle} tabsOf={tabsOf} pool />
-          {!readOnly && (
+          {canRegroup && (
             <div className="actions" style={{ padding: 10 }}>
               <button className="btn" disabled={busy || !pool.some((a) => selected[a.id])}
                 onClick={() => {
@@ -374,12 +384,13 @@ export default function GroupView({
 }
 
 function FileTable({
-  files, run, cases, readOnly, busy, selected, setSelected, act, settle, tabsOf, pool,
+  files, run, cases, readOnly, canRegroup, busy, selected, setSelected, act, settle, tabsOf, pool,
 }: {
   files: ClaimArtifact[];
   run: ClaimsRunDetail;
   cases: ClaimCase[];
   readOnly: boolean;
+  canRegroup: boolean;
   busy: boolean;
   selected: Record<string, boolean>;
   setSelected: (s: Record<string, boolean>) => void;
@@ -394,7 +405,7 @@ function FileTable({
         {files.map((a) => (
           <tr key={a.id} className={a.disposition === "unresolved" ? "attention" : ""}>
             <td>
-              {!readOnly && (
+              {canRegroup && (
                 <input type="checkbox" aria-label={`select ${a.path}`} checked={!!selected[a.id]}
                   onChange={(ev) => setSelected({ ...selected, [a.id]: ev.target.checked })} />
               )}
@@ -404,9 +415,14 @@ function FileTable({
               {a.media_type}
               {a.pages ? `, ${a.pages} page(s)` : ""}
               {a.sheets?.length ? `, sheets: ${a.sheets.join(", ")}` : tabsOf.get(a.path)?.length ? `, sheets: ${tabsOf.get(a.path)!.join(", ")}` : ""}
+              {a.signals && a.signals.filter((s) => s.strength === "strong").length > 0 && (
+                <span className="sub" title="identity signals found in this file, each with where it was seen">
+                  {a.signals.filter((s) => s.strength === "strong").map((s) => `${s.kind.replace("_", " ")}: ${s.value}`).join(" · ")}
+                </span>
+              )}
             </td>
             <td>
-              <select aria-label={`role of ${a.path}`} value={a.proposed_role} disabled={readOnly || busy}
+              <select aria-label={`role of ${a.path}`} value={a.proposed_role} disabled={readOnly || !canRegroup || busy}
                 onChange={(ev) => act(() => setArtifactRole(run.id, run.revision, a.id, ev.target.value as ArtifactRole, false))}>
                 {(Object.keys(ROLE_LABEL) as ArtifactRole[]).map((r) => (
                   <option key={r} value={r}>{ROLE_LABEL[r]}</option>
@@ -423,6 +439,7 @@ function FileTable({
             <td>
               {!readOnly && (
                 <>
+                  {canRegroup && (
                   <select aria-label={`move ${a.path}`} value="" disabled={busy}
                     onChange={(ev) => ev.target.value !== "" && act(() => moveArtifact(run.id, run.revision, a.id, ev.target.value === "__out" ? "" : ev.target.value))}>
                     <option value="">— move to —</option>
@@ -431,6 +448,7 @@ function FileTable({
                     ))}
                     {!pool && <option value="__out">out of every case</option>}
                   </select>
+                  )}
                   {a.disposition !== "used" && (
                     <>
                       <button className="btn" disabled={busy} onClick={() => settle(a, "irrelevant")}>irrelevant</button>

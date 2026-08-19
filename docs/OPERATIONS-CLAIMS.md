@@ -4,10 +4,19 @@
 
 | Switch | Default | Off means |
 |---|---|---|
-| `CLAIMS_CASE_MODEL` | on | case fields / case routes hidden from HTTP; the employee fields stay authoritative for the UI; storage unchanged |
+| `CLAIMS_CASE_MODEL` | on | case fields hidden from the run detail and the case routes (`/cases/*`, `/artifacts/*`, `/confirm-grouping`) answer 404; the employee fields and the delivered MapView stay authoritative; storage unchanged |
 | `CLAIMS_AGENTIC_INVESTIGATION` | off | new runs use the delivered structured-folder mapper; old runs are never reinterpreted |
-| `CLAIMS_FULL_DUMP_GROUPING` | off | informational for now: Map & Group renders whenever the server sends cases; a flat folder is still inventoried and grouped by the investigator when the agentic switch is on |
+| `CLAIMS_SHADOW_INVESTIGATION` | off | with the agentic switch off, the investigator also runs on each new run; its result is compared and recorded (`SHADOW_RESULT`, `shadow_investigation`), never used |
+| `CLAIMS_FULL_DUMP_GROUPING` | off | the regrouping actions at Map & Group (create / merge / split / move / role) answer 400 and are hidden; the gate, the claim-summary sheet choice, claimants and file dispositions stay — a flat folder is inventoried and, with the agentic switch on, grouped by the investigator, but the reviewer cannot regroup it on screen |
 | `CLAIMS_PYTHON_SANDBOX` + `CLAIMS_SANDBOX_RUNNER` + `CLAIMS_SANDBOX_ISOLATED` | off | `run_python` absent from the allowlist (`docs/SANDBOX.md`) |
+
+Two reviewer-set profile values deliberately reach the output and later
+runs: `listing_columns` may pin a literal into a column (the literal is a
+reviewer-set Explicit Client Profile value, shown under "pinned columns" on
+the listing header record — that is the "confirmed value" control 10 asks
+for), and `PUT /artifacts/{id}/role` with `remember=true` adds a file-name →
+role pattern to the profile exactly as the delivered map's "remember" did
+(a supplied filename rule, never learned from AI). Neither is set by the AI.
 
 Migrations run at every start, unconditionally and additively (`claims_schema`
 records what was applied). No switch skips or reverses one.

@@ -59,6 +59,15 @@ async def run_client_a(db, monkeypatch, instructions: str = "") -> str:
     await runner.process_run(run_id)
     run = db().get(ClaimsRun, run_id)
     assert run.status == "map_ready", run.error
+    # The gate (H3/H6): a file nobody placed keeps Confirm shut until the
+    # reviewer says what it is — the stray notes.txt is settled here.
+    got = client.get(f"/api/claims-runs/{run_id}").json()
+    for a in got["artifacts"]:
+        if a["disposition"] == "unresolved":
+            r = client.post(f"/api/claims-runs/{run_id}/artifacts/{a['id']}/disposition",
+                            json={"disposition": "irrelevant", "reason": "a text note, not a claim document",
+                                  "expected_revision": client.get(f"/api/claims-runs/{run_id}").json()["revision"]})
+            assert r.status_code == 200, r.text
     r = client.post(f"/api/claims-runs/{run_id}/confirm-map", json={"map": run.map})
     assert r.status_code == 200, r.text
     await runner.start_verification(run_id)
@@ -115,20 +124,17 @@ async def test_structured_folder_baseline_is_pinned(db, monkeypatch):
     assert all(r["kind"] == "derived" for r in got["rows"] if r["employee_id"] == arjun["id"])
 
     # The human gate: nothing out while a flag is open. The stray
-    # notes.txt is a file nobody placed (H3): it blocks until the reviewer
-    # says what it is — a dismissal is not enough.
+    # notes.txt was settled at the map (the gate would not confirm
+    # otherwise), so no ARTIFACT_UNRESOLVED remains; its disposition is
+    # the reviewer's and on record.
     assert got["outputs"] == {}
-    stray = [f for f in got["flags"] if f["code"] == "ARTIFACT_UNRESOLVED"]
-    assert len(stray) == 1 and stray[0]["cite"]["file"].endswith("notes.txt") and stray[0]["employee_id"] == ""
-    r = client.post(f"/api/claims-runs/{run_id}/flags/{stray[0]['id']}/decide",
-                    json={"decision": "dismissed", "note": "just notes"})
-    assert r.status_code == 400 and "disposition" in r.text
+    assert not [f for f in got["flags"] if f["code"] == "ARTIFACT_UNRESOLVED"]
+    stray = next(a for a in got["artifacts"] if a["path"].endswith("notes.txt"))
+    assert stray["disposition"] == "irrelevant" and stray["disposition_by"] == "reviewer"
     for f in got["flags"]:
         if f["status"] == "open":
-            body = {"decision": "dismissed", "note": "baseline pin"}
-            if f["code"] == "ARTIFACT_UNRESOLVED":
-                body["disposition"] = "irrelevant"
-            r = client.post(f"/api/claims-runs/{run_id}/flags/{f['id']}/decide", json=body)
+            r = client.post(f"/api/claims-runs/{run_id}/flags/{f['id']}/decide",
+                            json={"decision": "dismissed", "note": "baseline pin"})
             assert r.status_code == 200, r.text
     got = client.get(f"/api/claims-runs/{run_id}").json()
     out = got["outputs"]

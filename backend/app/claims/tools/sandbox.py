@@ -219,7 +219,13 @@ class RunnerSandbox:
             shutil.rmtree(work, ignore_errors=True)
 
     def _versions(self) -> dict[str, str]:
-        return {"python": sys.version.split()[0], "runner": self.runner[:80]}
+        out = {"python": sys.version.split()[0], "runner": self.runner[:80]}
+        for lib in ("openpyxl", "pymupdf", "PIL", "pandas"):
+            try:
+                out[lib] = __import__(lib).__version__
+            except Exception:
+                pass
+        return out
 
 
 def _split(cmd: str) -> list[str]:

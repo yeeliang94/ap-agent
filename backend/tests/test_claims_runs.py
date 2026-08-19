@@ -338,9 +338,13 @@ async def test_confirm_map_records_changes_and_remembers(db, monkeypatch):
     run = db().get(ClaimsRun, run_id)
     edited = json.loads(json.dumps(run.map))
     edited["employees"][0]["name"] = "Aegene Ong (edited)"
-    for fr in edited["employees"][0]["files"]:
-        if fr["path"].endswith("notes.txt") or fr["path"].endswith("_Approval.pdf"):
-            fr["role"] = "ignore"
+    # Since H3/H6 the gate refuses to confirm while a file nobody placed
+    # remains: the reviewer settles the stray notes.txt (here: ignore) as
+    # part of the map, the same as the approval.
+    for e in edited["employees"]:
+        for fr in e["files"]:
+            if fr["path"].endswith("notes.txt") or (e is edited["employees"][0] and fr["path"].endswith("_Approval.pdf")):
+                fr["role"] = "ignore"
     r = client.post(f"/api/claims-runs/{run_id}/confirm-map",
                     json={"map": edited, "remember": [{"pattern": "*_Approval.pdf", "role": "ignore"}]})
     assert r.status_code == 200, r.text

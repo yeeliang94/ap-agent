@@ -307,4 +307,4 @@ async def test_client_a_through_the_agentic_path_matches_the_baseline(db, monkey
     nr = [f for f in got["flags"] if f["employee_id"] == aeg["id"] and f["code"] == "NO_RECEIPT" and f["status"] == "open"]
     assert len(nr) == 1 and "RM 10.00 more" in nr[0]["reason"]
     assert aeg["report_total"] == "258.70"
-    assert len([f for f in got["flags"] if f["code"] == "ARTIFACT_UNRESOLVED"]) == 1
+    assert next(a for a in got["artifacts"] if a["path"].endswith("notes.txt"))["disposition"] == "irrelevant"

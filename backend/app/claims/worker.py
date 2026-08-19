@@ -441,7 +441,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
             if tab in wb.sheetnames:
                 try:
                     r_rows, header, r_notes = await report_reader.read_report(
-                        wb[tab], emp.name, emp.er_code, usage)
+                        wb[tab], emp.name, emp.er_code, usage, context=context)
                     notes += r_notes
                     for r in r_rows:
                         rows.append({"kind": "expense", "sheet": tab, "row": r["row"], "values": r})
@@ -533,18 +533,22 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
                                               + f"; {len(receipts)} row(s) were built from the receipts found. Confirm "
                                               "the derived list is what should be paid.",
                                               "universal rule: receipts but no summary → lines from receipts, "
-                                              "flagged for a person", {}))
+                                              "flagged for a person",
+                                              checks_mod._ev_cite(receipts[0]) if receipts else {"what": emp.folder}))
         # A receipt total is a PROPOSED amount, not an approved claim (H7):
         # one confirmation per case, listing every derived line.
         if receipts:
-            lines = "; ".join(f"{r.get('date') or 'no date'} {r.get('vendor') or '?'} {r['currency']} {r['amount']}"
-                              for r in receipts[:12]) + (" …" if len(receipts) > 12 else "")
+            # EVERY derived line is listed: a bulk confirmation is only
+            # offered when every line is visible (hardening default 5).
+            lines = "; ".join(f"{r.get('date') or 'no date'} {r.get('vendor') or '?'} {r['currency']} {r['amount']} "
+                              f"({r['file'].rsplit('/', 1)[-1]} p.{r['page']}{', ' + r['position'] if r.get('position') else ''})"
+                              for r in receipts)
             flags.append(checks_mod._flag(
                 "CLAIM_AMOUNT_UNCONFIRMED",
                 f"{len(receipts)} line(s) were built from receipts, not from a claim: {lines}. Each amount is the "
                 "receipt's total — a proposal until a person confirms it is what should be paid.",
                 "universal rule: an evidence-derived amount needs a reviewer's confirmation before it is payable",
-                {}))
+                checks_mod._ev_cite(receipts[0])))
         else:
             flags.append(checks_mod._flag(
                 "CLAIM_AMOUNT_UNCONFIRMED",
@@ -652,7 +656,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
                                 + (f"The category was settled from the lines alone ({emp.category}); check it fits."
                                    if emp.category else "The category could not be settled (see CATEGORY_UNCLEAR).")),
                         basis="universal rule: a required output fact that is absent is said, not invented",
-                        cite={}, status="info"))
+                        cite={"what": emp.folder}, status="info"))
 
     # ---- summary -----------------------------------------------------------------------
     # report_total is the figure the REPORT states (its total cell) — the

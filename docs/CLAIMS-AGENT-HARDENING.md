@@ -944,8 +944,11 @@ routed, and shown*, never what is stored.
   unchanged.
 - `CLAIMS_AGENTIC_INVESTIGATION` (H5): off = new runs go through the legacy
   structured-folder adapter; old runs are never reinterpreted.
-- `CLAIMS_FULL_DUMP_GROUPING` (H6): off = Map & Group actions are disabled and a
-  flat folder behaves as it does today.
+- `CLAIMS_FULL_DUMP_GROUPING` (H6): off = the Map & Group regrouping actions
+  (create / merge / split / move / role) are disabled; the gate, claimants,
+  sheet choice and dispositions remain. Implemented 2026-08-19.
+- `CLAIMS_SHADOW_INVESTIGATION` (H12, added): the investigator runs beside the
+  mapper, compared and recorded, never used.
 - `CLAIMS_PYTHON_SANDBOX` (H8): off = `run_python` is absent from the tool
   allowlist; `TOOL_UNAVAILABLE` where an investigation genuinely needs it.
 

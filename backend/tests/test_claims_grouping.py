@@ -74,6 +74,17 @@ def test_roles_for_case_from_artifacts():
     assert r3["report_file"] == "r.xlsx" and r3["report_tab"] is None
 
 
+def _settle_stray(run_id: str) -> None:
+    """Every unresolved file shuts the gate: mark the strays irrelevant."""
+    got = client.get(f"/api/claims-runs/{run_id}").json()
+    for a in got["artifacts"]:
+        if a["disposition"] == "unresolved":
+            r = client.post(f"/api/claims-runs/{run_id}/artifacts/{a['id']}/disposition",
+                            json={"disposition": "irrelevant", "reason": "stray", "expected_revision": got["revision"]})
+            assert r.status_code == 200, r.text
+            got = client.get(f"/api/claims-runs/{run_id}").json()
+
+
 async def _flat_dump_run(db, monkeypatch, claimants=True, extra=None) -> str:
     monkeypatch.setattr(config, "CLAIMS_AGENTIC_INVESTIGATION", True)
     monkeypatch.setattr(config, "CLAIMS_FULL_DUMP_GROUPING", True)
@@ -121,7 +132,8 @@ async def test_map_and_group_actions_and_the_gate(db, monkeypatch):
     assert set(cases) == {"Aegene Ong", "Nick Goh"}
     assert all(c["claimant"]["state"] == "proposed" and c["state"] == "proposed" for c in cases.values())
     g = got["grouping"]
-    assert g["counts"]["artifacts"] == 10 and g["counts"]["unresolved"] == 1 and g["ok"]  # readme.txt is not material
+    assert g["counts"]["artifacts"] == 10 and g["counts"]["unresolved"] == 1 and not g["ok"]  # readme.txt shuts the gate too
+    assert any("readme.txt" in p for p in g["problems"])
     rev = got["revision"]
     stray = next(a for a in got["artifacts"] if a["path"] == "readme.txt")
     aeg = cases["Aegene Ong"]
@@ -217,6 +229,8 @@ async def test_no_identity_anywhere_gives_useful_work_and_no_output(db, monkeypa
     assert all(c["claimant"]["state"] == "unknown" for c in got["cases"])
     unknown = [f for f in got["flags"] if f["code"] == "CLAIMANT_UNKNOWN" and f["status"] == "open"]
     assert len(unknown) == 2 and all(f["case_id"] for f in unknown)
+    _settle_stray(run_id)
+    got = client.get(f"/api/claims-runs/{run_id}").json()
     r = client.post(f"/api/claims-runs/{run_id}/confirm-grouping", json={"expected_revision": got["revision"]})
     assert r.status_code == 200, r.text  # useful work is allowed
     await runner.start_verification(run_id)
@@ -253,6 +267,10 @@ async def test_conflict_blocks_confirmation_until_split(db, monkeypatch):
     nick = next(c for c in got["cases"] if c["label"] == "Nick Goh")
     r = client.post(f"/api/claims-runs/{run_id}/artifacts/{nick_receipt['id']}/move",
                     json={"case_id": nick["id"], "expected_revision": got["revision"]})
-    assert r.json()["grouping"]["ok"]
+    assert not any("different names" in p for p in r.json()["grouping"]["problems"])
     got = client.get(f"/api/claims-runs/{run_id}").json()
     assert not [f for f in got["flags"] if f["code"] == "OWNERSHIP_CONFLICT" and f["status"] == "open"]
+    # The conflict forced the claimant to unknown; the name stays as a suggestion for the reviewer.
+    aeg = next(c for c in got["cases"] if c["label"] == "Aegene Ong")
+    assert aeg["claimant"]["state"] == "unknown" and aeg["claimant"]["name"] == "Aegene Ong"
+    assert "conflicting identity signals" in aeg["claimant"]["basis"]

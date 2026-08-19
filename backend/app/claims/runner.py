@@ -33,8 +33,7 @@ log = logging.getLogger("claims.runner")
 
 # The reviewer's standing objective for every investigation; the run's
 # instructions are added to it, never replace it.
-OBJECTIVE = ("Check the expense records and all supporting evidence, group what belongs "
-             "together, reconcile every line and total, and show anything that does not agree.")
+from .investigator.contracts import DEFAULT_OBJECTIVE as OBJECTIVE  # noqa: E402
 
 
 async def _shadow_investigation(db, run: ClaimsRun, request, primary) -> None:
@@ -230,6 +229,10 @@ async def start_verification(run_id: str) -> None:
 
 
 def _fail(db, run_id: str, error: str, code: str) -> None:
+    # A failing run stops its investigation's outstanding tool calls (H11).
+    from .investigator import investigator as agentic
+
+    agentic.cancel_run(run_id)
     run = db.get(ClaimsRun, run_id)
     if run:
         _set(db, run, status="failed", error=error[:1000])

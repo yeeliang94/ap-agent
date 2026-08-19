@@ -18,12 +18,12 @@ Instructions reach the map AI as they always did.
 """
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 from .. import survey as survey_mod
 from .contracts import (Citation, ClaimCase, Claimant, EvidenceAssignment, InvestigationPlan,
-                        InvestigationRequest, InvestigationResult, ManifestEntry, SourceArtifact)
+                        InvestigationRequest, InvestigationResult, ManifestEntry, SourceArtifact,
+                        assignment_id_for, case_id_for)
 
 ADAPTER = "legacy"
 
@@ -40,12 +40,6 @@ def _judge_model() -> str:
     from ... import config
 
     return config.JUDGE_MODEL
-
-
-def case_id_for(run_id: str, label: str) -> str:
-    """Deterministic per run and folder, so a re-run of the map (or a
-    retry) does not mint a second id for the same case."""
-    return "c" + hashlib.sha256(f"{run_id}\0{label}".encode()).hexdigest()[:10]
 
 
 async def investigate(request: InvestigationRequest, tools=None) -> InvestigationResult:
@@ -132,7 +126,7 @@ def from_map(request: InvestigationRequest, claim_map: dict, warnings: list[str]
             if m is None or f.get("role") not in ("report", "receipts"):
                 continue
             assignments.append(EvidenceAssignment(
-                id="s" + hashlib.sha256(f"{cid}\0{m.id}".encode()).hexdigest()[:10],
+                id=assignment_id_for(cid, m.id),
                 artifact_id=m.id, case_id=cid, state="confirmed" if confirmed else "proposed",
                 basis="folder_structure", confidence=0.9,
                 reason=(f.get("reason") or "")[:400],

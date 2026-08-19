@@ -144,10 +144,10 @@ async def test_a_run_writes_cases_beside_employees(db, monkeypatch):
         assert ev["case_id"] == by_emp[ev["employee_id"]]["id"]
     for f in got["flags"]:
         assert f["case_id"] == (by_emp[f["employee_id"]]["id"] if f["employee_id"] else "")
-    # Artifacts: every file of the batch, dispositioned; the stray file unresolved.
-    assert got["artifact_counts"]["total"] == 44 and got["artifact_counts"]["unresolved"] == 1
+    # Artifacts: every file of the batch, dispositioned — the stray file by the reviewer at the map.
+    assert got["artifact_counts"]["total"] == 44 and got["artifact_counts"]["unresolved"] == 0
     stray = next(a for a in got["artifacts"] if a["path"].endswith("notes.txt"))
-    assert stray["disposition"] == "unresolved" and stray["needs_confirmation"]
+    assert stray["disposition"] == "irrelevant" and stray["disposition_by"] == "reviewer"
     used = [a for a in got["artifacts"] if a["disposition"] == "used"]
     assert all(a["case_id"] for a in used)
     # Assignments confirmed by the map confirmation; investigation record confirmed.

@@ -239,3 +239,26 @@ async def test_harness_reads_the_real_sample(tmp_path):
     assert found.data["hits"] and all(h["artifact_id"] in {m.id for m in manifest} for h in found.data["hits"])
     digest = hashlib.sha256(b"x").hexdigest()
     assert len(digest) == 64  # sha256 is what the manifest binds ids to
+
+
+@pytest.mark.asyncio
+async def test_bound_render_returns_the_image_to_the_model(workspace):
+    """A handle alone cannot be looked at: the bound render/crop tools hand
+    the model the PNG itself (ToolReturn + BinaryContent) beside the handle."""
+    from pydantic_ai import BinaryContent, ToolReturn
+
+    from app.claims.tools.binding import bind_tools
+
+    ws, manifest = workspace
+    tools = ToolHarness(ws, manifest)
+    bound = {f.__name__: f for f in bind_tools(tools)}
+    out = await bound["render_page"](_id(manifest, "receipts.pdf"), 1)
+    assert isinstance(out, ToolReturn) and out.return_value["ok"] and out.return_value["call_id"] == "t0001"
+    assert isinstance(out.content[0], BinaryContent) and out.content[0].data[:4] == b"\x89PNG"
+    crop = await bound["crop_page"](_id(manifest, "receipts.pdf"), 1, [0, 0, 50, 50])
+    assert isinstance(crop, ToolReturn)
+    bad = await bound["render_page"]("nope", 1)
+    assert isinstance(bad, dict) and bad["error_code"] == "NOT_FOUND"
+    # every result carries the id of its execution record
+    ex = tools.executions()
+    assert [e.id for e in ex] == ["t0001", "t0002", "t0003"]

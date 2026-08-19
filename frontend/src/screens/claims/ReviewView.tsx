@@ -10,14 +10,13 @@ import {
   claimsFileUrl,
   correctClaimRow,
   decideClaimFlag,
-  retryCase,
-  retryClaimEmployee,
+  setCaseCategory,
   setClaimant,
   setEmployeeCategory,
 } from "../../api";
 import FieldEditor from "../../components/FieldEditor";
 import FlagCard from "../../components/FlagCard";
-import { ReviewUnit, reviewUnits, unitIdOf, usesCases } from "./units";
+import { ReviewUnit, retryUnit, reviewUnits, unitIdOf, usesCases } from "./units";
 
 // Review: the batch at a glance, then case by case — every line with its
 // verdict and its receipt (the flags are annotations on that picture), and
@@ -294,8 +293,7 @@ function EmployeeTable({ run, onChanged, selected, onSelect }: {
     setBusy(u.id);
     setError("");
     try {
-      if (u.case_id) await retryCase(run.id, u.case_id, run.revision);
-      else await retryClaimEmployee(run.id, u.employee_id, run.revision);
+      await retryUnit(run, u);
       onChanged();
     } catch (e) {
       setError(explain(e, "Could not re-verify", onChanged));
@@ -388,7 +386,8 @@ function CategoryPicker({ run, emp, onDone, onCancel, onChanged }: { run: Claims
     setBusy(true);
     setError("");
     try {
-      await setEmployeeCategory(run.id, emp.employee_id, category, gl, reason, run.revision);
+      if (emp.case_id) await setCaseCategory(run.id, emp.case_id, category, gl, reason, run.revision);
+      else await setEmployeeCategory(run.id, emp.employee_id, category, gl, reason, run.revision);
       onDone();
     } catch (e) {
       setError(explain(e, "Could not set the category", onChanged));
@@ -567,7 +566,7 @@ function ClaimFlagCard({ run, flag, row, evidence, onChanged, defaultOpen = fals
               {amountFlag ? "Confirm these amounts" : "Dismiss — keep the row"}
             </button>
             {emp && (
-              <button className="btn" disabled={busy} onClick={async () => { setBusy(true); try { if (emp.case_id) await retryCase(run.id, emp.case_id, run.revision); else await retryClaimEmployee(run.id, emp.employee_id, run.revision); onChanged(); } catch (e) { setError(explain(e, "Could not re-verify", onChanged)); } finally { setBusy(false); } }}>
+              <button className="btn" disabled={busy} onClick={async () => { setBusy(true); try { await retryUnit(run, emp); onChanged(); } catch (e) { setError(explain(e, "Could not re-verify", onChanged)); } finally { setBusy(false); } }}>
                 Re-verify case
               </button>
             )}

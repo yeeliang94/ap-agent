@@ -38,15 +38,34 @@ def bind_tools(tools: InvestigationTools, python_enabled: bool = False) -> list:
         embedded files (never opened)."""
         return (await tools.inspect_document(artifact_id)).model_dump()
 
-    async def render_page(artifact_id: str, page: int) -> dict:
-        """Render one page (1-based) of a PDF or image to a PNG and return a
-        handle plus its size — for a scanned page with no text layer."""
-        return (await tools.render_page(artifact_id, page)).model_dump()
+    def _with_image(result):
+        """A render comes back to the model AS AN IMAGE (plus the handle
+        and size), so a scanned page with no text layer can be looked at;
+        the harness keeps the PNG under the run's tool_output."""
+        data = result.model_dump()
+        png = None
+        if result.ok and result.handle and hasattr(tools, "handle_bytes"):
+            try:
+                png = tools.handle_bytes(result.handle)
+            except Exception:
+                png = None
+        if png is None:
+            return data
+        from pydantic_ai import BinaryContent, ToolReturn
 
-    async def crop_page(artifact_id: str, page: int, region: list[int]) -> dict:
+        return ToolReturn(return_value=data, content=[BinaryContent(data=png, media_type="image/png")])
+
+    async def render_page(artifact_id: str, page: int):
+        """Render one page (1-based) of a PDF or image to a PNG — the image
+        is shown to you, and a handle plus its size are returned — for a
+        scanned page with no text layer."""
+        return _with_image(await tools.render_page(artifact_id, page))
+
+    async def crop_page(artifact_id: str, page: int, region: list[int]):
         """A crop of one page at full resolution: region = [x0, y0, x1, y1]
-        in the full render's pixels. Returns a handle."""
-        return (await tools.crop_page(artifact_id, page, region)).model_dump()
+        in the full render's pixels. The crop is shown to you; a handle is
+        returned."""
+        return _with_image(await tools.crop_page(artifact_id, page, region))
 
     async def search_artifacts(query: str, limit: int = 50) -> dict:
         """Search names, workbook cell text and PDF text for a name, code,
