@@ -798,15 +798,26 @@ and rollback switch.
 
 ### H9 — Generic listing output and gates
 
-- [ ] Produce one row per confirmed Claim Case in the current listing's column
-  order.
-- [ ] Generalize listing field mappings beyond the current fixed roles while
-  keeping required universal roles explicit.
-- [ ] Recompute Calculated Lines Total, case, batch, and emitted totals
-  independently while preserving an optional, source-cited Reported Total.
-- [ ] Update corrections/exclusions to case ids and rerun affected controls.
-- [ ] Add expected-revision checks to the existing correction, decision,
-  category, retry, and confirm-map routes.
+- [x] Produce one row per confirmed Claim Case in the current listing's column
+  order (`listing.build_outputs` iterates cases; a case with no confirmed
+  claimant is not paid and is named; 2026-08-19).
+- [x] Generalize listing field mappings beyond the current fixed roles while
+  keeping required universal roles explicit (profile `listing_columns`: pin a
+  header to a role, blank it, or write a literal; losing vendor/amount falls
+  back and says so; unknown headers stay blank and visible).
+- [x] Recompute Calculated Lines Total, case, batch, and emitted totals
+  independently while preserving an optional, source-cited Reported Total
+  (`totals.lines_total`, `reported_total`, `reported_missing`, `total_myr`;
+  per-case `reported_total` / `lines_total` on `included`).
+- [x] Update corrections/exclusions to case ids and rerun affected controls
+  (rows/flags/exclusions/unused evidence carry `case_id`; run-wide controls
+  re-run after corrections, H7).
+- [x] Add expected-revision checks to the existing correction, decision,
+  category, retry, and confirm-map routes (optional `expected_revision` → 409
+  when stale; the server-side output gate `output_blockers` names what locks
+  the listing; `CLAIMANT_UNKNOWN` / `OWNERSHIP_CONFLICT` are settled by actions,
+  not notes; the claimant can be set at review time;
+  `tests/test_claims_output_gates.py`).
 - **Exit:** structured and full-dump outputs round-trip; every blocking state is
   enforced server-side.
 

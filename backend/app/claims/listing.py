@@ -145,6 +145,9 @@ async def prepare_listing(db, run: ClaimsRun) -> None:
         run.listing_headers = {"state": "unreadable", "why": reason}
         db.commit()
         return
+    from . import profile as profile_mod
+
+    result = apply_listing_columns(result, profile_mod.profile_of(run.snapshot))
     run.listing_headers = result
     db.commit()
     telemetry.record(db, run.id, "output", telemetry.INFO, "LISTING_READ",
@@ -190,6 +193,44 @@ async def read_listing(path: Path, usage=None) -> dict:
                 "roles": roles, "why": hm.why, "past_examples": _past_examples(sheets, hm, header)}
     finally:
         wb.close()
+
+
+def apply_listing_columns(result: dict, profile: dict) -> dict:
+    """The reviewer's pinned columns (profile listing_columns, H9) applied
+    over the AI's header map: a role moves to the named header, 'blank'
+    removes any role from it, '=text' writes that text in every row
+    (stored as literals by column index). Unknown headers stay blank and
+    visible; the universal roles stay required (a map that loses its
+    vendor or amount column falls back)."""
+    pins = {str(k).strip().lower(): str(v).strip() for k, v in (profile.get("listing_columns") or {}).items() if str(k).strip()}
+    if not pins or result.get("state") not in ("ok", "fallback"):
+        return result
+    header = list(result.get("header") or [])
+    roles = dict(result.get("roles") or {})
+    literals: dict[str, str] = {}
+    applied: list[str] = []
+    for idx, text in enumerate(header):
+        pin = pins.get(str(text).strip().lower())
+        if pin is None:
+            continue
+        for role, i in list(roles.items()):
+            if i == idx:
+                roles[role] = None
+        if pin == "blank":
+            applied.append(f"{text!r}: blank")
+        elif pin.startswith("="):
+            literals[str(idx)] = pin[1:]
+            applied.append(f"{text!r}: literal {pin[1:]!r}")
+        elif pin in ROLES:
+            roles[pin] = idx
+            applied.append(f"{text!r}: {pin}")
+    out = {**result, "roles": roles, "literals": literals, "pinned_columns": applied}
+    if result.get("state") == "ok" and (roles.get("vendor_name") is None or roles.get("amount") is None):
+        out["state"] = "fallback"
+        out["header"], out["roles"] = list(FALLBACK_HEADER), dict(zip(FALLBACK_ROLES, range(len(FALLBACK_ROLES))))
+        out["literals"] = {}
+        out["why"] = "the pinned listing columns leave no vendor or amount column — check Settings → Claims"
+    return out
 
 
 def _row_values(ws, row: int) -> list[str]:
@@ -246,14 +287,21 @@ def _cell(value) -> str:
 
 
 def build_outputs(db, run: ClaimsRun) -> dict:
-    """One row per included employee, in the client's own column order.
+    """One Payment Listing Row per confirmed, verified Claim Case, in the
+    client's own column order (H9).
 
-    Included = verified employees not excluded (an accepted flag excludes
-    its ROW; the employee stays with the remaining rows). Excluded rows are
-    subtracted from the employee's total and named. Employees marked failed
-    or skipped are listed under not_included. Totals are recomputed from
-    the emitted text with Decimal and reconciled with the report totals.
+    Included = confirmed cases whose worker verified, with a confirmed
+    claimant, not excluded. An accepted flag excludes its ROW (the case
+    stays with the remaining rows); excluded rows are subtracted and named.
+    Cases that failed, were skipped, or have no confirmed claimant are
+    listed under not_included with the reason. Three totals are kept
+    apart and named: the Reported Total (what each source states, or
+    absent), the Calculated Lines Total (the Decimal sum of the lines to
+    be paid), and the emitted total re-summed from the output text; every
+    missing comparison is named rather than counted as a match.
     """
+    from .models import ClaimCase
+
     lh = run.listing_headers or {}
     if lh.get("state") == "ok":
         header, roles = list(lh["header"]), dict(lh["roles"])
@@ -264,15 +312,24 @@ def build_outputs(db, run: ClaimsRun) -> dict:
         note = ("The listing's header row could not be read"
                 + (f" ({lh.get('why')})" if lh.get("why") else "")
                 + ", so these rows use the fallback columns; paste them by hand into the right places.")
-    employees = db.query(ClaimEmployee).filter(ClaimEmployee.run_id == run.id).all()
-    rows_by_emp: dict[str, list[ClaimRow]] = {}
+    literals: dict[int, str] = {int(k): v for k, v in (lh.get("literals") or {}).items()}
+    cases = db.query(ClaimCase).filter(ClaimCase.run_id == run.id).all()
+    employees = {e.id: e for e in db.query(ClaimEmployee).filter(ClaimEmployee.run_id == run.id).all()}
+    # A run made before the case model has employees and no cases: treat
+    # each employee as its own confirmed case (the migration does the same).
+    if not cases and employees:
+        from . import cases as cases_mod
+
+        cases = [cases_mod.sync_case_from_employee(db, e) for e in employees.values()]
+    rows_by_case: dict[str, list[ClaimRow]] = {}
     for r in db.query(ClaimRow).filter(ClaimRow.run_id == run.id).all():
-        rows_by_emp.setdefault(r.employee_id, []).append(r)
+        rows_by_case.setdefault(r.case_id or _case_of_employee(cases, r.employee_id), []).append(r)
     excluded_rows = {f.row_id for f in db.query(ClaimFlag).filter(
         ClaimFlag.run_id == run.id, ClaimFlag.status == "accepted") if f.row_id}
     # Evidence no row used — what will NOT be paid, on the same screen as
     # what will, with the reviewer's decision on it if any.
-    emp_name = {e.id: (e.name or e.folder) for e in employees}
+    case_name = {c.id: (c.claimant_name or c.label) for c in cases}
+    emp_to_case = {c.legacy_employee_id: c.id for c in cases if c.legacy_employee_id}
     decisions = {}
     for f in db.query(ClaimFlag).filter(ClaimFlag.run_id == run.id, ClaimFlag.evidence_id != "",
                                         ClaimFlag.code.in_(("UNCLAIMED_RECEIPT", "MILEAGE_NO_MAP"))):
@@ -287,80 +344,105 @@ def build_outputs(db, run: ClaimsRun) -> dict:
         else:
             what = f"map trip ({v.get('date') or 'no date'}, {v.get('km_printed') or '?'} km)"
             amount = ""
-        unused_evidence.append({"name": emp_name.get(ev.employee_id, "?"), "what": what,
+        cid = ev.case_id or emp_to_case.get(ev.employee_id, "")
+        unused_evidence.append({"name": case_name.get(cid, "?"), "case_id": cid, "what": what,
                                 "where": f"{ev.file} page {ev.page}" + (f", {ev.position}" if ev.position else ""),
                                 "amount": amount, "decision": decisions.get(ev.id, "")})
     unused_evidence.sort(key=lambda u: (u["name"], u["where"]))
 
     out_rows: list[list[str]] = []
     included, not_included, exclusions = [], [], []
-    # The INDEPENDENT side of the reconciliation: each included employee's
-    # report total (the total cell of their own report, which the reader
-    # verified against the sheet's arithmetic) less the rows the reviewer
-    # excluded. The emitted side is re-summed from the output text. They
-    # differ when a reviewer corrected an amount, when a report had no
-    # total to check against, or when something went wrong — each named.
-    source_total = Decimal("0")
+    reported_total_sum = Decimal("0")   # the independent side, where present
+    lines_total_sum = Decimal("0")      # Calculated Lines Total of the lines to be paid
+    reported_missing = 0
     differences: list[dict] = []
-    for n, e in enumerate(sorted(employees, key=lambda x: x.name or x.folder), 1):
-        if e.status != "verified":
-            not_included.append({"name": e.name or e.folder,
-                                 "why": {"failed": f"verification failed: {e.error}",
-                                         "skipped": "skipped by the reviewer at the map",
-                                         "pending": "not verified yet", "verifying": "still verifying"}.get(e.status, e.status)})
+    for n, c in enumerate(sorted(cases, key=lambda x: (x.claimant_name or x.label).lower()), 1):
+        name = c.claimant_name or c.label
+        if c.state == "excluded" or c.status == "skipped":
+            not_included.append({"name": name, "case_id": c.id, "why": "excluded by the reviewer at the map"})
             continue
-        e_rows = [r for r in rows_by_emp.get(e.id, []) if r.kind != "mileage"]
-        kept = [r for r in e_rows if r.id not in excluded_rows]
-        gone = [r for r in e_rows if r.id in excluded_rows]
-        if e_rows and not kept:
-            not_included.append({"name": e.name or e.folder, "why": "every row was excluded in review"})
+        if c.status != "verified":
+            not_included.append({"name": name, "case_id": c.id,
+                                 "why": {"failed": f"verification failed: {c.error}", "pending": "not verified yet",
+                                         "verifying": "still verifying"}.get(c.status, c.status)})
+            continue
+        if c.claimant_state != "confirmed":
+            not_included.append({"name": name, "case_id": c.id,
+                                 "why": "no confirmed claimant — nobody to pay; set the claimant on the case"})
+            continue
+        c_rows = [r for r in rows_by_case.get(c.id, []) if r.kind != "mileage"]
+        kept = [r for r in c_rows if r.id not in excluded_rows]
+        gone = [r for r in c_rows if r.id in excluded_rows]
+        if c_rows and not kept:
+            not_included.append({"name": name, "case_id": c.id, "why": "every row was excluded in review"})
             continue
         amount = sum((_money(r) for r in kept), Decimal("0")).quantize(Decimal("0.01"))
-        if not e_rows:
-            amount = Decimal(e.report_total or "0").quantize(Decimal("0.01"))
+        if not c_rows:
+            amount = Decimal(c.reported_total or "0").quantize(Decimal("0.01"))
         for r in gone:
-            exclusions.append({"name": e.name or e.folder, "row": r.row, "amount": str(_money(r)),
+            exclusions.append({"name": name, "case_id": c.id, "row": r.row, "amount": str(_money(r)),
                                "why": "flag accepted in review"})
         values = {"serial": str(n), "processed_by": "", "received_date": run.received_date,
-                  "p2p_ref": "", "po_number": "", "cost_center": "", "category": e.category,
-                  "gl_account": e.gl, "vendor_name": e.name, "invoice_number": e.er_code,
-                  "amount": f"{amount:.2f}", "remarks": "employee claim" + (f" ({len(gone)} row(s) excluded)" if gone else "")}
+                  "p2p_ref": "", "po_number": "", "cost_center": "", "category": c.category,
+                  "gl_account": c.gl, "vendor_name": c.claimant_name, "invoice_number": c.claimant_identifier,
+                  "amount": f"{amount:.2f}",
+                  "remarks": "employee claim" + (f" ({len(gone)} row(s) excluded)" if gone else "")
+                             + (" — lines derived from evidence" if any(r.kind == "derived" for r in kept) else "")}
         line = [""] * len(header)
         for role, idx in roles.items():
             if idx is not None and idx < len(header):
                 line[idx] = _cell(values.get(role, ""))
+        for idx, text in literals.items():
+            if 0 <= idx < len(header):
+                line[idx] = _cell(text)
         out_rows.append(line)
-        included.append({"name": e.name, "er_code": e.er_code, "amount": f"{amount:.2f}",
-                         "category": e.category, "gl": e.gl})
-        report_total = _dec_or_none(e.report_total)
-        if report_total is None:
+        lines_total_sum += amount
+        reported_total = _dec_or_none(c.reported_total)
+        included.append({"name": c.claimant_name, "case_id": c.id, "er_code": c.claimant_identifier,
+                         "amount": f"{amount:.2f}", "category": c.category, "gl": c.gl,
+                         "reported_total": f"{reported_total:.2f}" if reported_total is not None else None,
+                         "lines_total": f"{amount:.2f}",
+                         "derived": any(r.kind == "derived" for r in kept)})
+        if reported_total is None:
             # nothing independent to check against: say so rather than pretend
-            expected = amount
-            differences.append({"name": e.name or e.folder, "expected": None, "emitted": f"{amount:.2f}",
-                                "why": "the report carried no total to reconcile against"})
+            reported_missing += 1
+            differences.append({"name": name, "case_id": c.id, "expected": None, "emitted": f"{amount:.2f}",
+                                "why": "the source carried no Reported Total to reconcile against"})
         else:
-            expected = (report_total - sum((_money(r) for r in gone), Decimal("0"))).quantize(Decimal("0.01"))
+            expected = (reported_total - sum((_money(r) for r in gone), Decimal("0"))).quantize(Decimal("0.01"))
+            reported_total_sum += expected
             if expected != amount:
-                differences.append({"name": e.name or e.folder, "expected": f"{expected:.2f}",
+                differences.append({"name": name, "case_id": c.id, "expected": f"{expected:.2f}",
                                     "emitted": f"{amount:.2f}",
-                                    "why": (f"the report's total is {report_total:.2f}"
+                                    "why": (f"the Reported Total is {reported_total:.2f}"
                                             + (f" ({expected:.2f} after {len(gone)} excluded row(s))" if gone else "")
-                                            + f", but the rows to be paid sum to {amount:.2f} — "
-                                            "a corrected amount, or a row the report total does not cover")})
-        source_total += expected
+                                            + f", but the lines to be paid sum to {amount:.2f} — "
+                                            "a corrected amount, or a line the source total does not cover")})
     amount_idx = roles.get("amount")
     emitted_total = sum((Decimal(r[amount_idx].lstrip("'") or "0") for r in out_rows), Decimal("0")) \
         if amount_idx is not None else Decimal("0")
+    # The comparison is named per case; the batch figure compares only the
+    # cases that HAVE a Reported Total, and says how many have none.
+    compared = reported_total_sum + sum((Decimal(d["emitted"]) for d in differences if d["expected"] is None), Decimal("0"))
+    match = (emitted_total == lines_total_sum and not any(d["expected"] is not None for d in differences))
     tsv = "\n".join("\t".join(_cell(h) for h in header) + "" for _ in [0]) + "\n" + \
         "\n".join("\t".join(r) for r in out_rows)
     return {"header": header, "rows": out_rows, "tsv": tsv,
-            "totals": {"total_myr": f"{emitted_total:.2f}", "source_total": f"{source_total:.2f}",
-                       "match": emitted_total == source_total and not any(d["expected"] is not None for d in differences),
-                       "difference": f"{(emitted_total - source_total):.2f}",
+            "totals": {"total_myr": f"{emitted_total:.2f}",
+                       "lines_total": f"{lines_total_sum:.2f}",
+                       "reported_total": f"{reported_total_sum:.2f}",
+                       "reported_missing": reported_missing,
+                       "source_total": f"{compared:.2f}",   # delivered name: reported where present, else the lines
+                       "match": match,
+                       "difference": f"{(emitted_total - compared):.2f}",
                        "differences": differences},
             "included": included, "not_included": not_included, "exclusions": exclusions,
             "unused_evidence": unused_evidence,
             "header_fallback": fallback, "header_note": note, "received_date": run.received_date}
+
+
+def _case_of_employee(cases, employee_id: str) -> str:
+    return next((c.id for c in cases if c.legacy_employee_id == employee_id), "")
 
 
 def _dec_or_none(text) -> Decimal | None:

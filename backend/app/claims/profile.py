@@ -54,6 +54,11 @@ PROFILE_DEFAULTS: dict = {
     "category_rule": "",
     # [{"pattern": "*_Approval.pdf", "role": "ignore"}, ...]
     "file_role_patterns": [],
+    # Listing columns the reviewer pins (H9), over the AI's header map:
+    # {"Header text": "<role>" | "blank" | "=literal text"} — e.g.
+    # {"Processed by": "=AP team", "Cost Center": "blank"}. Roles are
+    # listing.ROLES; the universal roles (vendor_name, amount) stay required.
+    "listing_columns": {},
     # check code -> on/off; absent means on
     "checks": {},
     # field -> {"by": "reviewer", "at": "2026-08-18", "evidence": "..."}
