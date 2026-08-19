@@ -317,10 +317,17 @@ def build_outputs(db, run: ClaimsRun) -> dict:
     employees = {e.id: e for e in db.query(ClaimEmployee).filter(ClaimEmployee.run_id == run.id).all()}
     # A run made before the case model has employees and no cases: treat
     # each employee as its own confirmed case (the migration does the same).
-    if not cases and employees:
-        from . import cases as cases_mod
+    from . import cases as cases_mod
 
+    if not cases and employees:
         cases = [cases_mod.sync_case_from_employee(db, e) for e in employees.values()]
+    # The employee record is the worker's unit during the compatibility
+    # period: its totals/category/status are mirrored onto the case here,
+    # so a value changed on one is what the listing sees on the other.
+    for c in cases:
+        emp = employees.get(c.legacy_employee_id)
+        if emp is not None:
+            cases_mod._mirror(c, emp)
     rows_by_case: dict[str, list[ClaimRow]] = {}
     for r in db.query(ClaimRow).filter(ClaimRow.run_id == run.id).all():
         rows_by_case.setdefault(r.case_id or _case_of_employee(cases, r.employee_id), []).append(r)
