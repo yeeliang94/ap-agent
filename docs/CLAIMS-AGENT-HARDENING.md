@@ -697,11 +697,21 @@ and rollback switch.
 
 ### H4 — Safe deterministic tool harness
 
-- [ ] Implement typed workbook, document, image, search, calculator, and bounded
-  table-comparison tools.
-- [ ] Use manifest ids and return Citations/provenance on every read.
-- [ ] Enforce tool budgets, output handles, cancellation, redaction, and logs.
-- [ ] Add prompt-injection and hostile-file fixtures.
+- [x] Implement typed workbook, document, image, search, calculator, and bounded
+  table-comparison tools (`tools/workbook.py`, `documents.py`, `files.py`,
+  `calculator.py`, `tables.py`; `tools/harness.py` = the production
+  `InvestigationTools`; 2026-08-19).
+- [x] Use manifest ids and return Citations/provenance on every read (a typed
+  path is `NOT_FOUND`; every result carries artifact ids + hashes and Citations).
+- [x] Enforce tool budgets, output handles, cancellation, redaction, and logs
+  (call/page/byte budgets fail closed with `BUDGET`; page renders return a
+  handle under `<run>/tool_output`; `cancel()` fails every later call; absolute
+  paths are redacted from errors; one `ToolExecution` per call with input/output
+  hashes).
+- [x] Add prompt-injection and hostile-file fixtures (`tests/test_claims_tools.py`:
+  injection text in cells and PDF text is returned as data; formulas are text and
+  never evaluated; macros never loaded; links/scripts counted, never followed; a
+  corrupted workbook is a named, redacted failure).
 - **Exit:** tools cannot read outside the snapshot or write outside temporary
   output; calculator/table results replay exactly.
 
