@@ -71,6 +71,12 @@ CLAIMS_FULL_DUMP_GROUPING = _flag("CLAIMS_FULL_DUMP_GROUPING", "0")
 # run_python in the tool allowlist (off = absent; TOOL_UNAVAILABLE where
 # an investigation genuinely needs it).
 CLAIMS_PYTHON_SANDBOX = _flag("CLAIMS_PYTHON_SANDBOX", "0")
+# The OS-level isolation runner the sandbox hands execution to (a command
+# that takes <code.py> <input dir> <output dir>), and the operator's
+# assertion that it isolates (network, filesystem, secrets, processes).
+# Both must be set for run_python to be available — see docs/SANDBOX.md.
+CLAIMS_SANDBOX_RUNNER = os.getenv("CLAIMS_SANDBOX_RUNNER", "")
+CLAIMS_SANDBOX_ISOLATED = _flag("CLAIMS_SANDBOX_ISOLATED", "0")
 
 
 def ensure_dirs() -> None:

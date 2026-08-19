@@ -779,11 +779,20 @@ and rollback switch.
 ### H8 — Isolated Python sandbox
 
 - [ ] Complete a Windows enterprise feasibility spike against the production
-  isolation requirements.
-- [ ] Define `SandboxPort`, production adapter, and in-memory fake.
-- [ ] Add limits, double execution for material successful output, audit record,
-  and normalized result parsing.
-- [ ] Keep feature disabled by default until security tests pass.
+  isolation requirements — **owner action**, checklist in `docs/SANDBOX.md`;
+  until it passes the feature ships disabled (the accepted outcome if no runner
+  is permitted).
+- [x] Define `SandboxPort`, production adapter, and in-memory fake
+  (`tools/contracts.SandboxPort`; `tools/sandbox.py`: `RunnerSandbox` handing
+  execution to an operator-declared OS-level runner, `UnavailableSandbox`,
+  `InMemorySandbox`; 2026-08-19).
+- [x] Add limits, double execution for material successful output, audit record,
+  and normalized result parsing (wall/CPU/memory/file/process/input/output
+  limits, tree kill, second-run hash comparison, redacted record, `SANDBOX_LIMIT`
+  Flag through the harness and the investigator).
+- [x] Keep feature disabled by default until security tests pass
+  (`CLAIMS_PYTHON_SANDBOX` + `CLAIMS_SANDBOX_RUNNER` + `CLAIMS_SANDBOX_ISOLATED`
+  all required; `tests/test_claims_sandbox.py`).
 - **Exit:** scenario J passes. If OS isolation is unavailable, formally ship
   `run_python` disabled without blocking H0–H7 or H9–H12.
 

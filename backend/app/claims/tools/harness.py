@@ -46,7 +46,8 @@ def _hash(obj: Any) -> str:
 
 class ToolHarness:
     def __init__(self, workspace: Path | str, manifest: list[ManifestEntry], budget: Budget | None = None,
-                 sandbox: SandboxPort | None = None, python_enabled: bool = False):
+                 sandbox: SandboxPort | None = None, python_enabled: bool = False,
+                 sandbox_limits: SandboxLimits | None = None):
         self.workspace = Path(workspace)
         self.files_dir = self.workspace / "files"
         self.out_dir = self.workspace / OUTPUT_DIR
@@ -55,6 +56,7 @@ class ToolHarness:
         self.budget = budget or Budget()
         self.sandbox = sandbox
         self.python_enabled = python_enabled
+        self.sandbox_limits = sandbox_limits or SandboxLimits()
         self._executions: list[ToolExecution] = []
         self._proposals: list[dict] = []
         self._cancelled = False
@@ -278,7 +280,7 @@ class ToolHarness:
             self.out_dir.mkdir(parents=True, exist_ok=True)
             out = self.out_dir / f"py{len(self._executions) + 1:04d}"
             out.mkdir(parents=True, exist_ok=True)
-            res = await self.sandbox.run(code, inputs, out, SandboxLimits())
+            res = await self.sandbox.run(code, inputs, out, self.sandbox_limits)
             if not res.ok:
                 return ToolResult.failure(res.error_code or "TOOL_FAILED", self._redact(res.error or res.stderr[-300:]))
             return ToolResult(data={"stdout": res.stdout, "output_files": res.output_files, "output_hash": res.output_hash,

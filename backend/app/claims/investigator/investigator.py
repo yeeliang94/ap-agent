@@ -256,6 +256,11 @@ def normalize(proposal: InvestigationProposal, request: InvestigationRequest, to
                                                                  "The investigation may be incomplete for the file it was reading.",
                                       basis="universal rule: a step that could not be done is said, not skipped",
                                       cite={"what": f"{t.tool}:{t.id}"}))
+    for t in tools.executions():
+        if t.error_code == "SANDBOX_LIMIT":
+            flags.append(FlagProposal(code="SANDBOX_LIMIT", reason=f"Model-written Python was stopped at a limit ({t.note or 'time/memory/output'}) "
+                                                                    "and killed; nothing it produced was used.",
+                                      basis="sandbox limits: wall time, CPU, memory, output size", cite={"what": f"run_python:{t.id}"}))
     if any(t.error_code == "TOOL_UNAVAILABLE" for t in tools.executions()) and (problems or proposal.questions):
         flags.append(FlagProposal(code="TOOL_UNAVAILABLE", reason="The investigation asked for run_python, which is not enabled here, and "
                                                                   "did not fully converge without it. Do that part by hand, or enable the sandbox where policy allows.",
