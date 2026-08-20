@@ -375,7 +375,7 @@ function SwitchboardCard() {
       <div className="card">
         <h3 className="section-title">
           Feature switches
-          <Info text="A change applies to NEW claims runs only — a run keeps the switches it started with. Every change is recorded in the audit log." />
+          <Info text="Pipeline behavior (how a run investigates, groups and checks) applies to NEW runs only — a run keeps the switches it started with. What is visible and allowed on screen (case fields, regrouping actions) follows the current switch. Every change is recorded in the audit log." />
         </h3>
         {board.switches.map((s) => (
           <div className="switchrow" key={s.key}>

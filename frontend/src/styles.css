@@ -109,14 +109,27 @@ input, textarea, select { font: inherit; color: var(--ink); }
 
 .summary-line { font-size: 15px; margin: 4px 0 10px; }
 
-/* ⓘ — hover for the explanation; the default view stays quiet. */
-.info {
+/* ⓘ — hover or keyboard focus for the explanation; the default view stays
+   quiet. A CSS tooltip (data-tip), not the title attribute, so keyboard
+   users get it too. */
+i.info {
+  position: relative;
   display: inline-flex; align-items: center; justify-content: center;
   width: 15px; height: 15px; border-radius: 99px; border: 1px solid var(--line-strong);
   color: var(--faint); font-size: 10px; font-weight: 600; font-style: normal; cursor: help;
   vertical-align: 1px; margin-left: 6px; flex: none;
 }
-.info:hover { color: var(--ink); border-color: var(--ink); }
+i.info:hover, i.info:focus { color: var(--ink); border-color: var(--ink); outline: none; }
+i.info::after {
+  content: attr(data-tip);
+  position: absolute; top: calc(100% + 7px); left: -8px;
+  width: max-content; max-width: min(300px, 70vw);
+  background: var(--ink); color: #fff; font-size: 12px; font-weight: 400;
+  line-height: 1.5; padding: 8px 11px; border-radius: var(--r-md);
+  text-align: left; white-space: normal; z-index: 20;
+  opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 0.12s;
+}
+i.info:hover::after, i.info:focus::after { opacity: 1; visibility: visible; }
 
 /* Flag cards: one red accent line of text, no loud blocks. */
 .flagcard { border-left: 3px solid var(--red); }

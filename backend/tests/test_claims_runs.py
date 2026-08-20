@@ -169,6 +169,29 @@ def test_create_run_refuses_bad_uploads(db):
     assert r.status_code == 400 and "SharePoint" in r.text
 
 
+def test_create_run_refuses_colliding_paths(db):
+    """Two files landing at one staged path would silently overwrite —
+    a claims file must never vanish. Case folds (Windows, default macOS)."""
+    r = client.post("/api/claims-runs", data={"received_date": "2026-08-03"},
+                    files=[("batch", ("receipt.pdf", b"%PDF-1", "application/pdf")),
+                           ("batch", ("Receipt.pdf", b"%PDF-2", "application/pdf"))])
+    assert r.status_code == 400 and "rename one" in r.text
+    assert client.get("/api/claims-runs").json() == []
+
+
+def test_a_failed_staging_leaves_no_run_behind(db, monkeypatch):
+    """The row and the staged files appear together or not at all — a disk
+    failure must not leave a queued run nobody will ever process."""
+    def boom(run_id):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner, "workspace_for", boom)
+    with pytest.raises(OSError):
+        client.post("/api/claims-runs", data={"received_date": "2026-08-03"},
+                    files=[("batch", ("a.pdf", b"%PDF", "application/pdf"))])
+    assert client.get("/api/claims-runs").json() == []
+
+
 def test_create_run_validates_its_inputs(db):
     r = client.post("/api/claims-runs", data={"received_date": "3 Aug", "folder_url": "https://x/y"})
     assert r.status_code == 400 and "YYYY-MM-DD" in r.text

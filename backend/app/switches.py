@@ -97,10 +97,22 @@ def for_run(run_snapshot: dict | None, key: str) -> bool:
     return on(key)
 
 
+def _described(key: str, description: str) -> str:
+    """The description, with the one honesty note that depends on this
+    install: the SharePoint switch offers links, but HOW links are read is
+    .env DOC_SOURCE — with DOC_SOURCE=local a link goes to the local/test
+    source, and only IT can change that."""
+    if key == "claims_sharepoint_source" and config.DOC_SOURCE != "mcp":
+        return (description + " Note: this install's link mechanism (.env "
+                "DOC_SOURCE) is 'local', so links are read by the local/test "
+                "source — real SharePoint needs IT to set DOC_SOURCE=mcp.")
+    return description
+
+
 def listed() -> list[dict]:
     """Every switch with its words and value, for the Settings screen.
     `saved` says whether a reviewer chose it or the .env default answers."""
-    return [{"key": key, "label": label, "description": description,
+    return [{"key": key, "label": label, "description": _described(key, description),
              "value": on(key), "default": _env_default(key),
              "saved": saved(key) is not None}
             for key, (label, description) in SWITCHES.items()]

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -163,8 +164,17 @@ async def create_claims_run(
         zip_bytes = await _read_upload(uploads[0], source_mod.MAX_ZIP_MB, "The zip")
     else:
         total = 0
+        # Duplicates are refused, not overwritten: a claims file must never
+        # vanish silently, and the staging filesystem may fold case anyway
+        # (Windows, default macOS) — so the check folds case too.
+        seen: set[str] = set()
         for i, upload in enumerate(uploads):
             rel = _clean_rel_path(paths_list[i] if paths_list else "", upload.filename)
+            if rel.casefold() in seen:
+                raise HTTPException(400, f"Two files in the upload would land at {rel!r} — "
+                                         "rename one, or pick the folder itself so the "
+                                         "paths stay distinct.")
+            seen.add(rel.casefold())
             data = await _read_upload(upload, source_mod.MAX_FILE_MB, Path(upload.filename).name)
             total += len(data)
             if total > source_mod.MAX_ZIP_MB * 1024 * 1024:
@@ -212,6 +222,7 @@ def _store_new_run(client: str, folder_url: str, listing_url: str, received_date
     uploaded bytes. Runs in a worker thread (see create_claims_run)."""
     source_label = (folder_url or ("zip upload" if zip_bytes else "file upload"))
     db = SessionLocal()
+    ws: Path | None = None
     try:
         run = ClaimsRun(client=client, folder_url=folder_url, listing_url=listing_url,
                         received_date=received_date, instructions=instructions,
@@ -219,7 +230,10 @@ def _store_new_run(client: str, folder_url: str, listing_url: str, received_date
                                   # A run keeps the switches it started with.
                                   "switches": switches.snapshot()})
         db.add(run)
-        db.commit()
+        # Flush for the id, but publish nothing yet: the row and the staged
+        # files appear together or not at all — a disk failure here must
+        # not leave a run nobody can process behind.
+        db.flush()
         ws = runner.workspace_for(run.id)
         ws.mkdir(parents=True, exist_ok=True)
         if zip_bytes:
@@ -242,6 +256,11 @@ def _store_new_run(client: str, folder_url: str, listing_url: str, received_date
                                  + (f"; instructions: {instructions[:200]}" if instructions else "")))
         db.commit()
         return run.id
+    except BaseException:
+        db.rollback()
+        if ws is not None:
+            shutil.rmtree(ws, ignore_errors=True)
+        raise
     finally:
         db.close()
 

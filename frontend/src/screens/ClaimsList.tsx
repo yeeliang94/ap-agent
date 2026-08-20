@@ -19,7 +19,7 @@ export function claimsStatusLabel(r: ClaimsRunSummary): string {
         ? `Copying files ${r.progress.done}/${r.progress.total}${
             currentFile ? ` · ${currentFile}` : ""
           }`
-        : "Reading the folder";
+        : "Reading the batch";
     }
     case "mapping":
       return "Mapping the folder";
@@ -211,23 +211,54 @@ function sizeLabel(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-interface Picked {
+export interface Picked {
   file: File;
   /** Relative path inside the batch ("A_1/receipts/grab.pdf"). */
   path: string;
 }
 
-/** Check one candidate file; returns why it cannot join the batch, or "". */
-function refuse(name: string, isFirst: boolean, haveZip: boolean, count: number): string {
-  const ext = extOf(name);
-  if (ext === ".zip") {
-    return isFirst && count === 0 ? "" : "A zip travels alone — clear the other files first.";
+/** Merge newly picked files into the current set. Pure, so the rules are
+ *  testable: one zip travels alone; only readable types; two DIFFERENT
+ *  files landing at one path are a named error (case folded — the staging
+ *  filesystem may fold case), while re-picking the identical file is
+ *  simply kept once. The server enforces the same rules again. */
+export function mergePicked(
+  current: Picked[],
+  candidates: Picked[],
+  maxMb = MAX_UPLOAD_MB
+): { picked: Picked[]; error: string } {
+  const next = [...current];
+  for (const c of candidates) {
+    const ext = extOf(c.file.name);
+    const haveZip = next.some((p) => extOf(p.path) === ".zip");
+    if (ext === ".zip" && next.length > 0) {
+      return { picked: current, error: "A zip travels alone — clear the other files first." };
+    }
+    if (ext !== ".zip" && haveZip) {
+      return { picked: current, error: "A zip travels alone — clear it before adding loose files." };
+    }
+    if (ext !== ".zip" && !READABLE_EXT.includes(ext)) {
+      return {
+        picked: current,
+        error: `${c.file.name} isn't a supported type (PDF, PNG, JPG, WEBP, Excel — or one zip).`,
+      };
+    }
+    const existing = next.find((p) => p.path.toLowerCase() === c.path.toLowerCase());
+    if (existing) {
+      if (existing.file.size === c.file.size && existing.file.lastModified === c.file.lastModified) {
+        continue; // the same file picked again — keep it once
+      }
+      return {
+        picked: current,
+        error: `Two different files would land at "${c.path}" — rename one, or pick the folder itself so the paths stay distinct.`,
+      };
+    }
+    next.push(c);
   }
-  if (haveZip) return "A zip travels alone — clear it before adding loose files.";
-  if (!READABLE_EXT.includes(ext)) {
-    return `${name} isn't a supported type (PDF, PNG, JPG, WEBP, Excel — or one zip).`;
+  if (next.reduce((n, p) => n + p.file.size, 0) > maxMb * 1024 * 1024) {
+    return { picked: current, error: `The files add up to more than the ${maxMb} MB limit per upload.` };
   }
-  return "";
+  return { picked: next, error: "" };
 }
 
 /** Walk a dropped folder (webkitGetAsEntry) and collect its files. */
@@ -298,22 +329,11 @@ function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => void }) {
   const totalBytes = picked.reduce((n, p) => n + p.file.size, 0);
 
   function add(candidates: Picked[]) {
-    setError("");
-    const next = [...picked];
-    for (const c of candidates) {
-      const why = refuse(c.file.name, next.length === 0, next.some((p) => extOf(p.path) === ".zip"), next.length);
-      if (why) {
-        setError(why);
-        return;
-      }
-      if (!next.some((p) => p.path === c.path)) next.push(c);
-    }
-    if (next.reduce((n, p) => n + p.file.size, 0) > MAX_UPLOAD_MB * 1024 * 1024) {
-      setError(`The files add up to more than the ${MAX_UPLOAD_MB} MB limit per upload.`);
-      return;
-    }
-    setPicked(next);
-    if (next.length) setUseLink(false);
+    const merged = mergePicked(picked, candidates);
+    setError(merged.error);
+    if (merged.error) return;
+    setPicked(merged.picked);
+    if (merged.picked.length) setUseLink(false);
   }
 
   function addFileList(list: FileList | null, withRelPaths: boolean) {

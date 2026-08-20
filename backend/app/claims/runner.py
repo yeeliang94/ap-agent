@@ -127,9 +127,12 @@ async def process_run(run_id: str) -> None:
     db = SessionLocal()
     try:
         run = db.get(ClaimsRun, run_id)
+        source_words = {"zip upload": "an uploaded zip", "file upload": "uploaded files"}
+        source_label = (run.snapshot or {}).get("source", "zip upload")
         telemetry.record(db, run_id, "run", telemetry.INFO, "RUN_STARTED",
-                         f"Claims run started for {run.client}"
-                         + (" from a SharePoint folder." if run.folder_url else " from a zip."))
+                         f"Claims run started for {run.client} from "
+                         + ("a SharePoint folder." if run.folder_url
+                            else f"{source_words.get(source_label, 'an uploaded zip')}."))
 
         # ---- bring the files in ----------------------------------------
         _advance(db, run, ("queued",), status="surveying", progress={})

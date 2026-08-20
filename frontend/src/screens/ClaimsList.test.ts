@@ -1,6 +1,56 @@
 import { describe, expect, it } from "vitest";
 import { makeRunSummary } from "../test/fixtures";
-import { claimsStatusLabel, looksLikeLocalPath } from "./ClaimsList";
+import { claimsStatusLabel, looksLikeLocalPath, mergePicked, Picked } from "./ClaimsList";
+
+function picked(path: string, opts: { size?: number; mtime?: number; name?: string } = {}): Picked {
+  const name = opts.name ?? path.split("/").pop()!;
+  return {
+    path,
+    file: new File([new Uint8Array(opts.size ?? 10)], name, { lastModified: opts.mtime ?? 1000 }),
+  };
+}
+
+describe("mergePicked — the upload's client-side rules", () => {
+  it("keeps a folder tree and appends new files", () => {
+    const first = mergePicked([], [picked("A_1/report.xlsx"), picked("A_1/receipts/grab.pdf")]);
+    expect(first.error).toBe("");
+    const second = mergePicked(first.picked, [picked("B_2/toll.png")]);
+    expect(second.picked.map((p) => p.path)).toEqual([
+      "A_1/report.xlsx", "A_1/receipts/grab.pdf", "B_2/toll.png",
+    ]);
+  });
+
+  it("lets a zip travel only alone", () => {
+    expect(mergePicked([picked("a.pdf")], [picked("b.zip")]).error).toContain("zip travels alone");
+    expect(mergePicked([picked("b.zip")], [picked("a.pdf")]).error).toContain("zip travels alone");
+    expect(mergePicked([], [picked("b.zip")]).error).toBe("");
+  });
+
+  it("names an unsupported type", () => {
+    expect(mergePicked([], [picked("photo.heic")]).error).toContain("photo.heic isn't a supported type");
+  });
+
+  it("keeps an identical re-pick once, but refuses two different files at one path", () => {
+    const once = mergePicked([], [picked("receipt.pdf")]);
+    // The same file picked again (same size + mtime): kept once, silently.
+    const again = mergePicked(once.picked, [picked("receipt.pdf")]);
+    expect(again.error).toBe("");
+    expect(again.picked).toHaveLength(1);
+    // A DIFFERENT file that would land at the same path — even by case
+    // (the staging filesystem may fold case) — is a named error, never a
+    // silent overwrite or drop.
+    const clash = mergePicked(once.picked, [picked("Receipt.pdf", { size: 99 })]);
+    expect(clash.error).toContain('would land at "Receipt.pdf"');
+    expect(clash.picked).toHaveLength(1);
+  });
+
+  it("refuses a set over the size limit, keeping the previous selection", () => {
+    const result = mergePicked([picked("a.pdf", { size: 2 * 1024 * 1024 })],
+      [picked("b.pdf", { size: 2 * 1024 * 1024 })], 3);
+    expect(result.error).toContain("3 MB limit");
+    expect(result.picked.map((p) => p.path)).toEqual(["a.pdf"]);
+  });
+});
 
 describe("claimsStatusLabel", () => {
   it("names the file currently being copied", () => {
