@@ -13,7 +13,8 @@ or **accepted** (stated here; a warning in a log is not an accepted risk).
 - Client claim files (the immutable snapshot) and what they say about people.
 - The Payment Listing rows — money goes where they say.
 - Reviewer decisions and the audit trail.
-- Credentials: the AI key / proxy, the SharePoint session.
+- Credentials: the AI key / proxy, the SharePoint session. The session is
+  held open for a whole folder copy (see 1. File ingestion), not per call.
 - The host the app runs on.
 
 ## Trust boundaries
@@ -38,6 +39,8 @@ or **accepted** (stated here; a warning in a log is not an accepted risk).
 | A file silently dropped | hashed manifest before anything looks inside; every Source Artifact must reach a disposition; `ARTIFACT_UNRESOLVED` blocks output | `test_claims_inventory.py`, `test_claims_baseline.py` |
 | Macros / formulas / links / embedded objects executing | openpyxl never loads VBA; formulas are returned as text beside saved values, never computed; PDF links/scripts/embedded files are counted, never opened | `test_claims_tools.py` |
 | A file changed after the run started | Citations resolve to the hash captured at run start; the snapshot is made read-only once the manifest is built; the replay verifier re-hashes the bytes on disk against the manifest (a missing or altered file is named) as well as the stored artifact hashes | `test_claims_replay.py` |
+| A long-lived SharePoint session widens the credential's exposure or is redirected mid-copy | one session per FOLDER COPY on a worker thread that owns it (`mcp_client.SessionWorker`), not one per process and not shared between runs; the folder address is pinned when the copy opens and a call naming a different folder is refused as a programming error, so an open session cannot be steered elsewhere; the session is closed on the way out including on failure | `test_claims_source.py`, `test_gateway_navigation.py` |
+| A copy stalls with no error and no timeout | a request left queued when the session stops is answered with that failure rather than silently dropped; opening and closing are bounded by `TIMEOUT_SECONDS` | `test_mcp_client.py` |
 
 **Accepted:** a corrupted or malicious file whose parser raises fails that tool
 call (`TOOL_FAILED`, named, redacted) — the run continues; the file stays

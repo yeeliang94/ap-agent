@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.claims import source as batch_source
 from app.docsource import (
     RealMcpSource,
     SourceUnavailable,
@@ -111,6 +112,36 @@ def test_a_document_downloads_end_to_end_through_the_gateway(gateway_source):
     names = source.list_names()
     data = source.get_reference(names[0])
     assert data == (gateway_server.REFERENCE_DIR / names[0]).read_bytes()
+
+
+def test_a_batch_copy_navigates_the_enterprise_gateway_once(
+        gateway_source, tmp_path, monkeypatch):
+    """All files reuse the one expensive site/library discovery."""
+    from app import mcp_client
+
+    counts = {"sessions": 0, "site_resolutions": 0}
+    original_enter = mcp_client.McpSession.__aenter__
+    original_navigate = RealMcpSource._navigate
+
+    async def counted_enter(self):
+        counts["sessions"] += 1
+        return await original_enter(self)
+
+    async def counted_navigate(self, session):
+        counts["site_resolutions"] += 1
+        return await original_navigate(self, session)
+
+    monkeypatch.setattr(mcp_client.McpSession, "__aenter__", counted_enter)
+    monkeypatch.setattr(RealMcpSource, "_navigate", counted_navigate)
+
+    source = gateway_source()
+    with source.batch(PLAIN):
+        entries = batch_source.walk_folder(source, PLAIN)
+        copied = batch_source.download_all(
+            source, PLAIN, entries, tmp_path / "copied")
+
+    assert len(copied) > 1, "the test must exercise repeated downloads"
+    assert counts == {"sessions": 1, "site_resolutions": 1}
 
 
 def test_the_view_page_address_reaches_the_same_folder(gateway_source):

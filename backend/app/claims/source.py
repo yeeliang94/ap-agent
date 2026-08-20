@@ -57,8 +57,14 @@ class QuotaExceeded(Exception):
     """A batch is over one of the confirmed limits; the message names it."""
 
 
-def _retry(what: str, fn):
-    """Call fn() up to RETRIES times, retrying on a source failure."""
+def _retry(what: str, fn, on_retry=None):
+    """Call fn() up to RETRIES times, retrying on a source failure.
+
+    on_retry(what, attempt, total, error) is told about every attempt that
+    is going to be tried again, so a run that is sitting out a throttled
+    gateway can say so instead of looking frozen. `what` is this call's
+    own description, so listing and downloading need no separate shapes.
+    """
     last: Exception | None = None
     for attempt in range(1, RETRIES + 1):
         try:
@@ -67,11 +73,13 @@ def _retry(what: str, fn):
             last = exc
             log.warning("%s attempt %d failed: %s", what, attempt, exc)
             if attempt < RETRIES:
+                if on_retry:
+                    on_retry(what, attempt, RETRIES, exc)
                 time.sleep(0.2 * attempt)
     raise SourceUnavailable(f"{what} failed after {RETRIES} attempts: {last}")
 
 
-def walk_folder(source, folder_url: str) -> list[dict]:
+def walk_folder(source, folder_url: str, on_retry=None) -> list[dict]:
     """Every entry under the batch folder, up to MAX_DEPTH levels deep.
 
     Returns entries as the source lists them ({name, kind, size, id, path})
@@ -83,7 +91,8 @@ def walk_folder(source, folder_url: str) -> list[dict]:
 
     def visit(rel: str, depth: int) -> None:
         listing = _retry(f"listing {rel or 'the batch folder'}",
-                         lambda: source.list_folder(folder_url, rel))
+                         lambda: source.list_folder(folder_url, rel),
+                         on_retry)
         for entry in listing:
             entry = {**entry, "depth": depth}
             entries.append(entry)
@@ -119,18 +128,25 @@ def _check_listing_quotas(entries: list[dict]) -> None:
 
 
 def download_all(source, folder_url: str, entries: list[dict], dest: Path,
-                 on_progress=None) -> list[dict]:
+                 on_progress=None, on_retry=None) -> list[dict]:
     """Copy every file entry into dest, keeping the folder tree.
 
     Returns the file entries with `local` (path under dest) added. A file
     over the size limit is refused here too, for sources whose listing
     does not report sizes.
+
+    on_progress(done, total, current) names the file being fetched, and is
+    called once more at the end with current=None. on_retry has _retry's
+    shape.
     """
     files = [e for e in entries if e["kind"] == "file"]
     done = []
     for i, entry in enumerate(files, 1):
+        if on_progress:
+            on_progress(i - 1, len(files), entry["path"])
         data = _retry(f"downloading {entry['path']}",
-                      lambda e=entry: source.download(folder_url, e))
+                      lambda e=entry: source.download(folder_url, e),
+                      on_retry)
         if len(data) > MAX_FILE_MB * 1024 * 1024:
             raise QuotaExceeded(
                 f"{entry['path']} is {len(data) / 1024 / 1024:.0f} MB — over the "
@@ -139,8 +155,8 @@ def download_all(source, folder_url: str, entries: list[dict], dest: Path,
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         done.append({**entry, "size": len(data), "local": entry["path"]})
-        if on_progress:
-            on_progress(i, len(files))
+    if on_progress:
+        on_progress(len(files), len(files), None)   # done: no file in hand
     return done
 
 

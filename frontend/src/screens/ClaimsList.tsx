@@ -12,10 +12,14 @@ export function claimsStatusLabel(r: ClaimsRunSummary): string {
   switch (r.status) {
     case "queued":
       return "Queued";
-    case "surveying":
+    case "surveying": {
+      const currentFile = r.progress?.file?.split(/[\\/]/).pop();
       return r.progress?.total
-        ? `Copying files ${r.progress.done}/${r.progress.total}`
+        ? `Copying files ${r.progress.done}/${r.progress.total}${
+            currentFile ? ` · ${currentFile}` : ""
+          }`
         : "Reading the folder";
+    }
     case "mapping":
       return "Mapping the folder";
     case "map_ready":
@@ -172,6 +176,16 @@ const EXAMPLE_INSTRUCTIONS =
   "the mileage trips. Receipts are scanned three to a page; the map screenshots " +
   "for mileage are at the back of the receipt PDF. Ignore *_Approval.pdf.”";
 
+/** A local absolute path the backend can check against CLAIMS_LOCAL_ROOT. */
+export function looksLikeLocalPath(value: string): boolean {
+  const path = value.trim();
+  return (
+    path.startsWith("/") ||
+    /^[A-Za-z]:[\\/]/.test(path) ||
+    /^\\\\[^\\]+\\[^\\]+/.test(path)
+  );
+}
+
 // The Copilot-simple start: folder + listing + date (+ an optional
 // paragraph). In local mode a zip and a listing file stand in for links.
 function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => void }) {
@@ -210,9 +224,15 @@ function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => void }) {
 
   const local = settings?.local_mode ?? false;
   const useZip = local && !!zip;
-  const folderOk = useZip || /^https:\/\/\S+/.test(folderUrl.trim()) || (local && folderUrl.trim().startsWith("/"));
+  const folderOk =
+    useZip ||
+    /^https:\/\/\S+/.test(folderUrl.trim()) ||
+    (local && looksLikeLocalPath(folderUrl));
   const listingOk =
-    !!listingFile || listingUrl.trim() === "" || /^https:\/\/\S+/.test(listingUrl.trim()) || (local && listingUrl.trim().startsWith("/"));
+    !!listingFile ||
+    listingUrl.trim() === "" ||
+    /^https:\/\/\S+/.test(listingUrl.trim()) ||
+    (local && looksLikeLocalPath(listingUrl));
   const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(receivedDate);
   const valid = folderOk && listingOk && dateOk && !busy;
   const why = !dateOk

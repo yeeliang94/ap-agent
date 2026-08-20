@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from app.mcp_client import McpError, McpSession  # noqa: E402
+from app.mcp_client import McpError, McpSession, SessionWorker  # noqa: E402
 
 # The server_url fixture (the fake MCP server on a free port) lives in
 # conftest.py, shared with test_real_mcp_source.py.
@@ -115,3 +115,56 @@ async def test_server_side_failure_becomes_McpError(server_url):
         with pytest.raises(McpError) as exc:
             await session.call("sp_resolve_folder_url", {"url": "https://nope/"})
     assert "sp_resolve_folder_url" in str(exc.value)
+
+
+# -- SessionWorker: one session held open for a whole piece of work -------
+#
+# Every one of these is about the same promise: a caller waiting on the
+# worker is always answered. A worker that leaves a request unanswered
+# does not fail a run — it stops it dead, with no error and no timeout,
+# which is the one outcome the whole app is written to avoid.
+
+
+async def test_a_worker_that_cannot_prepare_reports_it_instead_of_hanging(
+        server_url):
+    """start() waits on the session opening; a failure there must surface."""
+    async def prepare(_session):
+        raise McpError("this gateway has no library by that name")
+
+    worker = SessionWorker(server_url, {}, None, prepare)
+    with pytest.raises(McpError) as exc:
+        worker.start()
+    assert "no library by that name" in str(exc.value)
+
+
+async def test_a_call_after_the_session_closed_is_refused_not_awaited(
+        server_url):
+    async def prepare(_session):
+        return {"ok": True}
+
+    async def operation(_session, prepared):
+        return prepared
+
+    worker = SessionWorker(server_url, {}, None, prepare)
+    worker.start()
+    assert worker.call(operation) == {"ok": True}
+    worker.close()
+
+    with pytest.raises(McpError):
+        worker.call(operation)
+
+
+async def test_a_request_left_behind_when_serving_stops_is_answered():
+    """The hang this guards against: a request submitted in the moment the
+    session dies is never picked up, so its caller waits for ever."""
+    from concurrent.futures import Future
+
+    worker = SessionWorker("http://127.0.0.1:1/mcp", {}, None, None)
+    stranded: Future = Future()
+    worker._requests.put((None, stranded))
+
+    worker._stop(McpError("the gateway dropped the connection"))
+
+    assert stranded.done()
+    with pytest.raises(McpError):
+        stranded.result(timeout=0)

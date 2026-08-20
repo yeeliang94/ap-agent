@@ -53,6 +53,7 @@ Run `start.bat` from the repo root. Differences that matter, all in `.env`:
 | `OPENAI_API_KEY` | your OpenAI key | the **enterprise proxy key** (same variable) |
 | `SORT_MODEL` etc. | OpenAI names (`gpt-4o-mini`) | catalogue IDs from `config/models.json` (e.g. `openai.gpt-5.4`) |
 | `DOC_SOURCE` | `local` or `mcp` (fake) | `mcp`, pointed at the real SharePoint MCP |
+| `CLAIMS_LOCAL_ROOT` | optional allowed parent for direct folder ingestion | leave blank when using SharePoint MCP |
 | `PYTHONUTF8` | not needed | **required** — `start.bat` sets it |
 
 Rules inherited from the enterprise repo, already honored in code:

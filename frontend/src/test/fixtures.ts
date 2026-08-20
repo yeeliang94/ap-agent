@@ -4,6 +4,7 @@ import {
   ClaimFlag,
   ClaimRow,
   ClaimsRunDetail,
+  ClaimsRunSummary,
   FlagCatalogue,
 } from "../api";
 
@@ -42,6 +43,19 @@ export function makeRun(over: Partial<ClaimsRunDetail> = {}): ClaimsRunDetail {
     flags: [],
     catalogue: {},
     outputs: {},
+    ...over,
+  };
+}
+
+// The list screen is sent the summary, not the whole detail.
+export function makeRunSummary(
+  over: Partial<ClaimsRunSummary> = {},
+): ClaimsRunSummary {
+  const { id, client, status, error, progress, folder, employee_count,
+    employees_done, open_flags, notes, errors, warnings, created_at } = makeRun();
+  return {
+    id, client, status, error, progress, folder, employee_count,
+    employees_done, open_flags, notes, errors, warnings, created_at,
     ...over,
   };
 }

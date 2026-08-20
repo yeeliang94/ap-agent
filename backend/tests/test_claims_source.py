@@ -6,7 +6,9 @@ conftest) and against local folders. No AI anywhere here.
 from __future__ import annotations
 
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -74,6 +76,140 @@ def test_download_all_copies_the_tree_and_refuses_oversized_files(tmp_path, monk
     assert "MB limit" in str(exc.value)
 
 
+def test_download_progress_names_the_current_file_and_reports_retries(tmp_path):
+    """A slow retry must look busy, not like a frozen counter."""
+    class FlakySource:
+        calls = 0
+
+        def download(self, _folder_url, _entry):
+            self.calls += 1
+            if self.calls == 1:
+                raise SourceUnavailable("SharePoint is rate-limiting us")
+            return b"pdf"
+
+    progress, retries = [], []
+    files = batch_source.download_all(
+        FlakySource(), FOLDER,
+        [{"name": "claim.pdf", "kind": "file", "size": 3,
+          "id": "opaque", "path": "Alice/claim.pdf"}],
+        tmp_path,
+        on_progress=lambda done, total, current: progress.append(
+            (done, total, current)),
+        on_retry=lambda what, attempt, total, error: retries.append(
+            (what, attempt, total, str(error))),
+    )
+
+    assert files[0]["local"] == "Alice/claim.pdf"
+    assert progress == [(0, 1, "Alice/claim.pdf"), (1, 1, None)]
+    assert retries == [
+        ("downloading Alice/claim.pdf", 1, batch_source.RETRIES,
+         "SharePoint is rate-limiting us")
+    ]
+
+
+def test_fetch_batch_scopes_the_session_and_records_a_recovered_retry(
+        tmp_path, monkeypatch):
+    """The production copy boundary opts into batching and the Activity log."""
+    from app.claims import runner
+
+    class Source:
+        active = False
+        downloads = 0
+        entered = 0
+        exited = 0
+
+        @contextmanager
+        def batch(self, _folder_url):
+            self.entered += 1
+            self.active = True
+            try:
+                yield self
+            finally:
+                self.active = False
+                self.exited += 1
+
+        def list_folder(self, _folder_url, rel=""):
+            assert self.active
+            return [] if rel else [
+                {"name": "claim.pdf", "kind": "file", "size": 3,
+                 "id": "opaque", "path": "Alice/claim.pdf"}
+            ]
+
+        def download(self, _folder_url, _entry):
+            assert self.active
+            self.downloads += 1
+            if self.downloads == 1:
+                raise SourceUnavailable("SharePoint is rate-limiting us")
+            return b"pdf"
+
+    class Db:
+        commits = 0
+
+        def commit(self):
+            self.commits += 1
+
+    source, events = Source(), []
+    run = SimpleNamespace(id="batch-run", folder_url=FOLDER, progress={})
+    monkeypatch.setattr(runner, "get_source", lambda _url: source)
+    monkeypatch.setattr(runner, "workspace_for", lambda _run_id: tmp_path / "workspace")
+    monkeypatch.setattr(
+        runner.telemetry, "record",
+        lambda _db, _run_id, stage, level, code, message, detail="", **_kw:
+            events.append((stage, level, code, message, detail)))
+
+    files = runner._fetch_batch(Db(), run, tmp_path / "copied")
+
+    assert files[0]["path"] == "Alice/claim.pdf"
+    assert (source.entered, source.exited, source.downloads) == (1, 1, 2)
+    # The last update has no file in hand, so it names none.
+    assert run.progress == {"done": 1, "total": 1, "what": "downloading"}
+    assert any(code == "SOURCE_RETRY"
+               and "downloading Alice/claim.pdf" in message
+               and "rate-limiting" in detail
+               for _stage, _level, code, message, detail in events)
+
+
+def test_fetching_the_listing_workbook_opens_one_session(tmp_path, monkeypatch):
+    """Finding the workbook and downloading it are one visit, not two."""
+    from app.claims import listing, runner
+
+    class Source:
+        opens = 0
+        active = False
+
+        @contextmanager
+        def batch(self, _folder_url):
+            self.opens += 1
+            self.active = True
+            try:
+                yield self
+            finally:
+                self.active = False
+
+        def list_folder(self, _folder_url, rel=""):
+            assert self.active, "the listing must be read inside the session"
+            return [{"name": "listing.xlsx", "kind": "file", "size": 3,
+                     "id": "opaque", "path": "listing.xlsx"}]
+
+        def download(self, _folder_url, _entry):
+            assert self.active, "the download must reuse the same session"
+            return b"xls"
+
+    source = Source()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(listing, "get_source", lambda _url: source)
+    monkeypatch.setattr(runner, "workspace_for", lambda _run_id: workspace)
+    run = SimpleNamespace(
+        id="listing-run",
+        listing_url="https://example.sharepoint.com/sites/x/AP/listing.xlsx")
+
+    path = listing.listing_path(run)
+
+    assert path is not None and path.read_bytes() == b"xls"
+    assert source.opens == 1
+
+
 @pytest.fixture()
 def real_source(server_url, monkeypatch):
     monkeypatch.setenv("MCP_URL", server_url)
@@ -104,11 +240,58 @@ def test_nested_folder_over_real_mcp_lists_and_downloads_with_retry(real_source,
     assert all((monkeypatch_dest / c["path"]).is_file() for c in copied)
 
 
+@pytest.mark.skipif(not GEN.is_dir(), reason="run samples/generate_claims_sample.py first")
+def test_one_claims_copy_opens_and_resolves_sharepoint_once(
+        real_source, tmp_path, monkeypatch):
+    """The walk and every download share one resolved MCP conversation."""
+    from app import mcp_client
+
+    counts = {"sessions": 0, "resolutions": 0}
+    original_enter = mcp_client.McpSession.__aenter__
+    original_resolve = RealMcpSource._resolve
+
+    async def counted_enter(self):
+        counts["sessions"] += 1
+        return await original_enter(self)
+
+    async def counted_resolve(self, session):
+        counts["resolutions"] += 1
+        return await original_resolve(self, session)
+
+    monkeypatch.setattr(mcp_client.McpSession, "__aenter__", counted_enter)
+    monkeypatch.setattr(RealMcpSource, "_resolve", counted_resolve)
+
+    with real_source.batch(FOLDER):
+        entries = batch_source.walk_folder(real_source, FOLDER)
+        copied = batch_source.download_all(
+            real_source, FOLDER, entries[:6], tmp_path / "copied")
+        # A caller mistake, deliberately NOT SourceUnavailable: that is
+        # what claims/source.py retries, and a bug must not be retried.
+        with pytest.raises(RuntimeError):
+            real_source.list_folder(FOLDER + "/another-batch")
+
+    assert copied, "the test must exercise at least one download"
+    assert counts == {"sessions": 1, "resolutions": 1}
+
+
 def test_source_down_is_a_structured_source_unavailable(monkeypatch):
     monkeypatch.setenv("MCP_URL", "http://127.0.0.1:1/mcp")  # nothing listens here
     src = RealMcpSource(FOLDER)
     with pytest.raises(SourceUnavailable):
         batch_source.walk_folder(src, FOLDER)
+
+
+def test_a_copy_that_never_opens_leaves_the_source_as_it_found_it(monkeypatch):
+    """A failed copy must not leave the source pointed somewhere else."""
+    monkeypatch.setenv("MCP_URL", "http://127.0.0.1:1/mcp")  # nothing listens here
+    src = RealMcpSource(FOLDER)
+
+    with pytest.raises(SourceUnavailable):
+        with src.batch(FOLDER + "/another-batch"):
+            pass
+
+    assert src.folder_url == FOLDER
+    assert src._batch is None
 
 
 @pytest.mark.skipif(not GEN.is_dir(), reason="run samples/generate_claims_sample.py first")

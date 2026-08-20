@@ -18,7 +18,11 @@ Two rules shape this module:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+from concurrent.futures import Future
+from queue import Empty, Queue
+from threading import Lock, Thread
 from typing import Any
 
 try:
@@ -279,3 +283,144 @@ class McpSession:
             # Server-reported failures carry their reason in the content.
             raise McpError(f"tool {tool!r} failed: {_text_of(result)[:500]}")
         return result_payload(result)
+
+
+class SessionWorker:
+    """A synchronous doorway into one long-lived MCP conversation.
+
+    Callers of this module are ordinary synchronous functions, but the SDK
+    is async and a session's context must be entered and left by the same
+    task. A dedicated worker thread owns that task for the whole of one
+    piece of work: copying a claims folder is dozens of downloads that
+    would otherwise each pay for a fresh handshake and a fresh site
+    lookup.
+
+    `prepare` runs once inside the new session and whatever it returns is
+    handed to every operation afterwards, so an expensive lookup happens
+    once. Nothing here interprets what it moves; `prepare` and the
+    operations belong to the caller.
+
+    Operations are served one at a time, deliberately: the enterprise
+    gateway's behaviour under concurrent calls is not yet known, and a
+    serial queue cannot be the thing that gets a run throttled.
+    """
+
+    def __init__(self, url: str, headers: dict[str, str] | None,
+                 auth: Any, prepare) -> None:
+        self._url = url
+        self._headers = headers
+        self._auth = auth
+        self._prepare = prepare
+        self._requests: Queue = Queue()
+        self._ready: Future = Future()
+        self._closed: Future = Future()
+        # _stopped and _failure are read and written from both threads, so
+        # they and the queue move together under this lock.
+        self._lock = Lock()
+        self._stopped = False
+        self._failure: BaseException | None = None
+        self._thread = Thread(target=self._run, name="mcp-session-worker",
+                              daemon=True)
+
+    # -- the worker thread ------------------------------------------------
+
+    def _run(self) -> None:
+        try:
+            asyncio.run(self._serve())
+        except BaseException as exc:  # the loop itself could not be run
+            self._stop(exc)
+
+    async def _serve(self) -> None:
+        try:
+            async with McpSession(self._url, self._headers,
+                                  auth=self._auth) as session:
+                prepared = await self._prepare(session)
+                self._ready.set_result(None)
+                while True:
+                    request = await asyncio.to_thread(self._requests.get)
+                    if request is None:
+                        break
+                    operation, result = request
+                    try:
+                        value = await operation(session, prepared)
+                    except BaseException as exc:
+                        # One failed operation is the caller's to handle;
+                        # the session stays open for the next one.
+                        result.set_exception(exc)
+                    else:
+                        result.set_result(value)
+        except BaseException as exc:
+            self._stop(exc)
+        else:
+            self._stop(None)
+
+    def _stop(self, exc: BaseException | None) -> None:
+        """Serving has ended: refuse new work and answer what is queued.
+
+        Answering the queue is the point. A request submitted in the
+        moment the session died would otherwise never have its result
+        set, and the caller waiting on it would wait for ever.
+        """
+        with self._lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            self._failure = exc
+            pending = []
+            while True:
+                try:
+                    pending.append(self._requests.get_nowait())
+                except Empty:
+                    break
+        if exc is None:
+            if not self._closed.done():
+                self._closed.set_result(None)
+        else:
+            if not self._ready.done():
+                self._ready.set_exception(exc)
+            if not self._closed.done():
+                self._closed.set_exception(exc)
+        for request in pending:
+            if request is None:
+                continue
+            _, result = request
+            if not result.done():
+                result.set_exception(exc or McpError(
+                    "the MCP session closed before this call was served"))
+
+    # -- the calling thread -----------------------------------------------
+
+    def start(self) -> None:
+        """Open the session and run `prepare`, or raise what stopped it."""
+        try:
+            self._thread.start()
+        except BaseException as exc:
+            # No worker means nothing will ever answer, so say so now
+            # rather than leaving close() waiting on a thread that never
+            # ran.
+            self._stop(exc)
+            raise
+        self._ready.result(timeout=TIMEOUT_SECONDS)
+
+    def call(self, operation):
+        """Run one operation on the worker's session, and wait for it.
+
+        `operation` is an async callable taking (session, prepared).
+        """
+        result: Future = Future()
+        with self._lock:
+            if self._stopped:
+                raise McpError(
+                    "the MCP session is already closed") from self._failure
+            self._requests.put((operation, result))
+        return result.result()
+
+    def close(self) -> None:
+        """Leave the session, and report anything that went wrong in it."""
+        if self._thread.is_alive():
+            self._requests.put(None)
+            self._thread.join(timeout=TIMEOUT_SECONDS)
+            if self._thread.is_alive():
+                raise McpError("the MCP session did not close within "
+                               f"{TIMEOUT_SECONDS:.0f} seconds")
+        self._closed.result(timeout=TIMEOUT_SECONDS)

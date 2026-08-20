@@ -9,6 +9,7 @@
 | `CLAIMS_SHADOW_INVESTIGATION` | off | with the agentic switch off, the investigator also runs on each new run; its result is compared and recorded (`SHADOW_RESULT`, `shadow_investigation`), never used |
 | `CLAIMS_FULL_DUMP_GROUPING` | off | the regrouping actions at Map & Group (create / merge / split / move / role) answer 400 and are hidden; the gate, the claim-summary sheet choice, claimants and file dispositions stay — a flat folder is inventoried and, with the agentic switch on, grouped by the investigator, but the reviewer cannot regroup it on screen |
 | `CLAIMS_PYTHON_SANDBOX` + `CLAIMS_SANDBOX_RUNNER` + `CLAIMS_SANDBOX_ISOLATED` | off | `run_python` absent from the allowlist (`docs/SANDBOX.md`) |
+| `CLAIMS_LOCAL_ROOT` | off (blank) | a folder path is refused exactly like any other non-https link and zip upload stays the local way in; see "Local or synced-folder ingestion" below |
 
 Two reviewer-set profile values deliberately reach the output and later
 runs: `listing_columns` may pin a literal into a column (the literal is a
@@ -20,6 +21,32 @@ role pattern to the profile exactly as the delivered map's "remember" did
 
 Migrations run at every start, unconditionally and additively (`claims_schema`
 records what was applied). No switch skips or reverses one.
+
+## Local or synced-folder ingestion
+
+With `DOC_SOURCE=local`, a reviewer may paste a folder path instead of a
+SharePoint URL when `CLAIMS_LOCAL_ROOT` names the parent tree the server is
+allowed to read. A OneDrive-synced SharePoint library is the fastest option:
+the run still copies an immutable snapshot, but avoids downloading each file
+through the gateway. Keep the allowed root narrow; a drive root or whole user
+directory would expose unrelated files to anyone who can start a run. Leaving
+the value blank disables folder-path ingestion and leaves zip upload available.
+
+## Copying a SharePoint folder: one session, serial calls
+
+A folder copy holds ONE MCP session open for the whole copy (`docsource.batch`
+over `mcp_client.SessionWorker`) and resolves the site and library once inside
+it, rather than once per file. The listing workbook is fetched the same way.
+The session is per FOLDER, not per run: a run that also fetches a listing
+workbook from a different folder opens a second one.
+
+Calls on that session are served **one at a time, deliberately**. Copying
+files concurrently is the obvious next speed-up and is **deferred**: the
+enterprise gateway's behaviour under concurrent calls (its throttling and
+per-tenant limits) is not documented to us, and a parallel copy that trips it
+would be slower and more visible than a serial one. Revisit once a real
+gateway has been measured; until then serial is the recorded decision, not an
+oversight.
 
 ## Budgets
 

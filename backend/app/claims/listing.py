@@ -110,11 +110,15 @@ def listing_path(run: ClaimsRun) -> Path | None:
     if not name:
         raise SourceUnavailable("The listing link does not end in a file name.")
     source = get_source(folder_url)
-    entries = source.list_folder(folder_url, "")
-    entry = next((e for e in entries if e["name"] == unquote(name)), None)
-    if entry is None:
-        raise SourceUnavailable(f"{unquote(name)!r} is not in the linked folder ({path}).")
-    local.write_bytes(source.download(folder_url, entry))
+    # Finding the workbook and fetching it are one visit to one folder, so
+    # they share one session and one site lookup (docsource.batch).
+    with source.batch(folder_url):
+        entries = source.list_folder(folder_url, "")
+        entry = next((e for e in entries if e["name"] == unquote(name)), None)
+        if entry is None:
+            raise SourceUnavailable(
+                f"{unquote(name)!r} is not in the linked folder ({path}).")
+        local.write_bytes(source.download(folder_url, entry))
     return local
 
 

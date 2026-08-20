@@ -235,7 +235,7 @@ export interface ClaimsRunSummary {
   client: string;
   status: string; // queued | surveying | mapping | map_ready | verifying | ready | failed
   error: string;
-  progress: { done?: number; total?: number; what?: string; employees?: number };
+  progress: { done?: number; total?: number; what?: string; file?: string; employees?: number };
   folder: string;
   employee_count: number;
   employees_done: number;

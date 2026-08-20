@@ -233,15 +233,35 @@ def _fetch_batch(db, run: ClaimsRun, dest: Path) -> list[dict]:
         entries = batch_source.unpack_zip(zip_path, dest)
         return [e for e in entries if e["kind"] == "file"]
     source = get_source(run.folder_url)
-    entries = batch_source.walk_folder(source, run.folder_url)
-    telemetry.record(db, run.id, "source", telemetry.INFO, "FOLDER_LISTED",
-                     f"Folder listed: {sum(1 for e in entries if e['kind'] == 'folder')} "
-                     f"subfolder(s), {sum(1 for e in entries if e['kind'] == 'file')} file(s).")
 
-    def on_progress(done: int, total: int) -> None:
-        _set(db, run, progress={"done": done, "total": total, "what": "downloading"})
+    def on_progress(done: int, total: int, current: str | None) -> None:
+        progress = {"done": done, "total": total, "what": "downloading"}
+        if current:
+            progress["file"] = current
+        _set(db, run, progress=progress)
 
-    return batch_source.download_all(source, run.folder_url, entries, dest, on_progress)
+    def on_retry(what: str, attempt: int, total: int, error: Exception) -> None:
+        # SourceUnavailable is this app's reviewer-facing failure and is
+        # already written for one; anything else is engineer text and is
+        # named rather than quoted. The raw text goes to detail either way.
+        reason = (str(error) if isinstance(error, SourceUnavailable)
+                  else telemetry.describe_failure(error))
+        telemetry.record(
+            db, run.id, "source", telemetry.WARNING, "SOURCE_RETRY",
+            f"Copying the folder: {what} failed on attempt {attempt} of "
+            f"{total} ({reason}); retrying.",
+            detail=str(error))
+
+    # Every source offers batch(); for the real SharePoint one it holds a
+    # single session and a single site lookup open across the walk and
+    # every download that follows.
+    with source.batch(run.folder_url):
+        entries = batch_source.walk_folder(source, run.folder_url, on_retry)
+        telemetry.record(db, run.id, "source", telemetry.INFO, "FOLDER_LISTED",
+                         f"Folder listed: {sum(1 for e in entries if e['kind'] == 'folder')} "
+                         f"subfolder(s), {sum(1 for e in entries if e['kind'] == 'file')} file(s).")
+        return batch_source.download_all(
+            source, run.folder_url, entries, dest, on_progress, on_retry)
 
 
 async def start_verification(run_id: str) -> None:

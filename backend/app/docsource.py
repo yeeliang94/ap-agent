@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -80,6 +81,11 @@ class LocalFolderSource:
         if not path.is_file():
             raise SourceUnavailable(f"{entry['path']!r} not found under {folder_url}")
         return path.read_bytes()
+
+    @contextmanager
+    def batch(self, folder_url: str):
+        """Nothing to hold open: every read here is a filesystem read."""
+        yield self
 
 
 def _contained(root: Path, rel: str, what: str) -> Path:
@@ -273,6 +279,11 @@ class McpSource:
             f"Download of {entry['path']!r} failed after {self.RETRIES} attempts "
             f"({last_error}). Details are in the server log.")
 
+    @contextmanager
+    def batch(self, folder_url: str):
+        """Nothing to hold open: each call here is its own HTTP request."""
+        yield self
+
 
 class RealMcpSource:
     """The enterprise SharePoint service, over the real MCP protocol.
@@ -321,6 +332,8 @@ class RealMcpSource:
         value = os.getenv("MCP_AUTH_VALUE", "").strip()
         self.headers = {header: value} if header and value else {}
         self.folder_url = folder_url or settings_store.get_setting("sharepoint_folder_url")
+        # The open folder copy's mcp_client.SessionWorker, while one is open.
+        self._batch = None
         log.info("real MCP source: url=%s folder=%s auth_header=%s",
                  self.url, self.folder_url,
                  next(iter(self.headers), "(none set)"))
@@ -527,12 +540,12 @@ class RealMcpSource:
                 r.raise_for_status()
                 return r.content
 
-    def _guarded(self, coro, what: str):
-        from .mcp_client import McpError, run_sync
+    def _guard_call(self, call, what: str):
+        from .mcp_client import McpError
         from .sharepoint_auth import SignInRequired
 
         try:
-            return run_sync(coro)
+            return call()
         except SourceUnavailable:
             raise  # already carries its specific, user-facing reason
         except SignInRequired as exc:
@@ -549,11 +562,79 @@ class RealMcpSource:
                 f"SharePoint source unavailable ({_describe(exc)}). "
                 "Details are in the server log.") from exc
 
+    def _guard_coro(self, coro, what: str):
+        """_guard_call for a coroutine that needs its own private loop."""
+        from .mcp_client import run_sync
+
+        return self._guard_call(lambda: run_sync(coro), what)
+
+    def _batch_call(self, folder_url: str, operation, what: str):
+        """Run one operation on the open folder copy's session.
+
+        batch() pins the folder for as long as it is open, so a caller
+        asking for a different one has made a mistake in this program —
+        not met an unreachable server. It must not look like one: the
+        retry helper in claims/source.py exists to sit out a flaky
+        gateway, and would sit out a bug three times over instead.
+        """
+        if folder_url != self.folder_url:
+            raise RuntimeError(
+                "a SharePoint folder copy cannot change folder address "
+                "while it is open")
+        return self._guard_call(lambda: self._batch.call(operation), what)
+
+    @contextmanager
+    def batch(self, folder_url: str):
+        """Keep one session and one resolved folder for a whole folder copy.
+
+        Every source offers this, so the claims runner has no special
+        case; here it is the one that has something to hold open. The
+        session and the site/library lookup are paid for once instead of
+        once per file.
+        """
+        from .mcp_client import SessionWorker
+
+        if self._batch is not None:
+            raise RuntimeError("a folder copy is already open on this source")
+        previous = self.folder_url
+        # _resolve reads folder_url, so it is pinned for as long as the copy
+        # is open and put back however the copy ends — including when the
+        # session never opens at all.
+        self.folder_url = folder_url
+        worker = SessionWorker(self.url, self.headers, self._auth(),
+                               self._resolve)
+        try:
+            self._guard_call(worker.start, "start the folder copy")
+            self._batch = worker
+            yield self
+        except BaseException:
+            self._close_quietly(worker)
+            raise
+        else:
+            self._guard_call(worker.close, "close the folder copy")
+        finally:
+            self._batch = None
+            self.folder_url = previous
+
+    @staticmethod
+    def _close_quietly(worker) -> None:
+        """Leave the session on the way out of a failure.
+
+        The failure already in flight is the one worth reporting; a second
+        one raised while closing would replace it with something less
+        useful, so it goes to the log alone.
+        """
+        try:
+            worker.close()
+        except BaseException:
+            log.warning("the SharePoint folder copy also failed while closing",
+                        exc_info=True)
+
     def list_names(self) -> list[str]:
-        return self._guarded(self._alist_names(), "list_names")
+        return self._guard_coro(self._alist_names(), "list_names")
 
     def get_reference(self, name: str) -> bytes:
-        return self._guarded(self._aget_reference(name), f"get_reference {name!r}")
+        return self._guard_coro(self._aget_reference(name), f"get_reference {name!r}")
 
     # -- folder walking (claims batches) ---------------------------------
     # A batch is a folder of employee subfolders. Listing a SUBfolder is
@@ -570,12 +651,9 @@ class RealMcpSource:
         sub["path"] = path
         return sub
 
-    async def _alist_folder(self, folder_url: str, rel: str) -> list[dict]:
-        from .mcp_client import McpSession
-
-        async with McpSession(self.url, self.headers, auth=self._auth()) as session:
-            resolved = await self._resolve(session)
-            payload = await self._alisting(session, self._subfolder(resolved, rel))
+    async def _alist_folder_in(self, session, resolved: dict,
+                               rel: str) -> list[dict]:
+        payload = await self._alisting(session, self._subfolder(resolved, rel))
         entries = []
         for item in _unwrap_items(payload):
             if not isinstance(item, dict):
@@ -591,37 +669,64 @@ class RealMcpSource:
                 rel=rel))
         return entries
 
+    async def _alist_folder(self, rel: str) -> list[dict]:
+        from .mcp_client import McpSession
+
+        async with McpSession(self.url, self.headers, auth=self._auth()) as session:
+            resolved = await self._resolve(session)
+            return await self._alist_folder_in(session, resolved, rel)
+
+    async def _adownload_in(self, session, resolved: dict,
+                            folder_url: str, entry: dict) -> bytes:
+        parent, _, name = entry["path"].rpartition("/")
+        location = self._subfolder(resolved, parent)
+        tool = self._tool(session, "MCP_TOOL_GET_DOCUMENT", self.DOCUMENT_KEYWORDS)
+        accepted = session.accepted_arguments(tool)
+        id_args = [k for k in _ID_KEYS if accepted and k in accepted] or ["item_id"]
+        args = {**_folder_args(location, folder_url), "name": name}
+        args.update(dict.fromkeys(id_args, entry["id"]))
+        payload = await session.call(tool, args)
+        data = _inline_bytes(payload)
+        if data is not None:
+            return data
+        link = _download_link(payload)
+        if not link:
+            raise SourceUnavailable(_no_document_reason(entry["path"], payload))
+        link_headers = self.headers if _same_host(link, self.url) else {}
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.get(link, headers=link_headers)
+            r.raise_for_status()
+            return r.content
+
     async def _adownload(self, folder_url: str, entry: dict) -> bytes:
         from .mcp_client import McpSession
 
-        parent, _, name = entry["path"].rpartition("/")
         async with McpSession(self.url, self.headers, auth=self._auth()) as session:
-            resolved = self._subfolder(await self._resolve(session), parent)
-            tool = self._tool(session, "MCP_TOOL_GET_DOCUMENT", self.DOCUMENT_KEYWORDS)
-            accepted = session.accepted_arguments(tool)
-            id_args = [k for k in _ID_KEYS if accepted and k in accepted] or ["item_id"]
-            args = {**_folder_args(resolved, folder_url), "name": name}
-            args.update(dict.fromkeys(id_args, entry["id"]))
-            payload = await session.call(tool, args)
-            data = _inline_bytes(payload)
-            if data is not None:
-                return data
-            link = _download_link(payload)
-            if not link:
-                raise SourceUnavailable(_no_document_reason(entry["path"], payload))
-            link_headers = self.headers if _same_host(link, self.url) else {}
-            async with httpx.AsyncClient(timeout=60) as client:
-                r = await client.get(link, headers=link_headers)
-                r.raise_for_status()
-                return r.content
+            resolved = await self._resolve(session)
+            return await self._adownload_in(
+                session, resolved, folder_url, entry)
 
     def list_folder(self, folder_url: str, rel: str = "") -> list[dict]:
+        what = f"list_folder {rel!r}"
+        if self._batch is not None:
+            return self._batch_call(
+                folder_url,
+                lambda session, resolved: self._alist_folder_in(
+                    session, resolved, rel),
+                what)
         self.folder_url = folder_url
-        return self._guarded(self._alist_folder(folder_url, rel), f"list_folder {rel!r}")
+        return self._guard_coro(self._alist_folder(rel), what)
 
     def download(self, folder_url: str, entry: dict) -> bytes:
+        what = f"download {entry['path']!r}"
+        if self._batch is not None:
+            return self._batch_call(
+                folder_url,
+                lambda session, resolved: self._adownload_in(
+                    session, resolved, folder_url, entry),
+                what)
         self.folder_url = folder_url
-        return self._guarded(self._adownload(folder_url, entry), f"download {entry['path']!r}")
+        return self._guard_coro(self._adownload(folder_url, entry), what)
 
 
 # --- reading a SharePoint address the way a person copies it ----------------
