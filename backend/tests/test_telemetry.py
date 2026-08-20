@@ -10,6 +10,7 @@ them failed" is reported as one event rather than N unrelated ones.
 from __future__ import annotations
 
 import asyncio
+import ssl
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -82,6 +83,63 @@ def test_network_failures_are_translated_for_a_non_engineer():
     tls = telemetry.describe_failure(RuntimeError("certificate verify failed"))
     assert "VPN" in dns
     assert "certificate" in tls
+
+
+def test_a_cut_connection_is_not_reported_as_a_bad_certificate():
+    """The regression this test exists for: every Python TLS error signs
+    its message with "(_ssl.c:NNNN)", so a classifier matching the bare
+    word "ssl" called a dropped stream a rejected certificate — and sent
+    reviewers to IT over a certificate that was never in question."""
+    cut = telemetry.describe_failure(
+        httpx.ReadError("EOF occurred in violation of protocol (_ssl.c:2426)"))
+    assert "certificate" not in cut
+    assert "trying again" in cut
+
+
+def test_a_real_rejected_certificate_still_says_so():
+    """The other half of the same fix: tightening the match must not stop
+    an actual trust failure from being named."""
+    for exc in (
+        httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate "
+                           "verify failed: unable to get local issuer "
+                           "certificate (_ssl.c:1006)"),
+        ssl.SSLCertVerificationError("unable to get local issuer certificate"),
+    ):
+        assert "certificate" in telemetry.describe_failure(exc)
+
+
+def test_a_broken_stream_never_reaches_a_reviewer_as_jargon():
+    """A gateway hanging up mid-reply arrives as ReadError with no useful
+    message at all, or as RemoteProtocolError. Both used to be shown to
+    the reviewer as those very words."""
+    for exc in (httpx.ReadError(""),
+                httpx.ReadError("[Errno 54] Connection reset by peer"),
+                httpx.RemoteProtocolError("Server disconnected without "
+                                          "sending a response.")):
+        reason = telemetry.describe_failure(exc)
+        assert type(exc).__name__ not in reason
+        assert "trying again" in reason
+
+
+def test_a_broken_stream_is_blamed_on_the_system_not_the_document():
+    """The costly half of the bug. checks.py asks is_service_failure to
+    decide whether to say "a problem with the system" or to point at the
+    document. An unregistered reason quietly answers "the document", and
+    a reviewer rescans a perfectly good invoice over a gateway hiccup."""
+    for exc in (httpx.ReadError(""),
+                httpx.ReadError("EOF occurred in violation of protocol (_ssl.c:2426)"),
+                httpx.RemoteProtocolError("Server disconnected")):
+        assert telemetry.is_service_failure(telemetry.describe_failure(exc))
+
+
+def test_a_handshake_failure_is_not_dressed_up_as_a_certificate_problem():
+    """A protocol-version mismatch is a TLS error but not a trust error.
+    It should fall through to the general unreachable advice."""
+    reason = telemetry.describe_failure(
+        httpx.ConnectError("[SSL: WRONG_VERSION_NUMBER] wrong version "
+                           "number (_ssl.c:1000)"))
+    assert "certificate" not in reason
+    assert telemetry.is_service_failure(reason)
 
 
 def test_an_unrecognisable_failure_falls_back_to_its_type():

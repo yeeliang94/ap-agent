@@ -74,6 +74,24 @@ _STATUS_REASONS = {
 _DNS_MARKERS = ("getaddrinfo", "11001", "nodename nor servname",
                 "name or service not known", "temporary failure in name resolution")
 
+# What a REJECTED CERTIFICATE actually looks like. Deliberately NOT the
+# bare word "ssl": every Python TLS error signs off with the C file and
+# line that raised it — "(_ssl.c:2426)" — so matching "ssl" matches every
+# TLS-layer failure there is, a cut connection included. That sent
+# reviewers to IT about certificates when the gateway had merely hung up.
+_CERT_MARKERS = ("certificate", "unable to get local issuer", "unknown ca",
+                 "self-signed", "self signed", "hostname mismatch")
+
+# A connection that opened and then broke part-way through, as opposed to
+# one that never opened at all. Kept apart from the unreachable case
+# because the advice differs: this one is usually worth simply retrying.
+# Matched on class names as well as text, since httpx raises ReadError
+# with an empty message when the far end just goes quiet.
+_CUT_CLASSES = ("ReadError", "WriteError", "ProtocolError",
+                "IncompleteRead", "ChunkedEncoding")
+_CUT_MARKERS = ("reset by peer", "server disconnected", "eof occurred",
+                "connection broken", "connection aborted")
+
 _NO_DNS = ("the server name could not be looked up — this usually means "
            "the VPN or corporate network is not connected")
 _BAD_CERT = ("the server's security certificate was rejected — the "
@@ -82,6 +100,9 @@ _TOO_SLOW = "the service did not answer in time"
 _REFUSED = "the server refused the connection"
 _UNREACHABLE = ("the server could not be reached — check the address, the "
                 "VPN, and whether a proxy is required")
+_STREAM_CUT = ("the connection to the service broke part-way through — "
+               "usually a temporary network or gateway problem, so the run "
+               "is worth trying again")
 
 # Every reason above is a DEPENDENCY failing, never the document. Kept as
 # a set so callers can tell the two apart: telling a reviewer that a
@@ -90,7 +111,7 @@ _UNREACHABLE = ("the server could not be reached — check the address, the "
 # afternoon on a perfectly good invoice.
 SERVICE_REASONS = frozenset(
     list(_STATUS_REASONS.values())
-    + [_NO_DNS, _BAD_CERT, _TOO_SLOW, _REFUSED, _UNREACHABLE])
+    + [_NO_DNS, _BAD_CERT, _TOO_SLOW, _REFUSED, _UNREACHABLE, _STREAM_CUT])
 
 
 def is_service_failure(reason: str) -> bool:
@@ -149,7 +170,10 @@ def _describe_one(exc: BaseException) -> str:
     name = type(exc).__name__
     if any(marker in text for marker in _DNS_MARKERS):
         return _NO_DNS
-    if "certificate" in text or "ssl" in text or "tls" in name.lower():
+    # "certificate" in the class name covers ssl.SSLCertVerificationError
+    # and ssl.CertificateError, which carry the detail in their args.
+    if (any(marker in text for marker in _CERT_MARKERS)
+            or "certificate" in name.lower()):
         return _BAD_CERT
     if "Timeout" in name or "timed out" in text:
         return _TOO_SLOW
@@ -157,6 +181,11 @@ def _describe_one(exc: BaseException) -> str:
         return _REFUSED
     if "ConnectError" in name or "ConnectionError" in name:
         return _UNREACHABLE
+    # Last, so that a failure which never got a connection up keeps its
+    # more specific reason above rather than being called a broken stream.
+    if (any(cls in name for cls in _CUT_CLASSES)
+            or any(marker in text for marker in _CUT_MARKERS)):
+        return _STREAM_CUT
     return ""
 
 
