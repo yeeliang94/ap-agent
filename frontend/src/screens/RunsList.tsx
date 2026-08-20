@@ -5,12 +5,12 @@ import {
   getSettings,
   getSharePointStatus,
   listRuns,
-  saveSettings,
   uploadBatch,
   AppSettings,
   RunSummary,
   SharePointStatus,
 } from "../api";
+import Info from "../components/Info";
 
 const STAGE_LABEL: Record<string, string> = {
   queued: "Queued",
@@ -21,11 +21,12 @@ const STAGE_LABEL: Record<string, string> = {
   failed: "Failed",
 };
 
-// Screen A: your runs. A run starts only when you upload a batch here.
+// Screen A: your invoice runs. A run starts only when you upload a batch
+// here. The client name and other settings live in the Settings section.
 export default function RunsList({ onOpen }: { onOpen: (id: string) => void }) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
-  // One client at a time, set on screen (Settings below) — the backend
-  // rejects uploads for any other name.
+  // One client at a time, set in Settings — the backend rejects uploads
+  // for any other name.
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const client = settings?.client_name ?? "";
   const [error, setError] = useState("");
@@ -77,34 +78,36 @@ export default function RunsList({ onOpen }: { onOpen: (id: string) => void }) {
 
   return (
     <section>
-      <SharePointCard />
-      <div className="card uploader">
+      <div className="hero">
         <div>
-          <b>Start a new run</b>
-          <span className="sub">Upload a client's batch zip — nothing runs until you do</span>
+          <h1>Invoice runs</h1>
+          <span className="sub">
+            One run per uploaded invoice batch{client ? ` · ${client}` : ""}
+            <Info text="The batch is checked against this client's policy and listing. Change the client in Settings — the backend rejects other names." />
+          </span>
         </div>
-        {/* The batch is checked against THIS client's policy and listing.
-            Change it in Settings below — the backend rejects other names. */}
-        <input value={client} readOnly title="Set in Settings below" />
-        <input
-          ref={fileInput}
-          type="file"
-          accept=".zip"
-          style={{ display: "none" }}
-          onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
-        />
-        <button
-          className="btn primary"
-          disabled={busy || !client.trim()}
-          onClick={() => fileInput.current?.click()}
-        >
-          {busy ? "Uploading…" : "Upload batch"}
-        </button>
+        <div className="row">
+          <input
+            ref={fileInput}
+            type="file"
+            accept=".zip"
+            style={{ display: "none" }}
+            onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
+          />
+          <button
+            className="btn primary"
+            disabled={busy || !client.trim()}
+            onClick={() => fileInput.current?.click()}
+          >
+            {busy ? "Uploading…" : "Upload batch"}
+          </button>
+        </div>
       </div>
+      <SharePointCard />
       {error && <p className="error">{error}</p>}
 
       {runs.map((r) => (
-        <div key={r.id} className={`card row ${r.status === "failed" ? "banner bad" : ""}`}>
+        <div key={r.id} className={`card runcard ${r.status === "failed" ? "banner bad" : ""}`}>
           <div className="grow">
             <b>{r.client}</b>
             <span className="sub">
@@ -112,7 +115,7 @@ export default function RunsList({ onOpen }: { onOpen: (id: string) => void }) {
             </span>
             {/* A failed run's reason belongs on the row, not hidden in a
                 tooltip — it is the whole story of that run. */}
-            {r.status === "failed" && r.error && <span className="sub">{r.error}</span>}
+            {r.status === "failed" && r.error && <span className="sub error">{r.error}</span>}
           </div>
 
           {/* Shown for EVERY status. A run can finish "ready" with errors
@@ -154,9 +157,14 @@ export default function RunsList({ onOpen }: { onOpen: (id: string) => void }) {
           )}
         </div>
       ))}
-      {runs.length === 0 && !error && <p className="sub">No runs yet.</p>}
-
-      {settings && <SettingsCard current={settings} onSaved={setSettings} />}
+      {runs.length === 0 && !error && (
+        <div className="card">
+          <div className="empty">
+            <b>No invoice runs yet</b>
+            Upload a batch zip above to start one.
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -232,100 +240,6 @@ function SharePointCard() {
           {busy ? "Waiting for sign-in…" : "Connect SharePoint"}
         </button>
       )}
-      {error && <p className="error">{error}</p>}
-    </div>
-  );
-}
-
-// The two values a reviewer owns: whose policy applies, and where the
-// reference files (payment listing, policy sheet, bank template) live.
-// Secrets — API keys, the proxy, the MCP endpoint — stay in .env, set by IT.
-function SettingsCard({
-  current,
-  onSaved,
-}: {
-  current: AppSettings;
-  onSaved: (s: AppSettings) => void;
-}) {
-  const [clientName, setClientName] = useState(current.client_name);
-  const [folderUrl, setFolderUrl] = useState(current.sharepoint_folder_url);
-  const [preparedBy, setPreparedBy] = useState(current.draft_prepared_by ?? "");
-  const [reviewedBy, setReviewedBy] = useState(current.draft_reviewed_by ?? "");
-  const [bankCharge, setBankCharge] = useState(current.draft_bank_charge ?? "0.10");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [saved, setSaved] = useState(false);
-
-  const dirty =
-    clientName !== current.client_name ||
-    folderUrl !== current.sharepoint_folder_url ||
-    preparedBy !== (current.draft_prepared_by ?? "") ||
-    reviewedBy !== (current.draft_reviewed_by ?? "") ||
-    bankCharge !== (current.draft_bank_charge ?? "0.10");
-
-  async function save() {
-    setBusy(true);
-    setError("");
-    setSaved(false);
-    try {
-      onSaved(
-        await saveSettings({
-          client_name: clientName,
-          sharepoint_folder_url: folderUrl,
-          draft_prepared_by: preparedBy,
-          draft_reviewed_by: reviewedBy,
-          draft_bank_charge: bankCharge,
-        })
-      );
-      setSaved(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save settings");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="card settings">
-      <b>Settings</b>
-      <span className="sub">
-        Which client's policy applies, and the SharePoint folder holding the three
-        reference files. Keys and connection secrets stay in .env.
-      </span>
-      <label className="editrow">
-        <span>client name</span>
-        <input value={clientName} onChange={(e) => setClientName(e.target.value)} />
-      </label>
-      <label className="editrow">
-        <span>SharePoint folder URL</span>
-        <input
-          value={folderUrl}
-          placeholder="https://…sharepoint.com/sites/…  (copy from the browser)"
-          onChange={(e) => setFolderUrl(e.target.value)}
-        />
-      </label>
-      <span className="sub">
-        For the drafted payment-listing tab: who signs it, and the bank charge per
-        payment used in its fund figures.
-      </span>
-      <label className="editrow">
-        <span>Prepared by (draft)</span>
-        <input value={preparedBy} onChange={(e) => setPreparedBy(e.target.value)} />
-      </label>
-      <label className="editrow">
-        <span>Reviewed by (draft)</span>
-        <input value={reviewedBy} onChange={(e) => setReviewedBy(e.target.value)} />
-      </label>
-      <label className="editrow">
-        <span>Bank charge per payment (RM)</span>
-        <input value={bankCharge} inputMode="decimal" onChange={(e) => setBankCharge(e.target.value)} />
-      </label>
-      <div className="actions">
-        <button className="btn primary" disabled={busy || !dirty} onClick={save}>
-          {busy ? "Saving…" : "Save settings"}
-        </button>
-        {saved && !dirty && <span className="sub">Saved — applies to the next run.</span>}
-      </div>
       {error && <p className="error">{error}</p>}
     </div>
   );

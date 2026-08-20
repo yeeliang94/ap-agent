@@ -327,6 +327,36 @@ def test_unpack_zip_refuses_path_escapes_and_bad_zips(tmp_path):
         batch_source.unpack_zip(bad, dest)
 
 
+def test_ingest_uploaded_keeps_the_folder_tree(tmp_path):
+    staged, dest = tmp_path / "upload", tmp_path / "out"
+    (staged / "A_1" / "receipts").mkdir(parents=True)
+    (staged / "A_1" / "report.xlsx").write_bytes(b"xlsx")
+    (staged / "A_1" / "receipts" / "grab.pdf").write_bytes(b"pdf")
+    (staged / "flat.pdf").write_bytes(b"pdf")
+    entries = batch_source.ingest_uploaded(staged, dest)
+    files = {e["path"]: e for e in entries if e["kind"] == "file"}
+    assert set(files) == {"A_1/report.xlsx", "A_1/receipts/grab.pdf", "flat.pdf"}
+    assert {e["path"] for e in entries if e["kind"] == "folder"} == {"A_1", "A_1/receipts"}
+    assert (dest / "A_1" / "receipts" / "grab.pdf").read_bytes() == b"pdf"
+    assert all("local" in f and f["size"] for f in files.values())
+
+
+def test_ingest_uploaded_enforces_the_run_quotas(tmp_path, monkeypatch):
+    staged, dest = tmp_path / "upload", tmp_path / "out"
+    staged.mkdir()
+    (staged / "a.pdf").write_bytes(b"pdf")
+    (staged / "b.pdf").write_bytes(b"pdf")
+    monkeypatch.setattr(batch_source, "MAX_TOTAL_FILES", 1)
+    with pytest.raises(batch_source.QuotaExceeded) as exc:
+        batch_source.ingest_uploaded(staged, dest)
+    assert "1 files a run may have" in str(exc.value)
+    monkeypatch.setattr(batch_source, "MAX_TOTAL_FILES", 1500)
+    monkeypatch.setattr(batch_source, "MAX_FILE_MB", 0)
+    with pytest.raises(batch_source.QuotaExceeded) as exc:
+        batch_source.ingest_uploaded(staged, dest)
+    assert "MB limit" in str(exc.value)
+
+
 def test_page_quota_after_download_is_run_wide(tmp_path, monkeypatch):
     files = [{"path": "A_1/x.pdf", "pages": 150}, {"path": "A_1/y.pdf", "pages": 60}]
     batch_source.check_page_quotas(files)  # 210 pages in one folder: fine at ingestion (per-case later)

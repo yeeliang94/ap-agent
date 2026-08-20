@@ -1,9 +1,11 @@
 """Bringing a claims batch into the run's own workspace.
 
-Two ways in, one result. A SharePoint folder link is walked (the folder
-and its subfolders, up to three levels deep) and every file is downloaded;
-a zip (local development) is unpacked with its folder tree kept. Either
-way the run ends up with a private copy under runs/<id>/claims/files/,
+Three ways in, one result. Uploaded files (the primary way: a folder
+picked in the browser, a zip, or loose files) are laid out with their
+relative paths kept; a SharePoint folder link is walked (the folder and
+its subfolders, up to three levels deep) and every file is downloaded; a
+zip is unpacked with its folder tree kept. Either way
+the run ends up with a private copy under runs/<id>/claims/files/,
 laid out exactly as the batch was, and from then on the run reads only
 that copy — the run is judged against the files as they were when it
 started, and SharePoint is never asked twice.
@@ -160,6 +162,33 @@ def download_all(source, folder_url: str, entries: list[dict], dest: Path,
     return done
 
 
+def _listing_entries(files: list[tuple[str, int | None, int]]) -> list[dict]:
+    """Folder and file entries in the walker's shape, derived from
+    (relative path, size, depth) triples. Folder entries come from the
+    file paths, so the same quota check serves every way in — the zip
+    and the uploaded set share this."""
+    entries: list[dict] = []
+    folders: set[tuple[str, int]] = set()
+    for rel, _size, n in files:
+        parts = rel.split("/")
+        for depth in range(1, n):
+            folders.add(("/".join(parts[:depth]), depth))
+    for path_str, depth in sorted(folders):
+        entries.append({"name": path_str.rsplit("/", 1)[-1], "kind": "folder",
+                        "size": None, "id": path_str, "path": path_str, "depth": depth})
+    for rel, size, n in files:
+        entries.append({"name": rel.rsplit("/", 1)[-1], "kind": "file",
+                        "size": size, "id": rel, "path": rel, "depth": n})
+    return entries
+
+
+def _with_local(entries: list[dict]) -> list[dict]:
+    """The ingestion result shape: files first (each knowing its local
+    copy's path), folders after."""
+    return [{**e, "local": e["path"]} for e in entries if e["kind"] == "file"] + \
+        [e for e in entries if e["kind"] == "folder"]
+
+
 def unpack_zip(zip_path: Path, dest: Path) -> list[dict]:
     """The local-development way in: a zip of the batch folder tree.
 
@@ -187,19 +216,7 @@ def unpack_zip(zip_path: Path, dest: Path) -> list[dict]:
                 if len(parts) > MAX_DEPTH + 1:
                     parts = parts[:MAX_DEPTH] + ["/".join(parts[MAX_DEPTH:])]
                 listing.append((info, "/".join(parts), len(parts)))
-            # Folder entries, derived from the file paths, so the same
-            # quota check serves both ways in.
-            folders: set[tuple[str, int]] = set()
-            for _info, rel, n in listing:
-                parts = rel.split("/")
-                for depth in range(1, n):
-                    folders.add(("/".join(parts[:depth]), depth))
-            for path, depth in sorted(folders):
-                entries.append({"name": path.rsplit("/", 1)[-1], "kind": "folder",
-                                "size": None, "id": path, "path": path, "depth": depth})
-            for info, rel, n in listing:
-                entries.append({"name": rel.rsplit("/", 1)[-1], "kind": "file",
-                                "size": info.file_size, "id": rel, "path": rel, "depth": n})
+            entries = _listing_entries([(rel, info.file_size, n) for info, rel, n in listing])
             _check_listing_quotas(entries)
             run_limit = MAX_TOTAL_MB * 1024 * 1024
             run_written = 0
@@ -231,8 +248,34 @@ def unpack_zip(zip_path: Path, dest: Path) -> list[dict]:
                         out.write(chunk)
     except zipfile.BadZipFile as exc:
         raise SourceUnavailable("The uploaded file is not a valid zip.") from exc
-    return [{**e, "local": e["path"]} for e in entries if e["kind"] == "file"] + \
-        [e for e in entries if e["kind"] == "folder"]
+    return _with_local(entries)
+
+
+def ingest_uploaded(staged: Path, dest: Path) -> list[dict]:
+    """The uploads-first way in: files the reviewer uploaded, already laid
+    out under the run's staging folder (routes wrote them there, one per
+    relative path). Same quotas and the same entry shape as the SharePoint
+    walk and the zip, checked BEFORE anything is copied into the run's
+    read-only snapshot. Sizes come from the filesystem, so the check is
+    exact.
+    """
+    listing: list[tuple[Path, str, int]] = []   # (source file, rel path, depth)
+    for path in sorted(staged.rglob("*")):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        rel = path.relative_to(staged).as_posix()
+        parts = rel.split("/")
+        if len(parts) > MAX_DEPTH + 1:
+            # The zip walker's rule: anything deeper counts as one level.
+            parts = parts[:MAX_DEPTH] + ["/".join(parts[MAX_DEPTH:])]
+        listing.append((path, rel, len(parts)))
+    entries = _listing_entries([(rel, src.stat().st_size, n) for src, rel, n in listing])
+    _check_listing_quotas(entries)
+    for src, rel, _n in listing:
+        target = _safe_join(dest, rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(src.read_bytes())
+    return _with_local(entries)
 
 
 def _common_root(names) -> str:

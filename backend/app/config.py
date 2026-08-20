@@ -40,6 +40,12 @@ EXTRACT_CONCURRENCY = 5
 # make more than this many requests (their limit is 40; ours are tiny anyway).
 MAX_AGENT_REQUESTS = 40
 
+# Where LINKED documents come from: "local" (the samples folder / a local
+# tree) or "mcp" (the real SharePoint gateway). This is the mechanism;
+# whether links are offered at all is the reviewer's SharePoint-source
+# switch (app/switches.py), which defaults from this value.
+DOC_SOURCE = os.getenv("DOC_SOURCE", "local").strip().lower()
+
 # The single client this MVP is configured for. The API rejects any other
 # name — silently applying Client ABC's policy to a different client's
 # documents would be worse than an error.

@@ -252,12 +252,18 @@ async def test_a_real_agent_calls_the_bound_tools_and_forbidden_tools_do_not_exi
 
 
 def test_switch_selects_the_adapter(monkeypatch):
+    from app import switches
     from app.claims import investigator as pkg
 
+    # No reviewer-saved choice: the .env flag answers (hermetic — never
+    # the development database).
+    monkeypatch.setattr(switches, "saved", lambda key: None)
     monkeypatch.setattr(config, "CLAIMS_AGENTIC_INVESTIGATION", False)
     assert pkg.adapter_name() == "legacy"
     monkeypatch.setattr(config, "CLAIMS_AGENTIC_INVESTIGATION", True)
     assert pkg.adapter_name() == "investigator"
+    # A run keeps the switch it started with, whatever is live now.
+    assert pkg.adapter_name({"switches": {"claims_agentic_investigation": False}}) == "legacy"
 
 
 def test_prompt_version_and_instructions_are_pinned():

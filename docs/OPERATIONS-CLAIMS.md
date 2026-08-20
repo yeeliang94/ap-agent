@@ -1,6 +1,25 @@
 # Claims Module — Operations (hardening H11)
 
-## Feature switches (environment; read at start)
+## Feature switches (Settings screen; .env = default)
+
+Since PLAN-UPLOADS-AND-UI Phase 3, the behavior switches below are
+**reviewer-flippable from Settings → Feature switches** (`GET/PUT
+/api/settings/switches`). The .env value is the default until the first
+in-app save; every change is written to the audit trail. A change applies
+to **new runs only** — a claims run snapshots the switches at creation and
+keeps them (`snapshot.switches`), so a mid-flight flip never changes a
+running run. What a reviewer may *do* on screen (case routes, regrouping
+actions) follows the live switch. One new switch joined them:
+
+| Switch | Default | Off means |
+|---|---|---|
+| SharePoint source (`claims_sharepoint_source`) | on when `DOC_SOURCE=mcp`, else off | the New-run form offers no link fields and a SharePoint link is refused with a plain message; uploads (a folder, a zip, or files) are the only way in |
+
+Env-only (never flippable on screen; the Settings screen shows them
+read-only as set / not set): the sandbox trio, `CLAIMS_LOCAL_ROOT`, model
+names, keys and the MCP endpoint.
+
+### The switches (env spelling; read at start as defaults)
 
 | Switch | Default | Off means |
 |---|---|---|

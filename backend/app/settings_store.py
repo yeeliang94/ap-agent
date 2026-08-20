@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import os
 
-from . import config
+from . import config, switches
 from .db import SessionLocal
 from .models import AppSetting, AuditEvent
 
 DEFAULTS = {
+    # Feature switches (app/switches.py): stored as "0"/"1", env = default.
+    **switches.defaults(),
     "client_name": config.CLIENT_NAME,
     "sharepoint_folder_url": os.getenv(
         "SHAREPOINT_FOLDER_URL",
@@ -64,6 +66,18 @@ def get_setting(key: str) -> str:
     try:
         row = db.get(AppSetting, key)
         return row.value if row else DEFAULTS[key]
+    finally:
+        db.close()
+
+
+def get_saved(key: str) -> str | None:
+    """The stored value alone — None when nobody has saved one. Callers
+    with a livelier default than DEFAULTS (the switches read config at
+    call time) use this instead of get_setting."""
+    db = SessionLocal()
+    try:
+        row = db.get(AppSetting, key)
+        return row.value if row else None
     finally:
         db.close()
 

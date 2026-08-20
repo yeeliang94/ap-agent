@@ -10,7 +10,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import func
 
-from . import config, settings_store
+from . import config, settings_store, switches
 from .db import SessionLocal
 from .models import AuditEvent, Document, Flag, Run, RunEvent
 from .pipeline import output as output_builder
@@ -83,6 +83,31 @@ def update_settings(body: dict) -> dict:
         values["draft_bank_charge"] = f"{charge:.2f}"
     settings_store.set_settings(values)
     return get_settings()
+
+
+@router.get("/settings/switches")
+def get_switches() -> dict:
+    """Every feature switch with its words and value, plus the read-only
+    .env deployment facts (whether a thing is set — never a secret)."""
+    return {"switches": switches.listed(), "deployment": switches.deployment_facts()}
+
+
+@router.put("/settings/switches")
+def update_switches(body: dict) -> dict:
+    """Flip switches. body = {switch_key: true/false, ...}. A change
+    applies to new claims runs only — a run keeps the switches it started
+    with — and is recorded in the audit trail like any settings change."""
+    values: dict[str, str] = {}
+    for key, value in body.items():
+        if key not in switches.SWITCHES:
+            raise HTTPException(400, f"{key} is not a switch.")
+        if not isinstance(value, bool):
+            raise HTTPException(400, f"{key} must be true or false.")
+        values[key] = "1" if value else "0"
+    if values:
+        settings_store.set_settings(values)
+    return get_switches()
+
 
 # Only these file types may come out of an uploaded zip. Anything else is
 # skipped and reported — never silently processed.

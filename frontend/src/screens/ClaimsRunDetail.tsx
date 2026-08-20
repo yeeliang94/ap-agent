@@ -21,6 +21,42 @@ const STAGE_LABEL: Record<string, string> = {
 
 type Tab = "map" | "verifying" | "review" | "output" | "activity";
 
+// Where the run stands, as a quiet horizontal stepper (the redesign's
+// run-detail spec). Done steps are soft accent, the current one outlined.
+const STEPS = ["Ingest", "Map", "Confirm", "Verify", "Review"] as const;
+function stepIndex(status: string, openFlags: number): number {
+  switch (status) {
+    case "queued":
+    case "surveying":
+      return 0;
+    case "mapping":
+      return 1;
+    case "map_ready":
+      return 2;
+    case "verifying":
+      return 3;
+    case "ready":
+      return openFlags ? STEPS.length - 1 : STEPS.length; // past the end = all done
+    default:
+      return 0;
+  }
+}
+
+function StageStepper({ status, openFlags }: { status: string; openFlags: number }) {
+  const now = stepIndex(status, openFlags);
+  return (
+    <div className="stepper" aria-label="Run stages">
+      {STEPS.map((label, i) => (
+        <span key={label} className={`step ${i < now ? "done" : i === now ? "now" : ""}`}>
+          <span className="n">{i < now ? "✓" : i + 1}</span>
+          {label}
+          <span className="connector" />
+        </span>
+      ))}
+    </div>
+  );
+}
+
 /** The run is still working (the server's IN_PROGRESS_STATUSES): the
  *  screen polls, and only such a run can be cancelled. */
 const WORKING_STATUSES = ["queued", "surveying", "mapping", "verifying"];
@@ -106,13 +142,20 @@ export default function ClaimsRunDetailScreen({ runId }: { runId: string }) {
   return (
     <section>
       {error && <p className="error">{error} — showing the last good state; retrying.</p>}
-      <p className="summary-line">
-        <b>{run.client}</b> · <span className="mono">{run.folder}</span> ·{" "}
-        {new Date(run.created_at).toLocaleString()} ·{" "}
+      <div className="hero" style={{ alignItems: "flex-start", marginBottom: 6 }}>
+        <div>
+          <h1>{run.client}</h1>
+          <span className="sub">
+            {new Date(run.created_at).toLocaleString()} ·{" "}
+            <span title={run.folder}>{run.folder.length > 60 ? "…" + run.folder.slice(-60) : run.folder}</span>
+            {run.received_date ? ` · received ${run.received_date}` : ""}
+          </span>
+        </div>
         <span className={`chip ${failed ? "flag" : run.status === "ready" && !openFlags.length ? "ok" : "review"}`}>
           {claimsStatusLabel(run)}
         </span>
-      </p>
+      </div>
+      {!failed && <StageStepper status={run.status} openFlags={openFlags.length} />}
       {failed ? (
         <div className="card banner bad">
           <b>This run stopped before it finished</b>

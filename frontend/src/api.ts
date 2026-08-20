@@ -41,6 +41,44 @@ export async function saveSettings(s: AppSettings): Promise<AppSettings> {
   return r.json();
 }
 
+/** One feature switch: its words, its live value, and its .env default. */
+export interface SwitchInfo {
+  key: string;
+  label: string;
+  description: string;
+  value: boolean;
+  default: boolean;
+  /** True when a reviewer saved a choice; false = the .env default answers. */
+  saved: boolean;
+}
+
+/** A read-only .env fact — whether a thing is set, never a secret's value. */
+export interface DeploymentFact {
+  label: string;
+  value: string;
+}
+
+export interface SwitchBoard {
+  switches: SwitchInfo[];
+  deployment: DeploymentFact[];
+}
+
+export async function getSwitches(): Promise<SwitchBoard> {
+  const r = await fetch("/api/settings/switches");
+  if (!r.ok) throw new Error("Could not load the feature switches");
+  return r.json();
+}
+
+export async function saveSwitches(changes: Record<string, boolean>): Promise<SwitchBoard> {
+  const r = await fetch("/api/settings/switches", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(changes),
+  });
+  if (!r.ok) throw new Error((await r.json()).detail ?? "Could not save the switch");
+  return r.json();
+}
+
 /** Whether this deployment needs a SharePoint sign-in, and whether it has one. */
 export interface SharePointStatus {
   required: boolean;
@@ -589,21 +627,51 @@ export interface NewClaimsRun {
   folder_url?: string;
   listing_url?: string;
   instructions?: string;
-  batch?: File | null;
+  /** The batch: one zip, or loose files of the readable types. */
+  batch?: File[];
+  /** Each batch file's relative path (a picked/dropped folder), in order.
+   *  Empty = the bare filenames, laid out flat. */
+  batch_paths?: string[];
   listing?: File | null;
 }
 
-export async function createClaimsRun(input: NewClaimsRun): Promise<{ run_id: string }> {
+/** Starts a run. Uses XMLHttpRequest rather than fetch for the one thing
+ *  fetch cannot do: report UPLOAD progress — a batch can be 200 MB, and a
+ *  silent minute reads as a hang. onProgress gets 0..1. */
+export function createClaimsRun(
+  input: NewClaimsRun,
+  onProgress?: (fraction: number) => void
+): Promise<{ run_id: string }> {
   const form = new FormData();
   form.append("received_date", input.received_date);
   if (input.folder_url) form.append("folder_url", input.folder_url);
   if (input.listing_url) form.append("listing_url", input.listing_url);
   if (input.instructions) form.append("instructions", input.instructions);
-  if (input.batch) form.append("batch", input.batch);
+  for (const file of input.batch ?? []) form.append("batch", file);
+  if (input.batch_paths?.length) form.append("batch_paths", JSON.stringify(input.batch_paths));
   if (input.listing) form.append("listing", input.listing);
-  const r = await fetch("/api/claims-runs", { method: "POST", body: form });
-  if (!r.ok) return fail(r, "Could not start the claims run");
-  return r.json();
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/claims-runs");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let body: { detail?: unknown; run_id?: string } = {};
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        /* not JSON */
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && body.run_id) {
+        resolve({ run_id: body.run_id });
+      } else {
+        reject(new Error(typeof body.detail === "string" ? body.detail : "Could not start the claims run"));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Could not reach the server to start the run"));
+    xhr.send(form);
+  });
 }
 
 export function confirmClaimMap(
@@ -643,10 +711,14 @@ export function claimsFileUrl(
 export interface ClaimsSettings {
   client: string;
   local_mode: boolean;
+  /** Whether the New-run form offers SharePoint link fields (a switch). */
+  sharepoint_source: boolean;
   profile: {
     mileage_rates: Record<string, string>;
     km_tolerance: string;
     receipt_date_window_days: number;
+    /** Unclaimed receipts at or above this amount (MYR) raise a flag. */
+    unclaimed_receipt_threshold: string;
     receipt_optional_items: string[];
     mileage_item_pattern: string;
     categories: { item: string; gl: string }[];

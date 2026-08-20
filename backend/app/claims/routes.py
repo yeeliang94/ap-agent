@@ -7,6 +7,7 @@ system does is in the run diary (RunEvent, via telemetry).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -16,7 +17,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import func
 
-from .. import settings_store, telemetry
+from .. import settings_store, switches, telemetry
 from ..db import SessionLocal
 from ..models import AuditEvent, RunEvent
 from .. import config
@@ -39,7 +40,7 @@ MAX_INSTRUCTIONS = 4000
 
 
 def _local_mode() -> bool:
-    return os.getenv("DOC_SOURCE", "local").lower() != "mcp"
+    return config.DOC_SOURCE != "mcp"
 
 
 async def _read_upload(upload: UploadFile | None, max_mb: int, what: str) -> bytes:
@@ -85,22 +86,44 @@ def _local_ingestion_path(value: str, kind: str) -> bool:
     return target.is_dir() if kind == "dir" else target.is_file()
 
 
+def _clean_rel_path(raw: str, filename: str) -> str:
+    """A browser-reported relative path, made safe for the staging area.
+
+    Backslashes become slashes (a Windows browser), empty and '.' segments
+    are dropped, and anything absolute or escaping ('..', a drive letter)
+    is refused — the fallback is the bare filename, never a guessed tree.
+    """
+    value = (raw or "").replace("\\", "/").strip()
+    if not value:
+        return Path(filename or "file").name
+    parts = [p for p in value.split("/") if p not in ("", ".")]
+    if not parts or value.startswith("/") or any(p == ".." for p in parts) \
+            or any(":" in p for p in parts):
+        raise HTTPException(400, f"The file path {raw!r} is not a plain relative path — "
+                                 "re-pick the folder and try the upload again.")
+    return "/".join(parts)
+
+
 @router.post("")
 async def create_claims_run(
     received_date: str = Form(...),
     folder_url: str = Form(""),
     listing_url: str = Form(""),
     instructions: str = Form(""),
-    batch: UploadFile | None = File(None),
+    batch: list[UploadFile] = File(default=[]),
+    batch_paths: str = Form(""),
     listing: UploadFile | None = File(None),
 ) -> dict:
     """Start a claims run.
 
-    A SharePoint folder link (the folder that CONTAINS the employee
-    subfolders) plus a link to the month's listing workbook; or, for local
-    development, a zip of the folder tree plus the listing workbook file.
-    The received date goes on every listing row. Instructions are the
-    optional paragraph for this client.
+    The primary way in: uploaded files — a folder picked in the browser
+    (batch_paths carries each file's relative path, as JSON), a single zip
+    of the folder tree, or loose files of the readable types. The optional
+    listing workbook comes as a file too. A SharePoint folder link (the
+    folder that CONTAINS the employee subfolders) plus a listing link is
+    the alternative while the SharePoint source switch is on. The received
+    date goes on every listing row. Instructions are the optional
+    paragraph for this client.
     """
     received_date = received_date.strip()
     if not DATE_RE.match(received_date):
@@ -112,12 +135,52 @@ async def create_claims_run(
         raise HTTPException(400, f"Instructions are too long (max {MAX_INSTRUCTIONS} characters).")
     from . import source as source_mod
 
-    zip_bytes = await _read_upload(batch, source_mod.MAX_ZIP_MB, "The zip")
+    uploads = [u for u in (batch or []) if u and u.filename]
+    names = [u.filename for u in uploads]
+    zips = [n for n in names if n.lower().endswith(".zip")]
+    if zips and len(uploads) > 1:
+        raise HTTPException(400, "Upload the zip on its own, or the files without a zip.")
+    for name in names:
+        if name.lower().endswith(".zip"):
+            continue
+        if Path(name).suffix.lower() not in source_mod.READABLE:
+            raise HTTPException(400, f"{Path(name).name} isn't a supported type. A batch may hold "
+                                     "PDF, PNG, JPG, WEBP or Excel files — or one zip of the folder.")
+    try:
+        paths_list = json.loads(batch_paths) if batch_paths.strip() else []
+        if not isinstance(paths_list, list) or not all(isinstance(p, str) for p in paths_list):
+            raise ValueError
+    except ValueError:
+        raise HTTPException(400, "The upload's file paths did not come through as a list "
+                                 "(batch_paths) — reload the page and try the upload again.")
+    if paths_list and len(paths_list) != len(uploads):
+        raise HTTPException(400, "The upload's file paths (batch_paths) must name every "
+                                 "uploaded file, in order — reload the page and try again.")
+
+    zip_bytes = b""
+    batch_files: list[tuple[str, bytes]] = []
+    if zips:
+        zip_bytes = await _read_upload(uploads[0], source_mod.MAX_ZIP_MB, "The zip")
+    else:
+        total = 0
+        for i, upload in enumerate(uploads):
+            rel = _clean_rel_path(paths_list[i] if paths_list else "", upload.filename)
+            data = await _read_upload(upload, source_mod.MAX_FILE_MB, Path(upload.filename).name)
+            total += len(data)
+            if total > source_mod.MAX_ZIP_MB * 1024 * 1024:
+                raise HTTPException(413, f"The files add up to more than the "
+                                         f"{source_mod.MAX_ZIP_MB} MB limit per upload.")
+            batch_files.append((rel, data))
     listing_bytes = await _read_upload(listing, source_mod.MAX_FILE_MB, "The listing file")
-    if not zip_bytes and not folder_url:
-        raise HTTPException(400, "Give the batch folder link, or upload a zip of the folder.")
-    if zip_bytes and folder_url:
-        raise HTTPException(400, "Give either the folder link or a zip, not both.")
+    if not zip_bytes and not batch_files and not folder_url:
+        raise HTTPException(400, "Upload the batch (a folder, a zip, or files), "
+                                 "or give the batch folder link.")
+    if (zip_bytes or batch_files) and folder_url:
+        raise HTTPException(400, "Give either the folder link or an upload, not both.")
+    if (folder_url.startswith("https://") or listing_url.startswith("https://")) \
+            and not switches.on("claims_sharepoint_source"):
+        raise HTTPException(400, "Starting from a SharePoint link is switched off — flip "
+                                 "'SharePoint source' in Settings, or upload the files instead.")
     if folder_url and not folder_url.startswith("https://") and not _local_ingestion_path(folder_url, "dir"):
         raise HTTPException(400, "The folder link must start with https:// — copy it from "
                                  "the browser's address bar."
@@ -137,31 +200,44 @@ async def create_claims_run(
     # stalling the one event loop every other request and every background
     # stage shares.
     run_id = await asyncio.to_thread(_store_new_run, client, folder_url, listing_url, received_date,
-                                     instructions, zip_bytes, listing_bytes)
+                                     instructions, zip_bytes, batch_files, listing_bytes)
     runner.start_background(runner.process_run(run_id))
     return {"run_id": run_id}
 
 
 def _store_new_run(client: str, folder_url: str, listing_url: str, received_date: str,
-                   instructions: str, zip_bytes: bytes, listing_bytes: bytes) -> str:
+                   instructions: str, zip_bytes: bytes,
+                   batch_files: list[tuple[str, bytes]], listing_bytes: bytes) -> str:
     """The blocking half of starting a run: the row, the workspace and the
     uploaded bytes. Runs in a worker thread (see create_claims_run)."""
+    source_label = (folder_url or ("zip upload" if zip_bytes else "file upload"))
     db = SessionLocal()
     try:
         run = ClaimsRun(client=client, folder_url=folder_url, listing_url=listing_url,
                         received_date=received_date, instructions=instructions,
-                        snapshot=profile_mod.snapshot(client))
+                        snapshot={**profile_mod.snapshot(client), "source": source_label,
+                                  # A run keeps the switches it started with.
+                                  "switches": switches.snapshot()})
         db.add(run)
         db.commit()
         ws = runner.workspace_for(run.id)
         ws.mkdir(parents=True, exist_ok=True)
         if zip_bytes:
             (ws / "upload.zip").write_bytes(zip_bytes)
+        for rel, data in batch_files:
+            target = (ws / "upload" / rel).resolve()
+            staging = (ws / "upload").resolve()
+            if target != staging and staging not in target.parents:
+                # _clean_rel_path already refused these; belt and braces.
+                raise HTTPException(400, f"The file path {rel!r} points outside the upload.")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
         if listing_bytes:
             (ws / "listing.xlsx").write_bytes(listing_bytes)
         db.add(AuditEvent(run_id=run.id, actor="reviewer", action="claims_run_started",
                           detail=f"client {client}; "
-                                 + (f"folder {folder_url}" if folder_url else "zip upload")
+                                 + (f"folder {folder_url}" if folder_url else
+                                    f"{source_label} ({len(batch_files) or 1} file(s))")
                                  + f"; received date {received_date}"
                                  + (f"; instructions: {instructions[:200]}" if instructions else "")))
         db.commit()
@@ -213,7 +289,7 @@ def get_claims_run(run_id: str) -> dict:
             # The case model (H2): cases, artifacts, assignments and the
             # investigation record. Hidden while CLAIMS_CASE_MODEL is off
             # (the employee fields above stay authoritative for the UI).
-            **(_case_model_payload(db, run_id, evidence) if config.CLAIMS_CASE_MODEL else {}),
+            **(_case_model_payload(db, run_id, evidence) if switches.on("claims_case_model") else {}),
             # The human gate, enforced server-side: no output leaves while
             # any flag is undecided. Built fresh from the reviewed state
             # (code only, Decimal) — and NOT stored: a read does not write.
@@ -248,7 +324,10 @@ def _case_model_payload(db, run_id: str, evidence: list) -> dict:
     run = db.get(ClaimsRun, run_id)
     signals = grouping.signals_for(run, artifacts)
     gate = grouping.gate(db, run)
-    gate["actions_enabled"] = bool(config.CLAIMS_FULL_DUMP_GROUPING)
+    # A capability gate, read LIVE (like the case routes): what a reviewer
+    # may DO follows today's switch. What the pipeline DID follows the
+    # run's snapshot (switches.for_run — see the runner's shadow gate).
+    gate["actions_enabled"] = switches.on("claims_full_dump_grouping")
     return {"cases": [cases_mod.case_dict(c) for c in cases],
             "grouping": gate,
             "artifacts": [{**cases_mod.artifact_dict(a), "signals": signals.get(a.artifact_id, [])} for a in artifacts],
@@ -506,9 +585,9 @@ def get_claims_file(run_id: str, path: str, page: int = 1, highlight: str = "",
 # (conflicts, unknown claimants, case roles) and bumps the revision.
 
 def _case_routes_on() -> None:
-    """The case routes exist only while CLAIMS_CASE_MODEL is on (off = the
-    employee fields and routes stay authoritative; storage unchanged)."""
-    if not config.CLAIMS_CASE_MODEL:
+    """The case routes exist only while the case-model switch is on (off =
+    the employee fields and routes stay authoritative; storage unchanged)."""
+    if not switches.on("claims_case_model"):
         raise HTTPException(404, "The case model is switched off on this server.")
 
 
@@ -602,8 +681,9 @@ def _regrouping_on() -> None:
     The case model comes first: with it switched off these routes do not
     exist at all (404), rather than existing and refusing (400)."""
     _case_routes_on()
-    if not config.CLAIMS_FULL_DUMP_GROUPING:
-        raise HTTPException(400, "Regrouping at the map is switched off on this server (CLAIMS_FULL_DUMP_GROUPING).")
+    if not switches.on("claims_full_dump_grouping"):
+        raise HTTPException(400, "Regrouping at the map is switched off on this server "
+                                 "(the full-dump grouping switch in Settings).")
 
 
 @router.post("/{run_id}/cases")
@@ -1128,7 +1208,8 @@ def _summary(run: ClaimsRun, counts: dict) -> dict:
     n_map = sum(1 for e in (run.map or {}).get("employees", []) if e.get("is_employee"))
     return {"id": run.id, "client": run.client, "status": run.status, "stage": STAGE_OF.get(run.status, run.status),
             "error": run.error,
-            "progress": run.progress, "folder": run.folder_url or "zip upload",
+            "progress": run.progress,
+            "folder": run.folder_url or (run.snapshot or {}).get("source") or "zip upload",
             "employee_count": counts.get("employees") or n_map,
             "employees_done": counts.get("employees_done", 0),
             "open_flags": counts.get("open_flags", 0), "notes": counts.get("notes", 0),
@@ -1145,6 +1226,8 @@ settings_router = APIRouter(prefix="/claims-settings")
 
 def _settings_payload(client: str) -> dict:
     return {"client": client, "local_mode": _local_mode(),
+            # Whether the New-run form offers SharePoint link fields.
+            "sharepoint_source": switches.on("claims_sharepoint_source"),
             "profile": profile_mod.get_profile(client),
             "playbook": profile_mod.get_playbook(client),
             "last_map": profile_mod.get_last_map(client)}

@@ -22,7 +22,7 @@ import logging
 import time
 from pathlib import Path
 
-from .. import config, telemetry
+from .. import config, switches, telemetry
 from ..db import SessionLocal
 from ..docsource import SourceUnavailable, get_source
 from . import source as batch_source
@@ -39,8 +39,11 @@ from .investigator.contracts import DEFAULT_OBJECTIVE as OBJECTIVE  # noqa: E402
 async def _shadow_investigation(db, run: ClaimsRun, request, primary) -> None:
     """Shadow mode (H12): the tool-using investigator runs beside the
     mapper on the same request; its result is compared and recorded, never
-    used. Its failure is a diary line, not a run failure."""
-    if not config.CLAIMS_SHADOW_INVESTIGATION or config.CLAIMS_AGENTIC_INVESTIGATION:
+    used. Its failure is a diary line, not a run failure. The run keeps
+    the switches it started with (its snapshot); a mid-flight flip in
+    Settings never changes what this run does."""
+    if not switches.for_run(run.snapshot, "claims_shadow_investigation") \
+            or switches.for_run(run.snapshot, "claims_agentic_investigation"):
         return
     from . import cases as cases_mod
     from .investigator import investigator as agentic
@@ -227,7 +230,12 @@ async def process_run(run_id: str) -> None:
 
 
 def _fetch_batch(db, run: ClaimsRun, dest: Path) -> list[dict]:
-    """Copy the batch into the workspace: unpack the zip, or walk SharePoint."""
+    """Copy the batch into the workspace: uploaded files, a zip, or the
+    SharePoint walk — whichever this run was started with."""
+    staged = workspace_for(run.id) / "upload"
+    if staged.is_dir():
+        entries = batch_source.ingest_uploaded(staged, dest)
+        return [e for e in entries if e["kind"] == "file"]
     zip_path = workspace_for(run.id) / "upload.zip"
     if zip_path.is_file():
         entries = batch_source.unpack_zip(zip_path, dest)

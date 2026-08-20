@@ -36,6 +36,15 @@ backend/.venv/bin/python backend/scripts/verify_run.py
 
 Then open http://localhost:5173, upload `samples/generated/demo_batch.zip`.
 
+**Claims runs are uploads-first**: on the Claims tab, drop the month's batch
+straight into the form — a whole folder (subfolders are kept), one zip of it,
+or loose files (PDF, PNG, JPG, WEBP, Excel; up to 200 MB per upload). The
+optional "Summary of Invoices" workbook is a second picker. Starting from a
+SharePoint link instead is behind the **SharePoint source** switch in
+Settings → Feature switches — every behavior switch lives on that screen,
+with the .env value as its default (see
+`docs/OPERATIONS-CLAIMS.md`, "Feature switches").
+
 Tests: `cd backend && .venv/bin/python -m pytest` runs the whole suite with the
 AI faked — it makes **no paid calls**. Two tests are opt-in because they call
 the real model: `AP_LIVE_TESTS=1` for the model-layer smoke test, and

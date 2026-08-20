@@ -113,6 +113,62 @@ def test_create_run_from_zip_records_the_upload_and_a_snapshot(db):
     assert listed[0]["id"] == run_id and listed[0]["folder"] == "zip upload"
 
 
+def test_create_run_from_loose_files_lays_out_the_tree(db):
+    """Uploads-first (PLAN-UPLOADS-AND-UI Phase 1): loose files of the
+    readable types are a valid batch; relative paths (a picked folder)
+    survive into the staging area; the run summary names the source."""
+    files = [("batch", ("report.xlsx", b"xlsx bytes", "application/octet-stream")),
+             ("batch", ("grab.pdf", b"%PDF-1.4", "application/pdf"))]
+    r = client.post("/api/claims-runs",
+                    data={"received_date": "2026-08-03",
+                          "batch_paths": json.dumps(["A_1/report.xlsx", "A_1/receipts/grab.pdf"])},
+                    files=files)
+    assert r.status_code == 200, r.text
+    run_id = r.json()["run_id"]
+    staged = runner.workspace_for(run_id) / "upload"
+    assert (staged / "A_1" / "report.xlsx").read_bytes() == b"xlsx bytes"
+    assert (staged / "A_1" / "receipts" / "grab.pdf").is_file()
+    assert client.get("/api/claims-runs").json()[0]["folder"] == "file upload"
+
+
+def test_create_run_from_a_single_file_works_without_paths(db):
+    r = client.post("/api/claims-runs", data={"received_date": "2026-08-03"},
+                    files=[("batch", ("lone receipt.pdf", b"%PDF-1.4", "application/pdf"))])
+    assert r.status_code == 200, r.text
+    staged = runner.workspace_for(r.json()["run_id"]) / "upload"
+    assert (staged / "lone receipt.pdf").is_file()
+
+
+def test_create_run_refuses_bad_uploads(db):
+    # An unreadable type is named, up front.
+    r = client.post("/api/claims-runs", data={"received_date": "2026-08-03"},
+                    files=[("batch", ("photo.heic", b"x", "application/octet-stream"))])
+    assert r.status_code == 400 and "photo.heic" in r.text
+    # A zip travels alone.
+    r = client.post("/api/claims-runs", data={"received_date": "2026-08-03"},
+                    files=[("batch", ("b.zip", b"PK", "application/zip")),
+                           ("batch", ("a.pdf", b"%PDF", "application/pdf"))])
+    assert r.status_code == 400 and "zip" in r.text.lower()
+    # A path may not point outside the staging area.
+    r = client.post("/api/claims-runs",
+                    data={"received_date": "2026-08-03",
+                          "batch_paths": json.dumps(["../../etc/passwd"])},
+                    files=[("batch", ("a.pdf", b"%PDF", "application/pdf"))])
+    assert r.status_code == 400
+    # Paths, when given, must match the files one for one.
+    r = client.post("/api/claims-runs",
+                    data={"received_date": "2026-08-03", "batch_paths": json.dumps(["a.pdf", "b.pdf"])},
+                    files=[("batch", ("a.pdf", b"%PDF", "application/pdf"))])
+    assert r.status_code == 400
+    # With the SharePoint source switch off (the local default), a
+    # SharePoint listing link is refused just like a folder link.
+    r = client.post("/api/claims-runs",
+                    data={"received_date": "2026-08-03",
+                          "listing_url": "https://x.sharepoint.com/listing.xlsx"},
+                    files=[("batch", ("a.pdf", b"%PDF", "application/pdf"))])
+    assert r.status_code == 400 and "SharePoint" in r.text
+
+
 def test_create_run_validates_its_inputs(db):
     r = client.post("/api/claims-runs", data={"received_date": "3 Aug", "folder_url": "https://x/y"})
     assert r.status_code == 400 and "YYYY-MM-DD" in r.text
