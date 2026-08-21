@@ -15,6 +15,8 @@ vi.mock("../api", async (importOriginal) => {
     getClaimsRun: vi.fn(),
     getClaimsRunEvents: vi.fn(async () => []),
     setClaimant: vi.fn(),
+    recheckClaimIdentity: vi.fn(async () => ({ ok: true, revision: 8 })),
+    resolveOwnership: vi.fn(async () => ({ ok: true, revision: 8 })),
     decideClaimFlag: vi.fn(async () => {}),
   };
 });
@@ -102,6 +104,37 @@ describe("RunWorkspace organization contracts", () => {
     const listed = [...document.querySelectorAll(".finding-list button")].map((b) => `${b.querySelector("span")?.textContent} · ${b.querySelector("small")?.textContent}`);
     expect(listed).toEqual(["Receipt supports no row · Needs decision", "No stated purpose · Information"]);
     expect(screen.getByRole("button", { name: "Keep in payment" })).toBeTruthy();
+  });
+
+  it("offers the real audited action for identity findings instead of generic decisions", async () => {
+    const conflict = makeFlag({ id: "ownership", code: "OWNERSHIP_CONFLICT", reason: "two names", cite: { file: "report.xlsx", sheet: "Expense Report", row: 1 } });
+    getClaimsRun.mockResolvedValue(makeRun({ status: "ready", cases: [makeCase()], artifacts: [
+      { id: "a1", path: "report.xlsx", sha256: "1", media_type: "workbook", size: 1, pages: null, sheets: ["Expense Report"], inspection_state: "inspected", failure_reason: "", proposed_role: "report", role_reason: "", disposition: "used", disposition_reason: "", disposition_by: "adapter", needs_confirmation: false, case_id: "c1" },
+    ], grouping: grouping(), flags: [conflict], catalogue: {
+      ...CATALOGUE, OWNERSHIP_CONFLICT: { code: "OWNERSHIP_CONFLICT", title: "Two people could own this", meaning: "", what_to_do: "Resolve ownership", kind: "structure", blocks: "open", toggle: false },
+    } }));
+    window.history.replaceState({}, "", "/claims/run1/review");
+    render(<BrowserRouter><RunActivityProvider><RunWorkspace kind="claim" runId="run1" view="review" /></RunActivityProvider></BrowserRouter>);
+
+    expect(await screen.findByRole("button", { name: "Re-check file identities" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Confirm ownership" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Download workbook" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Keep in payment" })).toBeNull();
+    expect(screen.queryByAltText(/Cited page/)).toBeNull();
+  });
+
+  it("offers claimant entry for an unknown claimant instead of payment decisions", async () => {
+    const claim = makeCase({ claimant: { name: "Audrey Ng", identifier: "", state: "unknown", basis: "conflict", citations: [] } });
+    const unknown = makeFlag({ id: "unknown", code: "CLAIMANT_UNKNOWN", reason: "claimant unknown" });
+    getClaimsRun.mockResolvedValue(makeRun({ status: "ready", cases: [claim], grouping: grouping(), flags: [unknown], catalogue: {
+      ...CATALOGUE, CLAIMANT_UNKNOWN: { code: "CLAIMANT_UNKNOWN", title: "Nobody knows whose claim this is", meaning: "", what_to_do: "Set claimant", kind: "structure", blocks: "open", toggle: false },
+    } }));
+    window.history.replaceState({}, "", "/claims/run1/review");
+    render(<BrowserRouter><RunActivityProvider><RunWorkspace kind="claim" runId="run1" view="review" /></RunActivityProvider></BrowserRouter>);
+
+    expect(await screen.findByRole("button", { name: "Set claimant" })).toBeTruthy();
+    expect((screen.getByLabelText("Claimant name") as HTMLInputElement).value).toBe("Audrey Ng");
+    expect(screen.queryByRole("button", { name: "Keep in payment" })).toBeNull();
   });
 
   it("forgets a split selection when another Claim is selected", async () => {

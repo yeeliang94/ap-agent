@@ -25,6 +25,7 @@ from .investigator.contracts import IGNORABLE_ROLES
 from .models import ClaimCase, ClaimFlag, ClaimSourceArtifact, ClaimsRun
 
 _NAME_PREFIX = re.compile(r"^([A-Z][A-Za-z.'\-]+(?: [A-Z][A-Za-z.'\-]+){1,3})_")
+_CELL_REF = re.compile(r"^([A-Za-z]+)([1-9]\d*)$")
 _LABELS = ("name", "employee", "claimant", "staff", "requestor", "requester")
 # 'Expense Report_July.pdf' is titled like 'Aegene Ong_receipts.pdf' and
 # means nothing about who owns it. A prefix holding one of these words is
@@ -34,6 +35,9 @@ _DOC_WORDS = {"expense", "expenses", "report", "reports", "claim", "claims", "fo
               "statement", "statements", "listing", "scan", "scans", "copy", "attachment",
               "supporting", "document", "documents", "bundle", "approval", "approvals",
               "reimbursement", "batch", "folder"}
+_CAPTION_WORDS = {"approved", "approval", "approver", "authorised", "authorized", "checked", "date",
+                  "department", "designation", "director", "employee", "manager", "prepared", "reviewed",
+                  "signature", "signed", "submitted", "supervisor", "verified"}
 
 
 def _fold(text: str) -> str:
@@ -49,6 +53,44 @@ def _same_person(a: str, b: str) -> bool:
     return bool(a) and bool(b) and (a == b or a in b or b in a)
 
 
+def claimant_key(value: str) -> str:
+    """Stable comparison form used to bind an ownership attestation to the
+    exact claimant the reviewer chose."""
+    return _fold(value)
+
+
+def _cell_position(ref: str) -> tuple[int, int] | None:
+    match = _CELL_REF.fullmatch((ref or "").strip())
+    if not match:
+        return None
+    column = 0
+    for char in match.group(1).upper():
+        column = column * 26 + ord(char) - ord("A") + 1
+    return column, int(match.group(2))
+
+
+def _is_cell_immediately_right(label_ref: str, value_ref: str) -> bool:
+    label, value = _cell_position(label_ref), _cell_position(value_ref)
+    return bool(label and value and value[1] == label[1] and value[0] == label[0] + 1)
+
+
+def _looks_like_person_name(value: str) -> bool:
+    """Conservative header-value check. A false negative asks a reviewer for
+    the claimant; a false positive can create or conceal a payment identity
+    conflict, so captions deliberately fail closed."""
+    text = " ".join((value or "").split())
+    if not (2 <= len(text.split()) <= 6) or len(text) > 120 or any(char in text for char in "():"):
+        return False
+    words = _fold(text).split()
+    if set(words) & (_CAPTION_WORDS | _DOC_WORDS) or "by" in words:
+        return False
+    for token in text.split():
+        parts = token.strip(".'-").replace("/", " ").split()
+        if not parts or not all(part.replace("'", "").replace("-", "").isalpha() for part in parts):
+            return False
+    return True
+
+
 def _stated_names(run: ClaimsRun) -> set[str]:
     """Folded names the run's OWN files state in a header cell ('Name:
     Aegene Ong'). A person-like file-name prefix is ownership only when
@@ -58,7 +100,9 @@ def _stated_names(run: ClaimsRun) -> set[str]:
 
 
 def _peek_names(tabs: dict) -> list[tuple[dict, str]]:
-    """(cite, name) for every value cell beside a 'Name'-like label cell."""
+    """(cite, name) for a plausible person in the actual cell immediately
+    right of a Name-like label. Survey rows omit blanks, so list adjacency
+    alone is not workbook adjacency."""
     found: list[tuple[dict, str]] = []
     for tab, rows in (tabs or {}).items():
         for row in (rows or [])[:6]:
@@ -67,8 +111,9 @@ def _peek_names(tabs: dict) -> list[tuple[dict, str]]:
                 ref, _, text = cell.partition(": ")
                 if text.rstrip(":").strip().lower() in _LABELS and i + 1 < len(cells):
                     nref, _, ntext = cells[i + 1].partition(": ")
-                    if ntext.strip():
+                    if _is_cell_immediately_right(ref, nref) and _looks_like_person_name(ntext):
                         found.append(({"sheet": tab, "row": int(re.sub(r"\D", "", nref) or 0),
+                                       "cell": nref, "label_cell": ref,
                                        "note": f"beside {text!r} in {ref}"}, ntext.strip()))
     return found
 
@@ -99,7 +144,8 @@ def signals_for(run: ClaimsRun, artifacts: list[ClaimSourceArtifact]) -> dict[st
                         "cite": {"file": a.path, "page": 0, "note": "top-level folder"}})
         tabs = ((peeks.get(a.path) or {}).get("peek") or {}).get("tabs") or {}
         for cite, stated_name in _peek_names(tabs):
-            sig.append({"kind": "name", "value": stated_name, "strength": "strong", "cite": cite})
+            sig.append({"kind": "name", "value": stated_name, "strength": "strong",
+                        "cite": {"file": a.path, **cite}})
         for tab, rows in tabs.items():
             for row in rows[:6]:
                 cells = [c.strip() for c in row.split(" | ")]
@@ -113,15 +159,15 @@ def signals_for(run: ClaimsRun, artifacts: list[ClaimSourceArtifact]) -> dict[st
     return out
 
 
-def conflict_in(case: ClaimCase, artifacts: list[ClaimSourceArtifact], signals: dict[str, list[dict]],
-                shared: set[str] | None = None) -> str:
-    """A sentence naming the conflict, or "" — strong signals of the case's
+def conflict_details(case: ClaimCase, artifacts: list[ClaimSourceArtifact], signals: dict[str, list[dict]],
+                     shared: set[str] | None = None) -> tuple[str, list[dict]]:
+    """A sentence and the competing signals, or ("", []) — strong signals of the case's
     files that point at two different identifiers or two different names.
     `shared` = artifact ids of master workbooks that are the report of
     several cases: they carry every claimant's name by design and are left
     out of the comparison."""
-    codes: dict[str, str] = {}
-    names: dict[str, str] = {}
+    codes: dict[str, tuple[str, dict]] = {}
+    names: dict[str, tuple[str, dict]] = {}
     for a in artifacts:
         if a.case_id != case.id or (shared and a.artifact_id in shared):
             continue
@@ -129,11 +175,12 @@ def conflict_in(case: ClaimCase, artifacts: list[ClaimSourceArtifact], signals: 
             if s["strength"] != "strong":
                 continue
             if s["kind"] == "er_code":
-                codes.setdefault(_fold(s["value"]), f"{s['value']} in {a.path}")
+                codes.setdefault(_fold(s["value"]), (f"{s['value']} in {a.path}", s))
             elif s["kind"] == "name":
-                names.setdefault(_fold(s["value"]), f"{s['value']!r} in {a.path}")
+                names.setdefault(_fold(s["value"]), (f"{s['value']!r} in {a.path}", s))
     if len(codes) > 1:
-        return "the files carry different ER codes: " + "; ".join(list(codes.values())[:4])
+        entries = list(codes.values())[:4]
+        return "the files carry different ER codes: " + "; ".join(x[0] for x in entries), [x[1] for x in entries]
     if len(names) > 1:
         # A name that is a prefix of another (initials, middle names) is
         # the same person — so the names are CLUSTERED by that relation
@@ -142,8 +189,15 @@ def conflict_in(case: ClaimCase, artifacts: list[ClaimSourceArtifact], signals: 
         # third name whenever two of the three happened to be one person.
         clusters = _clusters(list(names))
         if len(clusters) > 1:
-            return "the files carry different names: " + "; ".join(names[c[0]] for c in clusters[:4])
-    return ""
+            entries = [names[c[0]] for c in clusters[:4]]
+            return "the files carry different names: " + "; ".join(x[0] for x in entries), [x[1] for x in entries]
+    return "", []
+
+
+def conflict_in(case: ClaimCase, artifacts: list[ClaimSourceArtifact], signals: dict[str, list[dict]],
+                shared: set[str] | None = None) -> str:
+    """Compatibility wrapper for callers that need only the sentence."""
+    return conflict_details(case, artifacts, signals, shared)[0]
 
 
 def _clusters(keys: list[str]) -> list[list[str]]:
@@ -232,7 +286,7 @@ def refresh(s, run: ClaimsRun) -> dict:
         c.artifact_ids = sorted({*[a.artifact_id for a in artifacts if a.case_id == c.id], *own_report})
         if c.state == "excluded":
             continue
-        why = conflict_in(c, artifacts, signals, shared)
+        why, competing = conflict_details(c, artifacts, signals, shared)
         if why:
             key = ("OWNERSHIP_CONFLICT", c.id)
             live.add(key)
@@ -243,15 +297,25 @@ def refresh(s, run: ClaimsRun) -> dict:
                 c.claimant_state = "unknown"
                 c.claimant_basis = (c.claimant_basis + "; set to unknown: the files carry conflicting identity signals")[:400]
             reason = (f"Case {c.label or c.id}: {why}. Two people could own this — split the case, move the "
-                      "odd file out, or set the claimant with a note.")
+                      "odd file out before checking, re-check the identities, or explicitly confirm ownership with a note.")
+            conflict_cite = {"what": c.id, **(competing[0].get("cite") if competing else {}),
+                             "signals": [{"kind": item["kind"], "value": item["value"], **item.get("cite", {})}
+                                         for item in competing]}
             if f is None:
                 s.add(ClaimFlag(run_id=run.id, employee_id="", case_id=c.id, code="OWNERSHIP_CONFLICT", reason=reason,
                                 basis="universal rule: conflicting strong identity signals never resolve themselves",
-                                cite={"what": c.id, "file": next((a.path for a in artifacts if a.case_id == c.id), "")}))
+                                cite=conflict_cite))
             elif f.status in ("open", "info"):
-                f.reason = reason
+                f.reason, f.cite = reason, conflict_cite
             elif f.status == "resolved_by_correction":
-                f.status, f.reason, f.resolution = "open", reason, ""
+                f.status, f.reason, f.resolution, f.cite = "open", reason, "", conflict_cite
+            elif f.status == "resolved_by_action":
+                prior = f.cite or {}
+                valid = (prior.get("resolution_conflict") == reason
+                         and prior.get("resolution_claimant") == claimant_key(c.claimant_name)
+                         and c.claimant_state == "confirmed")
+                if not valid:
+                    f.status, f.reason, f.resolution, f.cite = "open", reason, "", conflict_cite
         if c.claimant_state == "unknown":
             key = ("CLAIMANT_UNKNOWN", c.id)
             live.add(key)

@@ -758,6 +758,77 @@ def set_case_claimant(run_id: str, case_id: str, body: S.ClaimantBody) -> dict:
     return _grouping_action(run_id, body, "claimant_set", fn, statuses=("map_ready", "ready"))
 
 
+@router.post("/{run_id}/cases/{case_id}/recheck-identity")
+def recheck_case_identity(run_id: str, case_id: str, body: S.RevisionBody) -> dict:
+    """Re-run deterministic identity controls with the current parser.
+    This repairs stored false positives after parser hardening without
+    dismissing a genuine conflict or changing the claimant."""
+    def fn(db, run):
+        case = db.get(ClaimCase, case_id)
+        if case is None or case.run_id != run.id:
+            raise cases_mod.GroupingError("No such case in this run.")
+        return f"case {case.label}: identity signals re-checked"
+    return _grouping_action(run_id, body, "case_identity_rechecked", fn, statuses=("map_ready", "ready"))
+
+
+@router.post("/{run_id}/cases/{case_id}/resolve-ownership")
+def resolve_case_ownership(run_id: str, case_id: str, body: S.OwnershipResolutionBody) -> dict:
+    """Explicitly resolve a genuine ownership conflict. Unlike a generic
+    flag dismissal, this is bound to a confirmed claimant and a required
+    attestation note. A later claimant/signal change reopens the conflict."""
+    from . import grouping
+
+    _case_routes_on()
+    note = body.note.strip()
+    if not note:
+        raise HTTPException(400, "A short note is required to confirm ownership — it goes in the audit trail.")
+    if not body.name.strip():
+        raise HTTPException(400, "Choose the claimant before confirming ownership.")
+    db = SessionLocal()
+    try:
+        run = db.get(ClaimsRun, run_id)
+        if run is None:
+            raise HTTPException(404, "No such claims run.")
+        if run.status not in ("map_ready", "ready"):
+            raise HTTPException(400, f"Ownership can be resolved while the run is map_ready or ready (it is {run.status}).")
+        _revision_check(db, run, body, required=True)
+        # First withdraw any stale parser-generated conflict. If the current
+        # evidence still conflicts, it remains open and must be attested below.
+        grouping.refresh(db, run)
+        try:
+            case = cases_mod.set_claimant(db, run, case_id, body.name, body.identifier)
+        except cases_mod.GroupingError as exc:
+            db.rollback()
+            raise HTTPException(400, str(exc))
+        conflict = db.query(ClaimFlag).filter(ClaimFlag.run_id == run.id,
+                                              ClaimFlag.case_id == case.id,
+                                              ClaimFlag.code == "OWNERSHIP_CONFLICT",
+                                              ClaimFlag.status.in_(("open", "info"))).first()
+        if conflict is not None:
+            conflict.status = "resolved_by_action"
+            conflict.resolution = note
+            conflict.cite = {**(conflict.cite or {}),
+                             "resolution_conflict": conflict.reason,
+                             "resolution_claimant": grouping.claimant_key(case.claimant_name)}
+        if case.legacy_employee_id:
+            employee = db.get(ClaimEmployee, case.legacy_employee_id)
+            if employee is not None:
+                employee.name, employee.er_code = case.claimant_name, case.claimant_identifier
+        run.outputs = {}
+        gate = grouping.refresh(db, run)
+        _bump_revision(run)
+        db.add(AuditEvent(run_id=run.id, actor="reviewer", action="ownership_resolved",
+                          detail=(f"case {case.label}: claimant {case.claimant_name!r}; "
+                                  f"{'conflict attested' if conflict else 'stale conflict withdrawn'}; note: {note}")[:2000]))
+        db.commit()
+        if run.status == "ready":
+            store_outputs(db, run)
+        return {"ok": True, "revision": run.revision, "grouping": gate,
+                "conflict_attested": conflict is not None}
+    finally:
+        db.close()
+
+
 @router.post("/{run_id}/cases/{case_id}/merge")
 def merge_case(run_id: str, case_id: str, body: S.MergeCaseBody) -> dict:
     """body = {into: case_id, expected_revision}"""
@@ -944,8 +1015,10 @@ async def decide_claim_flag(run_id: str, flag_id: str, body: S.DecideFlagBody) -
             raise HTTPException(400, f"Flags can be decided once the run is ready (it is {run.status}).")
         _revision_check(db, run, body)
         if flag.code in ("CLAIMANT_UNKNOWN", "OWNERSHIP_CONFLICT"):
-            raise HTTPException(400, "This is settled by an action, not a note: set or confirm the claimant on the case "
-                                     "(CLAIMANT_UNKNOWN), or split / move the files at the map (OWNERSHIP_CONFLICT).")
+            raise HTTPException(400, "This is settled by an identity action, not a generic payment note: set or "
+                                     "confirm the claimant (CLAIMANT_UNKNOWN); re-check the identities, split / move files before "
+                                     "checks, or explicitly confirm ownership with a claimant and note "
+                                     "(OWNERSHIP_CONFLICT).")
         if flag.code == "ARTIFACT_UNRESOLVED":
             # Settling a Source Artifact is a case-model act, and is behind
             # the same switch as the disposition route it stands in for.

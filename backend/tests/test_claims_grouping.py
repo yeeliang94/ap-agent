@@ -56,6 +56,24 @@ def test_signals_and_conflicts():
     assert grouping.conflict_in(ClaimCase(id="c2", run_id="r", label="x"), arts2, grouping.signals_for(run, arts2)) == ""
 
 
+def test_workbook_name_signal_requires_an_adjacent_person_value():
+    """Blank workbook cells disappear from the survey row, so the next
+    serialized cell is not necessarily the cell beside the identity label.
+    Captions are not people even when they really are adjacent."""
+    run = ClaimsRun(id="r", client="c", survey={"files": [{
+        "path": "Audrey/report.xlsx", "peek": {"tabs": {"Expense Report": [
+            "A1: Employee | F1: Approved By (Employee Manager)",
+            "A2: Employee | B2: Approved By Manager",
+            "A3: Employee | B3: Audrey Ng Shao Ying",
+        ]}}}]})
+    artifact = _art("r", "a1", "Audrey/report.xlsx", "c1", "report", media="workbook")
+
+    names = [s for s in grouping.signals_for(run, [artifact])["a1"] if s["kind"] == "name"]
+
+    assert [s["value"] for s in names] == ["Audrey Ng Shao Ying"]
+    assert names[0]["cite"]["cell"] == "B3"
+
+
 def test_roles_for_case_from_artifacts():
     run_survey = {"files": [{"path": "r.xlsx", "peek": {"tabs": {"Expense Report": [], "KM": []}}}]}
     arts = [_art("r", "w", "r.xlsx", "c", "report", media="workbook"), _art("r", "p", "rec.pdf", "c"),

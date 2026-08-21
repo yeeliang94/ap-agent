@@ -888,9 +888,10 @@ and rollback switch.
   Output names the blockers and the three totals).
 - [x] Ensure keyboard, empty, loading, stale-revision, and failure states (every
   mutation sends `expected_revision`; a 409 reloads the run and says so;
-  action-settled flags — file disposition, set claimant — offer the action on
-  the card instead of accept/dismiss; verified in the browser on a seeded
-  flat-dump run).
+  action-settled flags offer their real action on the card instead of
+  accept/dismiss: set claimant for `CLAIMANT_UNKNOWN`; re-check identities or
+  claimant-bound, noted attestation for `OWNERSHIP_CONFLICT`; file disposition
+  for unresolved artifacts; verified in component and API tests).
 - **Exit:** a reviewer can complete scenarios A–E without inspecting server logs
   or editing JSON.
 

@@ -101,6 +101,11 @@ class ClaimantBody(RevisionBody):
     confirm: bool = False
 
 
+class OwnershipResolutionBody(ClaimantBody):
+    """Reviewer attestation that every assigned file belongs to one claimant."""
+    note: str = Field(default="", max_length=500)
+
+
 class MergeCaseBody(RevisionBody):
     into: str = ""
 

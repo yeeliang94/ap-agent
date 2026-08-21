@@ -106,6 +106,60 @@ async def test_unconfirmed_claimant_is_never_paid_and_the_gate_is_server_side(db
 
 @needs_sample
 @pytest.mark.asyncio
+async def test_review_can_recheck_or_explicitly_resolve_an_ownership_conflict(db, monkeypatch):
+    """A structural conflict is not dismissed by a generic flag decision.
+    Review offers a safe re-check for stale false positives and an explicit,
+    claimant-bound attestation for a genuine conflict."""
+    run_id = await _flat_dump_run(db, monkeypatch)
+    got = client.get(f"/api/claims-runs/{run_id}").json()
+    aeg = next(c for c in got["cases"] if c["label"] == "Aegene Ong")
+    nick_receipt = next(a for a in got["artifacts"] if a["path"] == "Nick Goh_Receipt .pdf")
+    moved = client.post(f"/api/claims-runs/{run_id}/artifacts/{nick_receipt['id']}/move",
+                        json={"case_id": aeg["id"], "expected_revision": got["revision"]})
+    assert moved.status_code == 200
+    s = db()
+    run = s.get(ClaimsRun, run_id)
+    run.status = "ready"
+    s.commit()
+    got = client.get(f"/api/claims-runs/{run_id}").json()
+
+    rechecked = client.post(f"/api/claims-runs/{run_id}/cases/{aeg['id']}/recheck-identity",
+                            json={"expected_revision": got["revision"]})
+    assert rechecked.status_code == 200
+    got = client.get(f"/api/claims-runs/{run_id}").json()
+    assert any(f["code"] == "OWNERSHIP_CONFLICT" and f["status"] == "open" for f in got["flags"])
+
+    no_note = client.post(f"/api/claims-runs/{run_id}/cases/{aeg['id']}/resolve-ownership",
+                          json={"name": "Aegene Ong", "identifier": "", "note": "",
+                                "expected_revision": got["revision"]})
+    assert no_note.status_code == 400 and "note" in no_note.text.lower()
+    no_claimant = client.post(f"/api/claims-runs/{run_id}/cases/{aeg['id']}/resolve-ownership",
+                              json={"name": "", "identifier": "", "note": "I checked every assigned file",
+                                    "expected_revision": got["revision"]})
+    assert no_claimant.status_code == 400 and "claimant" in no_claimant.text.lower()
+    resolved = client.post(f"/api/claims-runs/{run_id}/cases/{aeg['id']}/resolve-ownership",
+                           json={"name": "Aegene Ong", "identifier": "", "note": "I checked every assigned file",
+                                 "expected_revision": got["revision"]})
+    assert resolved.status_code == 200, resolved.text
+    got = client.get(f"/api/claims-runs/{run_id}").json()
+    assert next(c for c in got["cases"] if c["id"] == aeg["id"])["claimant"]["state"] == "confirmed"
+    conflict = next(f for f in got["flags"] if f["code"] == "OWNERSHIP_CONFLICT" and f["case_id"] == aeg["id"])
+    assert conflict["status"] == "resolved_by_action" and conflict["resolution"] == "I checked every assigned file"
+    assert not any(f["code"] == "CLAIMANT_UNKNOWN" and f["case_id"] == aeg["id"] and f["status"] == "open"
+                   for f in got["flags"])
+
+    # The attestation is bound to the chosen claimant. Changing that person
+    # reopens the still-present signal conflict rather than silently paying it.
+    changed = client.put(f"/api/claims-runs/{run_id}/cases/{aeg['id']}/claimant",
+                         json={"name": "Nick Goh", "identifier": "", "expected_revision": got["revision"]})
+    assert changed.status_code == 200
+    got = client.get(f"/api/claims-runs/{run_id}").json()
+    assert any(f["code"] == "OWNERSHIP_CONFLICT" and f["case_id"] == aeg["id"] and f["status"] == "open"
+               for f in got["flags"])
+
+
+@needs_sample
+@pytest.mark.asyncio
 async def test_stale_revision_is_refused_on_the_delivered_routes(db, monkeypatch):
     run_id = await run_client_a(db, monkeypatch)
     got = client.get(f"/api/claims-runs/{run_id}").json()

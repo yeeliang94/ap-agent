@@ -16,7 +16,7 @@ export interface RunProgress {
 }
 export interface ItemProgress { id: string; name: string; status: string; progress?: RunProgress; error?: string; }
 export interface ReviewGroup { id: string; name: string; unresolved: number; amountAtRisk?: string; complete: boolean; sourceOrder: number; }
-export interface PreviewSource { file?: string; documentId?: string; page?: number; position?: string; sheet?: string; row?: number; summary?: string; }
+export interface PreviewSource { file?: string; documentId?: string; page?: number; position?: string; sheet?: string; row?: number; cell?: string; summary?: string; }
 export interface ReviewFinding { id: string; groupId: string; title: string; reason: string; basis?: string; status: string; blocking: boolean; amountAtRisk?: string; source?: PreviewSource; sourceOrder?: number; }
 
 export interface RunSummary {
@@ -418,7 +418,8 @@ export interface ClaimFlag {
   code: string;
   reason: string;
   basis: string;
-  cite: { file?: string; page?: number; position?: string; sheet?: string; row?: number };
+  cite: { file?: string; page?: number; position?: string; sheet?: string; row?: number; cell?: string;
+    signals?: { kind: string; value: string; file?: string; sheet?: string; row?: number; cell?: string }[] };
   status: string;
   resolution: string;
 }
@@ -888,6 +889,17 @@ export function setClaimant(runId: string, revision: number, caseId: string, nam
 export function confirmClaimant(runId: string, revision: number, caseId: string) {
   return mutate<GroupingReply>(`/api/claims-runs/${runId}/cases/${caseId}/claimant`, "PUT",
     { confirm: true, expected_revision: revision }, "Could not confirm the claimant");
+}
+
+export function recheckClaimIdentity(runId: string, revision: number, caseId: string) {
+  return mutate<GroupingReply>(`/api/claims-runs/${runId}/cases/${caseId}/recheck-identity`, "POST",
+    { expected_revision: revision }, "Could not re-check file identities");
+}
+
+export function resolveOwnership(runId: string, revision: number, caseId: string,
+  name: string, identifier: string, note: string) {
+  return mutate<GroupingReply>(`/api/claims-runs/${runId}/cases/${caseId}/resolve-ownership`, "POST",
+    { name, identifier, note, expected_revision: revision }, "Could not resolve ownership");
 }
 
 export function mergeCase(runId: string, revision: number, caseId: string, into: string) {

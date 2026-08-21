@@ -205,10 +205,10 @@ CATALOGUE: dict[str, dict] = {
         "title": "Two people could own this", "kind": "structure", "blocks": "open",
         "toggle": False, "identity": ("case_id",),
         "cites": "the case ({what: case id}) and the first conflicting file ({file})",
-        "meaning": "Strong identity signals in the case's files point at different people (two names, or "
-                   "a name and a code that belong to someone else).",
-        "what_to_do": "Look at the cited files; split the case, move the evidence, or set the claimant "
-                      "with a note."},
+        "meaning": "Strong identity signals in the case's files disagree: the files contain two different "
+                   "names or two different ER codes.",
+        "what_to_do": "Re-check the file identities first. Before checks, split the case or move the odd file. "
+                      "At review, confirm one claimant only after checking every assigned file and recording why."},
     "UNASSIGNED_EVIDENCE": {
         "title": "Evidence that belongs to no case", "kind": "note", "blocks": "info",
         "identity": ("evidence_id", "artifact_id"),
