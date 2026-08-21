@@ -37,6 +37,10 @@ MAX_ZIP_MB = 200
 # Run-wide caps (H3): a flat dump has no employee folders to count by.
 MAX_TOTAL_FILES = 1500
 MAX_TOTAL_MB = 1500      # every file's uncompressed size, added up
+# A relative path longer than this is a crafted input, not a batch: real
+# paths are a few folder names and a file name. Checked BEFORE wrapper
+# detection walks the paths.
+MAX_PATH_CHARS = 1000
 MAX_TOTAL_PAGES = 6000   # 30 cases × 200 pages, as one number
 # Post-grouping budgets, per Claim Case (applied when a case is verified,
 # and at confirm time for the case count).
@@ -106,6 +110,22 @@ def walk_folder(source, folder_url: str, on_retry=None) -> list[dict]:
     visit("", 1)
     _check_listing_quotas(entries)
     return entries
+
+
+def _check_raw_paths(rels) -> None:
+    """The cheapest checks, on the RAW paths before wrapper detection or
+    listing building walks them: a run's worth of files at most, and no
+    absurdly long path (a crafted zip can name a file in 65 KB of nested
+    folders; nothing legitimate comes close)."""
+    n = 0
+    for rel in rels:
+        n += 1
+        if len(rel) > MAX_PATH_CHARS:
+            raise QuotaExceeded(f"A path in the batch is {len(rel)} characters long — over the "
+                                f"{MAX_PATH_CHARS} character limit ({rel[:80]!r}…).")
+    if n > MAX_TOTAL_FILES:
+        raise QuotaExceeded(f"The batch holds {n} files — more than the "
+                            f"{MAX_TOTAL_FILES} files a run may have.")
 
 
 def _check_listing_quotas(entries: list[dict]) -> None:
@@ -194,9 +214,9 @@ def unpack_zip(zip_path: Path, dest: Path) -> list[dict]:
 
     Same quotas as the SharePoint walk, checked BEFORE each entry is
     decompressed (a zip bomb stops here, not in memory). Returns file
-    entries in the walker's shape. A zip whose every path starts with one
-    common folder ("batch/Aegene Ong_1/...") has that folder stripped, so
-    zipping the folder itself or its contents both work.
+    entries in the walker's shape. Wrapper folders around the batch
+    ("batch/Aegene Ong_1/...") are peeled off (strip_wrapper_roots), so
+    zipping the batch folder itself or its contents both work.
     """
     if zip_path.stat().st_size > MAX_ZIP_MB * 1024 * 1024:
         raise QuotaExceeded(f"The zip is over the {MAX_ZIP_MB} MB limit.")
@@ -206,7 +226,8 @@ def unpack_zip(zip_path: Path, dest: Path) -> list[dict]:
             infos = [i for i in z.infolist()
                      if not i.is_dir() and not Path(i.filename).name.startswith(".")
                      and "__MACOSX" not in i.filename]
-            prefix = _common_root(i.filename for i in infos)
+            _check_raw_paths(i.filename for i in infos)
+            prefix = strip_wrapper_roots([i.filename for i in infos])
             listing = []
             for info in infos:
                 rel = info.filename[len(prefix):] if prefix else info.filename
@@ -257,18 +278,22 @@ def ingest_uploaded(staged: Path, dest: Path) -> list[dict]:
     relative path). Same quotas and the same entry shape as the SharePoint
     walk and the zip, checked BEFORE anything is copied into the run's
     read-only snapshot. Sizes come from the filesystem, so the check is
-    exact.
+    exact. Wrapper folders around the batch are peeled off
+    (strip_wrapper_roots), so uploading the batch folder itself or its
+    contents both work.
     """
+    paths = [p for p in sorted(staged.rglob("*"))
+             if p.is_file() and not p.name.startswith(".")]
+    _check_raw_paths(p.relative_to(staged).as_posix() for p in paths)
+    prefix = strip_wrapper_roots([p.relative_to(staged).as_posix() for p in paths])
     listing: list[tuple[Path, str, int]] = []   # (source file, rel path, depth)
-    for path in sorted(staged.rglob("*")):
-        if not path.is_file() or path.name.startswith("."):
-            continue
-        rel = path.relative_to(staged).as_posix()
+    for path in paths:
+        rel = path.relative_to(staged).as_posix()[len(prefix):]
         parts = rel.split("/")
         if len(parts) > MAX_DEPTH + 1:
             # The zip walker's rule: anything deeper counts as one level.
             parts = parts[:MAX_DEPTH] + ["/".join(parts[MAX_DEPTH:])]
-        listing.append((path, rel, len(parts)))
+        listing.append((path, "/".join(parts), len(parts)))
     entries = _listing_entries([(rel, src.stat().st_size, n) for src, rel, n in listing])
     _check_listing_quotas(entries)
     for src, rel, _n in listing:
@@ -288,6 +313,72 @@ def _common_root(names) -> str:
         return ""
     root = first[0] + "/"
     return root if all(n.startswith(root) for n in names) else ""
+
+
+# How many wrapper levels strip_wrapper_roots will ever peel. Real
+# wrappers are one or two folders deep; the cap also bounds the work a
+# crafted deeply-nested path can cause.
+MAX_WRAPPER_LEVELS = 10
+
+# 'Aug 2026', 'July', 'Q1', '2026': a time bucket, never a person.
+_PERIOD_WORDS = {"jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "sept",
+                 "oct", "nov", "dec", "january", "february", "march", "april", "june",
+                 "july", "august", "september", "october", "november", "december",
+                 "q1", "q2", "q3", "q4"}
+
+
+def strip_wrapper_roots(rels: list[str]) -> str:
+    """The prefix of wrapper folders to peel off the batch ('' if none).
+
+    A reviewer often uploads (or zips) the folder AROUND the employee
+    folders rather than its contents. As long as every path sits inside
+    one common folder, that folder MAY be a wrapper — but it is only
+    peeled on affirmative evidence, never on a guess:
+
+    - a sole folder holding only loose files is never peeled — that is
+      one employee's folder, the batch itself;
+    - a folder titled with document or period words ('Claims', 'batch',
+      'Aug 2026') is always a wrapper;
+    - a folder named like a person ('Aegene Ong') is never a wrapper;
+    - anything ambiguous ('Emp B1 Test', 'EMP001') is a wrapper only when
+      what it holds affirms a batch: at least one subfolder that is NOT a
+      category of a single employee ('Receipts', 'July' do not count —
+      person-named or coded subfolders do).
+
+    Loops, so a double wrapper ('Claims/Aug 2026/batch/…') unwraps too,
+    capped at MAX_WRAPPER_LEVELS.
+    """
+    # Imported here, not at the top: strategies imports survey, which
+    # imports this module.
+    from .grouping import _fold, _is_document_title
+    from .investigator.strategies import folder_looks_like_a_person
+
+    def is_category(name: str) -> bool:
+        tokens = _fold(name).split()
+        return _is_document_title(name) or (
+            bool(tokens) and all(t in _PERIOD_WORDS or t.isdigit() for t in tokens))
+
+    prefix = ""
+    current = list(rels)
+    for _ in range(MAX_WRAPPER_LEVELS):
+        root = _common_root(current)
+        if not root:
+            break
+        inner = [r[len(root):] for r in current]
+        if not any("/" in r for r in inner):
+            break
+        name = root[:-1]
+        if is_category(name):
+            pass
+        elif folder_looks_like_a_person(name):
+            break
+        else:
+            tops = {r.split("/", 1)[0] for r in inner if "/" in r}
+            if all(is_category(t) for t in tops):
+                break
+        prefix += root
+        current = inner
+    return prefix
 
 
 def _safe_join(dest: Path, rel: str) -> Path:

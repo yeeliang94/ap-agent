@@ -471,4 +471,11 @@ def validate_confirmed_map(claim_map: dict, survey: dict) -> list[str]:
             codes[code] = label
         if not (e.get("name") or "").strip():
             problems.append(f"{e['folder']}: the employee needs a name")
+    # A batch with files but no case would "verify" nothing and still end
+    # green — the do-nothing run must be refused here, not discovered later.
+    if by_path and not any(e.get("is_employee") and not e.get("skip")
+                           for e in claim_map.get("employees", [])):
+        problems.append("this map creates no cases — nothing would be verified; mark at "
+                        "least one folder as an employee, or cancel the run if this batch "
+                        "truly holds no claims")
     return problems

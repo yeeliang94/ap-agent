@@ -219,6 +219,28 @@ async def test_map_and_group_actions_and_the_gate(db, monkeypatch):
             "grouping_confirmed"} <= actions
 
 
+def test_gate_and_confirm_refuse_zero_cases(db, monkeypatch):
+    """A batch whose every file is dispositioned but which holds no case
+    to verify must not confirm — the default (case-model) half of the
+    ICMR zero-case bug."""
+    monkeypatch.setattr(config, "CLAIMS_CASE_MODEL", True)
+    s = db()
+    run = ClaimsRun(id="zc", client="c", status="map_ready", revision=3,
+                    survey={"files": []}, map={})
+    s.add(run)
+    s.add(_art("zc", "a1", "Wrapper/a.pdf", "", disp="irrelevant"))
+    s.commit()
+    g = grouping.gate(s, run)
+    assert not g["ok"] and any("no case to verify" in p for p in g["problems"])
+    # An excluded case does not open the gate either.
+    s.add(ClaimCase(id="c1", run_id="zc", label="x", state="excluded"))
+    s.commit()
+    assert any("no case to verify" in p for p in grouping.gate(s, run)["problems"])
+    r = client.post("/api/claims-runs/zc/confirm-grouping", json={"expected_revision": 3})
+    assert r.status_code == 400 and "no case to verify" in r.json()["detail"]
+    assert db().get(ClaimsRun, "zc").status == "map_ready"
+
+
 @needs_sample
 @pytest.mark.asyncio
 async def test_no_identity_anywhere_gives_useful_work_and_no_output(db, monkeypatch):

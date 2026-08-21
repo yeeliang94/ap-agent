@@ -314,6 +314,17 @@ def test_unpack_zip_strips_one_common_root_folder(tmp_path):
     assert {e["path"] for e in entries if e["kind"] == "folder"} == {"A_1"}
 
 
+def test_unpack_zip_strips_a_double_wrapper(tmp_path):
+    z = tmp_path / "b.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("Claims/Emp B1 Test/Aegene Ong_1/report.xlsx", b"x")
+        zf.writestr("Claims/Emp B1 Test/Audrey Ng/report.xlsx", b"y")
+    dest = tmp_path / "out"
+    entries = batch_source.unpack_zip(z, dest)
+    assert (dest / "Aegene Ong_1" / "report.xlsx").is_file()
+    assert {e["path"] for e in entries if e["kind"] == "folder"} == {"Aegene Ong_1", "Audrey Ng"}
+
+
 def test_unpack_zip_refuses_path_escapes_and_bad_zips(tmp_path):
     z = tmp_path / "evil.zip"
     with zipfile.ZipFile(z, "w") as zf:
@@ -325,6 +336,74 @@ def test_unpack_zip_refuses_path_escapes_and_bad_zips(tmp_path):
     bad.write_bytes(b"not a zip")
     with pytest.raises(SourceUnavailable):
         batch_source.unpack_zip(bad, dest)
+
+
+def test_strip_wrapper_roots_peels_non_person_wrappers():
+    strip = batch_source.strip_wrapper_roots
+    # The ICMR bug: a wrapper around the employee folders is peeled.
+    assert strip(["Emp B1 Test/Aegene Ong_1/r.xlsx",
+                  "Emp B1 Test/Aegene Ong/Aegene Ong (Revised)/r.xlsx",
+                  "Emp B1 Test/Audrey Ng Shao Ying/r.xlsx"]) == "Emp B1 Test/"
+    # A double wrapper unwraps level by level, even when a wrapper's own
+    # name ('Claims') reads like a person to the heuristic — the level
+    # holding several person-named folders is the batch.
+    assert strip(["Claims/Aug 2026/Emp B1 Test/Aegene Ong_1/r.xlsx",
+                  "Claims/Aug 2026/Emp B1 Test/Audrey Ng/r.xlsx"]) == "Claims/Aug 2026/Emp B1 Test/"
+    # A stray file at the wrapper level does not stop the peel — it
+    # simply becomes a batch-root file.
+    assert strip(["Emp B1 Test/notes.pdf",
+                  "Emp B1 Test/Aegene Ong_1/r.xlsx"]) == "Emp B1 Test/"
+    # A wrapper titled with document words ('Claims', 'batch') is never
+    # kept as a person's folder, even around a single employee.
+    assert strip(["Claims/Aegene Ong_1/r.xlsx"]) == "Claims/"
+
+
+def test_strip_wrapper_roots_keeps_a_single_employee_folder():
+    strip = batch_source.strip_wrapper_roots
+    # A sole folder of loose files IS one employee's folder.
+    assert strip(["A_1/report.xlsx", "A_1/receipts.pdf"]) == ""
+    # A person-named wrapper stays even when it holds subfolders.
+    assert strip(["Aegene Ong/Receipts/a.pdf", "Aegene Ong/report.xlsx"]) == ""
+    assert strip(["Aegene Ong_1/Receipts/a.pdf", "Aegene Ong_1/Reports/r.xlsx"]) == ""
+    # No common root, nothing to do; empty input, nothing to do.
+    assert strip(["A_1/r.xlsx", "B_2/r.xlsx"]) == ""
+    assert strip([]) == ""
+
+
+def test_strip_wrapper_roots_preserves_single_employee_layouts():
+    strip = batch_source.strip_wrapper_roots
+    # Month or category subfolders inside one employee's folder are not a
+    # batch — the employee folder must survive, whatever its naming style.
+    assert strip(["Aegene Ong/July/r.xlsx", "Aegene Ong/August/r.xlsx"]) == ""
+    assert strip(["A_1/Receipts/a.pdf", "A_1/Reports/r.xlsx"]) == ""
+    assert strip(["EMP001/July/a.pdf", "EMP001/August/b.pdf"]) == ""
+    # A period-named wrapper around person folders is still peeled.
+    assert strip(["July 2026/Aegene Ong_1/r.xlsx",
+                  "July 2026/Audrey Ng/r.xlsx"]) == "July 2026/"
+    # Peeling is capped: a crafted deeply nested path cannot make the
+    # helper walk (or copy) thousands of levels.
+    deep = "/".join(["a"] * 500) + "/f.pdf"
+    assert strip([deep]).count("/") == batch_source.MAX_WRAPPER_LEVELS
+
+
+def test_raw_path_guards_run_before_wrapper_detection(tmp_path):
+    # A small zip can name one file in kilobytes of nested folders; it is
+    # refused before wrapper detection or the listing walks the paths.
+    z = tmp_path / "deep.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("/".join(["a"] * 600) + "/f.pdf", b"x")
+    with pytest.raises(batch_source.QuotaExceeded) as exc:
+        batch_source.unpack_zip(z, tmp_path / "out")
+    assert "characters long" in str(exc.value)
+
+
+def test_unpack_zip_keeps_month_subfolders_of_one_employee(tmp_path):
+    z = tmp_path / "m.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("Aegene Ong/July/r1.pdf", b"x")
+        zf.writestr("Aegene Ong/August/r2.pdf", b"y")
+    entries = batch_source.unpack_zip(z, tmp_path / "out")
+    assert {e["path"] for e in entries if e["kind"] == "folder" and e["depth"] == 1} == {"Aegene Ong"}
 
 
 def test_ingest_uploaded_keeps_the_folder_tree(tmp_path):
@@ -339,6 +418,27 @@ def test_ingest_uploaded_keeps_the_folder_tree(tmp_path):
     assert {e["path"] for e in entries if e["kind"] == "folder"} == {"A_1", "A_1/receipts"}
     assert (dest / "A_1" / "receipts" / "grab.pdf").read_bytes() == b"pdf"
     assert all("local" in f and f["size"] for f in files.values())
+
+
+def test_ingest_uploaded_strips_wrapper_folders(tmp_path):
+    # The ICMR layout: the reviewer dragged in the folder AROUND the
+    # employee folders. The survey must see the employees, not the wrapper.
+    staged, dest = tmp_path / "upload", tmp_path / "out"
+    (staged / "Emp B1 Test" / "Aegene Ong" / "Aegene Ong (Revised)").mkdir(parents=True)
+    (staged / "Emp B1 Test" / "Aegene Ong_1").mkdir()
+    (staged / "Emp B1 Test" / "Audrey Ng Shao Ying").mkdir()
+    (staged / "Emp B1 Test" / "Aegene Ong" / "Aegene Ong (Revised)" / "r.xlsx").write_bytes(b"x")
+    (staged / "Emp B1 Test" / "Aegene Ong_1" / "Aegene Ong_ER.xlsx").write_bytes(b"x")
+    (staged / "Emp B1 Test" / "Audrey Ng Shao Ying" / "Audrey Ng_ER.xlsx").write_bytes(b"x")
+    entries = batch_source.ingest_uploaded(staged, dest)
+    files = {e["path"] for e in entries if e["kind"] == "file"}
+    assert files == {"Aegene Ong/Aegene Ong (Revised)/r.xlsx",
+                     "Aegene Ong_1/Aegene Ong_ER.xlsx",
+                     "Audrey Ng Shao Ying/Audrey Ng_ER.xlsx"}
+    tops = {e["path"] for e in entries if e["kind"] == "folder" and e["depth"] == 1}
+    assert tops == {"Aegene Ong", "Aegene Ong_1", "Audrey Ng Shao Ying"}
+    assert (dest / "Aegene Ong_1" / "Aegene Ong_ER.xlsx").is_file()
+    assert not (dest / "Emp B1 Test").exists()
 
 
 def test_ingest_uploaded_enforces_the_run_quotas(tmp_path, monkeypatch):

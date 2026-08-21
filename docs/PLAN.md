@@ -10,6 +10,7 @@ check catalogue in Flow 3, steering, decisions table)
 **Last Updated:** 2026-08-19 (agentic/full-dump scope added; no company recipe; **Phase 4b R1–R10 done**)
 **Previous plan (invoice pipeline MVP, complete):** [docs/PLAN-MVP.md](PLAN-MVP.md)
 **Agentic/full-dump hardening:** [docs/CLAIMS-AGENT-HARDENING.md](CLAIMS-AGENT-HARDENING.md)
+**Wrapper-folder uploads & zero-case guard (2026-08-21, done):** [docs/PLAN-WRAPPER-FOLDERS.md](PLAN-WRAPPER-FOLDERS.md)
 
 > **Scope amendment, 2026-08-19:** Phase 6's company-rule discovery,
 > learn-from-decisions and `RULE_DRIFT` work is superseded by the hardening

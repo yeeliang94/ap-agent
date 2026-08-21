@@ -365,6 +365,46 @@ def test_validate_confirmed_map_names_what_is_missing():
     assert any("no receipt files" in p for p in problems)
 
 
+def test_validate_confirmed_map_refuses_a_map_with_zero_cases():
+    # The ICMR bug's second half: a batch full of files whose every folder
+    # is not-an-employee sailed through Confirm and "verified" nothing.
+    survey = {"files": [{"path": "Wrapper/a.pdf", "type": "pdf", "peek": {}}],
+              "folders": [{"path": "Wrapper", "files": ["Wrapper/a.pdf"]}]}
+    nobody = {"employees": [{"folder": "Wrapper", "is_employee": False, "name": "",
+                             "files": [{"path": "Wrapper/a.pdf", "role": "ignore"}]}],
+              "root_files": []}
+    problems = mapping.validate_confirmed_map(nobody, survey)
+    assert any("creates no cases" in p for p in problems)
+    # A skipped employee does not count as a case either.
+    nobody["employees"][0].update({"is_employee": True, "name": "A", "skip": True})
+    problems = mapping.validate_confirmed_map(nobody, survey)
+    assert any("creates no cases" in p for p in problems)
+    # One real case: the guard stays quiet (other checks may still speak).
+    somebody = {"employees": [{"folder": "Wrapper", "is_employee": True, "name": "A",
+                               "no_report": True,
+                               "files": [{"path": "Wrapper/a.pdf", "role": "receipts"}]}],
+                "root_files": []}
+    problems = mapping.validate_confirmed_map(somebody, survey)
+    assert not any("creates no cases" in p for p in problems)
+
+
+def test_confirm_map_route_refuses_zero_cases(db):
+    s = db()
+    s.add(ClaimsRun(id="zero1", client="c", status="map_ready",
+                    survey={"files": [{"path": "Wrapper/a.pdf", "type": "pdf", "peek": {}}],
+                            "folders": [{"path": "Wrapper", "files": ["Wrapper/a.pdf"]}],
+                            "root_files": []},
+                    map={"employees": [], "root_files": [], "rounds": 1}))
+    s.commit()
+    nobody = {"employees": [{"folder": "Wrapper", "is_employee": False,
+                             "files": [{"path": "Wrapper/a.pdf", "role": "ignore",
+                                        "reason": "nothing here"}]}],
+              "root_files": []}
+    r = client.post("/api/claims-runs/zero1/confirm-map", json={"map": nobody})
+    assert r.status_code == 400 and "creates no cases" in r.json()["detail"]
+    assert db().get(ClaimsRun, "zero1").status == "map_ready"
+
+
 # ---- restart safety --------------------------------------------------------
 
 def test_interrupted_runs_are_failed_but_map_ready_survives(db):

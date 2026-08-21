@@ -314,6 +314,11 @@ def gate(s, run: ClaimsRun) -> dict:
 
     if len(to_verify) > source_mod.MAX_CASES_PER_RUN:
         problems.append(f"{len(to_verify)} cases to verify — more than the {source_mod.MAX_CASES_PER_RUN} one run may hold")
+    # A batch with files but no case would "verify" nothing and still end
+    # green — the do-nothing run is refused here, not discovered later.
+    if artifacts and not to_verify:
+        problems.append("no case to verify — the batch holds files but nobody would be checked or paid; "
+                        "create a case from the files, or cancel the run if this batch truly holds no claims")
     return {"problems": problems, "by_case": by_case,
             "counts": {"artifacts": len(artifacts),
                        "dispositioned": sum(1 for a in artifacts if a.disposition != "unresolved"),
