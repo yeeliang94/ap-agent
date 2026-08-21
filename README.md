@@ -15,7 +15,7 @@ Design doc: [ap-agent-design.html](ap-agent-design.html) · MVP plan (done): [do
 | Path | What it is |
 |---|---|
 | `backend/` | Python FastAPI app: pipeline (sort → extract → check → output), SQLite, API |
-| `frontend/` | React + TypeScript app: dashboard, review screen, copy-output screen |
+| `frontend/` | React + TypeScript routed app: run history, live progress, shared review workbench, export and settings |
 | `samples/` | Synthetic demo data generator (`generate_samples.py`) with planted anomalies + ground truth |
 | `fake_mcp/` | Local stand-in for the enterprise SharePoint MCP (read-only contract, incl. its quirks) |
 | `backend/scripts/verify_run.py` | End-to-end scoring against `ground_truth.json` |
@@ -34,16 +34,25 @@ backend/.venv/bin/python samples/generate_samples.py
 backend/.venv/bin/python backend/scripts/verify_run.py
 ```
 
-Then open http://localhost:5173, upload `samples/generated/demo_batch.zip`.
+Then open http://localhost:5173/invoices/new and upload
+`samples/generated/demo_batch.zip`. Browser routes are refresh-safe; the
+production FastAPI server falls back to the SPA for direct links.
 
-**Claims runs are uploads-first**: on the Claims tab, drop the month's batch
-straight into the form — a whole folder (subfolders are kept), one zip of it,
+**Claims runs are uploads-first**: open `/claims/new` and drop the month's batch
+into the dedicated creation page — a whole folder (subfolders are kept), one zip of it,
 or loose files (PDF, PNG, JPG, WEBP, Excel; up to 200 MB per upload). The
 optional "Summary of Invoices" workbook is a second picker. Starting from a
 SharePoint link instead is behind the **SharePoint source** switch in
 Settings → Feature switches — every behavior switch lives on that screen,
 with the .env value as its default (see
 `docs/OPERATIONS-CLAIMS.md`, "Feature switches").
+
+Both run types navigate immediately to a live progress page after upload.
+Processing remains server-side if the reviewer leaves; the global header
+indicator returns to active work and holds a completed “Review ready” notice
+until it is opened or dismissed. Run workspaces use `/progress`, `/organize`,
+`/review`, and `/export` routes, with selected review groups/findings stored in
+the query string so refresh and browser Back preserve context.
 
 Tests: `cd backend && .venv/bin/python -m pytest` runs the whole suite with the
 AI faked — it makes **no paid calls**. Two tests are opt-in because they call

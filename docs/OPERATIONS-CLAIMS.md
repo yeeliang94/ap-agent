@@ -26,7 +26,7 @@ names, keys and the MCP endpoint.
 | `CLAIMS_CASE_MODEL` | on | case fields hidden from the run detail and the case routes (`/cases/*`, `/artifacts/*`, `/confirm-grouping`) answer 404; the employee fields and the delivered MapView stay authoritative; storage unchanged |
 | `CLAIMS_AGENTIC_INVESTIGATION` | off | new runs use the delivered structured-folder mapper; old runs are never reinterpreted |
 | `CLAIMS_SHADOW_INVESTIGATION` | off | with the agentic switch off, the investigator also runs on each new run; its result is compared and recorded (`SHADOW_RESULT`, `shadow_investigation`), never used |
-| `CLAIMS_FULL_DUMP_GROUPING` | off | the regrouping actions at Map & Group (create / merge / split / move / role) answer 400 and are hidden; the gate, the claim-summary sheet choice, claimants and file dispositions stay — a flat folder is inventoried and, with the agentic switch on, grouped by the investigator, but the reviewer cannot regroup it on screen |
+| `CLAIMS_FULL_DUMP_GROUPING` | off | the regrouping actions in Organize (create / merge / split / move / role) answer 400 and are hidden; the gate, the claim-summary sheet choice, claimants and file dispositions stay — a flat folder is inventoried and, with the agentic switch on, grouped by the investigator, but the reviewer cannot regroup it on screen |
 | `CLAIMS_PYTHON_SANDBOX` + `CLAIMS_SANDBOX_RUNNER` + `CLAIMS_SANDBOX_ISOLATED` | off | `run_python` absent from the allowlist (`docs/SANDBOX.md`) |
 | `CLAIMS_LOCAL_ROOT` | off (blank) | a folder path is refused exactly like any other non-https link and zip upload stays the local way in; see "Local or synced-folder ingestion" below |
 
@@ -40,6 +40,21 @@ role pattern to the profile exactly as the delivered map's "remember" did
 
 Migrations run at every start, unconditionally and additively (`claims_schema`
 records what was applied). No switch skips or reverses one.
+
+## Live progress and reviewer routes
+
+Claim creation lives at `/claims/new`. A successful upload opens
+`/claims/{run_id}/progress` immediately. The run progresses through the
+standard `preparing`, `organizing`, `checking`, and `finalizing` phases; each
+worker also records its current stable step in `claim_employees.progress`.
+Those worker updates use separate short database sessions and never commit
+the rows, evidence, or flags being staged by verification.
+
+Organization, review, and export use `/claims/{run_id}/organize`, `/review`,
+and `/export`. Activity is a drawer on the run workspace. Technical
+investigator/tool details are inside Activity → Technical details and are not
+part of the default reviewer view. Polling remains three seconds only while a
+run is active; a resting run is refreshed on focus or after a reviewer action.
 
 ## Local or synced-folder ingestion
 
