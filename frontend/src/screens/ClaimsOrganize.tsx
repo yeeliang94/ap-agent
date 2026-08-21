@@ -3,8 +3,10 @@ import {
   ArtifactRole, ClaimArtifact, ClaimCase, ClaimsRunDetail, confirmGrouping, createCase, mergeCase,
   moveArtifact, setArtifactDisposition, setArtifactRole, setClaimant, splitCase,
 } from "../api";
+import { InlineConfirm } from "../components/Inline";
 import { Action, useAction } from "../hooks/useAction";
 import { setQuery, useRouter } from "../router";
+import { sentence } from "../runPresentation";
 
 // The organization workbench of a claims run at map_ready: one selected
 // Claim (identity, summary, assigned evidence), the submitted-files drawer,
@@ -62,14 +64,19 @@ function ClaimAdvancedActions({ run, selected, cases, assigned, unassigned, acti
   const [splitIds, setSplitIds] = useState<Set<string>>(new Set());
   const [createLabel, setCreateLabel] = useState("");
   const [createIds, setCreateIds] = useState<Set<string>>(new Set());
+  const [confirmingMerge, setConfirmingMerge] = useState(false);
   const effectiveMergeInto = mergeTargets.some((claim) => claim.id === mergeInto) ? mergeInto : mergeTargets[0]?.id || "";
   const toggle = (current: Set<string>, id: string, update: (next: Set<string>) => void) => {
     const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); update(next);
   };
-  const merge = () => {
-    const target = cases.find((claim) => claim.id === effectiveMergeInto);
-    if (!target || !window.confirm(`Merge all files and findings from ${selected.label} into ${target.label}? This changes the whole Claim.`)) return;
-    void action.run(() => mergeCase(run.id, run.revision, selected.id, target.id), { key: "merge", fallback: "Could not merge the claims" });
+  // The yes/no is asked in place (InlineConfirm), never through the browser's
+  // own dialog: that one cannot be styled, read in context, or reached by the
+  // screen's keyboard order, and it blocks the whole tab.
+  const mergeTarget = cases.find((claim) => claim.id === effectiveMergeInto);
+  const merge = async () => {
+    if (!mergeTarget) return;
+    await action.run(() => mergeCase(run.id, run.revision, selected.id, mergeTarget.id), { key: "merge", fallback: "Could not merge the claims" });
+    setConfirmingMerge(false);
   };
   const split = async () => {
     const ok = await action.run(() => splitCase(run.id, run.revision, selected.id, [...splitIds], splitLabel.trim()), { key: "split", fallback: "Could not split the claim" });
@@ -80,7 +87,7 @@ function ClaimAdvancedActions({ run, selected, cases, assigned, unassigned, acti
     if (ok) { setCreateIds(new Set()); setCreateLabel(""); }
   };
   return <details className="advanced-actions"><summary>Advanced actions</summary><div className="advanced-action-grid">
-    <section><h4>Merge Claim</h4><p>Move this entire Claim into another.</p><select aria-label="Merge into Claim" value={effectiveMergeInto} onChange={(event) => setMergeInto(event.target.value)}>{mergeTargets.map((claim) => <option key={claim.id} value={claim.id}>{claim.label}</option>)}</select><button className="btn danger" disabled={!effectiveMergeInto || Boolean(action.busy)} onClick={merge}>Merge Claim</button></section>
+    <section><h4>Merge Claim</h4><p>Move this entire Claim into another.</p><select aria-label="Merge into Claim" value={effectiveMergeInto} disabled={confirmingMerge} onChange={(event) => setMergeInto(event.target.value)}>{mergeTargets.map((claim) => <option key={claim.id} value={claim.id}>{claim.label}</option>)}</select>{confirmingMerge && mergeTarget ? <InlineConfirm question={`Merge all files and findings from ${selected.label} into ${mergeTarget.label}? This changes the whole Claim.`} confirmLabel={`Yes, merge into ${mergeTarget.label}`} busy={Boolean(action.busy)} onConfirm={() => void merge()} onCancel={() => setConfirmingMerge(false)} /> : <button className="btn danger" disabled={!effectiveMergeInto || Boolean(action.busy)} onClick={() => setConfirmingMerge(true)}>Merge Claim</button>}</section>
     <section><h4>Split selected files</h4><p>Create a new Claim from some files in this Claim.</p><input aria-label="New split Claim name" placeholder="New Claim name" value={splitLabel} onChange={(event) => setSplitLabel(event.target.value)} />{assigned.map((artifact) => <label className="check-row" key={artifact.id}><input type="checkbox" checked={splitIds.has(artifact.id)} onChange={() => toggle(splitIds, artifact.id, setSplitIds)} /><span>{artifact.path.split("/").pop()}</span></label>)}<button className="btn" disabled={!splitLabel.trim() || !splitIds.size || splitIds.size >= assigned.length || Boolean(action.busy)} onClick={split}>Split into new Claim</button></section>
     {unassigned.length ? <section><h4>Create Claim</h4><p>Start a new Claim from unassigned files.</p><input aria-label="New Claim name" placeholder="New Claim name" value={createLabel} onChange={(event) => setCreateLabel(event.target.value)} />{unassigned.map((artifact) => <label className="check-row" key={artifact.id}><input type="checkbox" checked={createIds.has(artifact.id)} onChange={() => toggle(createIds, artifact.id, setCreateIds)} /><span>{artifact.path.split("/").pop()}</span></label>)}<button className="btn" disabled={!createLabel.trim() || !createIds.size || Boolean(action.busy)} onClick={create}>Create Claim</button></section> : null}
   </div></details>;
@@ -91,7 +98,7 @@ function ClaimIdentity({ run, claim, reload }: { run: ClaimsRunDetail; claim: Cl
   const action = useAction(reload, "Could not save the claimant");
   useEffect(() => { setName(claim.claimant.name || ""); setIdentifier(claim.claimant.identifier || ""); }, [claim.id, claim.claimant.name, claim.claimant.identifier]);
   const save = () => action.run(() => setClaimant(run.id, run.revision, claim.id, name, identifier), { key: "claimant" });
-  return <section className="editor-section"><h3>Claimant</h3><div className="field-grid"><label>Name<input value={name} onChange={(e) => setName(e.target.value)} /></label><label>Identifier<input value={identifier} onChange={(e) => setIdentifier(e.target.value)} /></label></div><div className="section-actions"><span className={`status ${claim.claimant.state === "confirmed" ? "ready" : "working"}`}>{claim.claimant.state}</span><button className="btn" disabled={Boolean(action.busy) || !name.trim()} onClick={save}>{action.busy ? "Saving…" : "Save claimant"}</button></div>{action.error ? <p className="error">{action.error}</p> : null}</section>;
+  return <section className="editor-section"><h3>Claimant</h3><div className="field-grid"><label>Name<input value={name} onChange={(e) => setName(e.target.value)} /></label><label>Identifier<input value={identifier} onChange={(e) => setIdentifier(e.target.value)} /></label></div><div className="section-actions"><span className={`status ${claim.claimant.state === "confirmed" ? "ready" : "working"}`}>{sentence(claim.claimant.state)}</span><button className="btn" disabled={Boolean(action.busy) || !name.trim()} onClick={save}>{action.busy ? "Saving…" : "Save claimant"}</button></div>{action.error ? <p className="error">{action.error}</p> : null}</section>;
 }
 
 function SubmittedFiles({ open, onClose, artifacts, unassigned, busy, actionsEnabled, selected, settle, assign, setRole }: { open: boolean; onClose: () => void; artifacts: ClaimArtifact[]; unassigned: ClaimArtifact[]; busy: boolean; actionsEnabled: boolean; selected: ClaimCase; settle: (a: ClaimArtifact, d: "irrelevant" | "duplicate" | "unreadable") => void; assign: (a: ClaimArtifact) => void; setRole: (a: ClaimArtifact, role: ArtifactRole, remember: boolean) => void }) {

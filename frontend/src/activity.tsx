@@ -4,7 +4,7 @@ import { runDestination } from "./runPresentation";
 
 type RunKind = "invoice" | "claim";
 export type TrackedRun = { kind: RunKind; id: string; client: string; status: string; progress: RunSummary["progress"]; ready: boolean; href: string };
-type ActivityValue = { invoices: RunSummary[]; claims: ClaimsRunSummary[]; active: TrackedRun[]; ready: TrackedRun[]; refresh: () => Promise<void>; failures: number };
+type ActivityValue = { invoices: RunSummary[]; claims: ClaimsRunSummary[]; active: TrackedRun[]; ready: TrackedRun[]; refresh: () => Promise<void>; failures: number; loaded: { invoice: boolean; claim: boolean } };
 const ActivityContext = createContext<ActivityValue | null>(null);
 const INVOICE_WORKING = new Set(["queued", "sorting", "extracting", "checking"]);
 
@@ -12,6 +12,10 @@ export function RunActivityProvider({ children }: { children: ReactNode }) {
   const [invoices, setInvoices] = useState<RunSummary[]>([]);
   const [claims, setClaims] = useState<ClaimsRunSummary[]>([]);
   const [failures, setFailures] = useState(0);
+  // Per kind: false until THAT list has been fetched successfully once, so a
+  // list screen shows placeholders (never "no runs yet") while its own
+  // request is still pending or failing.
+  const [loaded, setLoaded] = useState({ invoice: false, claim: false });
   const alive = useRef(true);
   const previous = useRef<Map<string, string>>(new Map());
   const [readyKeys, setReadyKeys] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem("ap-ready-runs-v2") || "[]") as string[]));
@@ -28,6 +32,7 @@ export function RunActivityProvider({ children }: { children: ReactNode }) {
     if (newlyReady.length) setReadyKeys((current) => { const next = new Set([...current, ...newlyReady]); localStorage.setItem("ap-ready-runs-v2", JSON.stringify([...next])); return next; });
     if (nextInvoices) setInvoices(nextInvoices);
     if (nextClaims) setClaims(nextClaims);
+    if (nextInvoices || nextClaims) setLoaded((l) => ({ invoice: l.invoice || Boolean(nextInvoices), claim: l.claim || Boolean(nextClaims) }));
   }, []);
 
   const anyWorking = invoices.some((r) => INVOICE_WORKING.has(r.status)) || claims.some(claimsRunWorking);
@@ -47,8 +52,8 @@ export function RunActivityProvider({ children }: { children: ReactNode }) {
   const value = useMemo<ActivityValue>(() => {
     const invoiceRuns = invoices.map<TrackedRun>((r) => ({ kind: "invoice", id: r.id, client: r.client, status: r.status, progress: r.progress, ready: r.status === "ready", href: runDestination("invoice", r) }));
     const claimRuns = claims.map<TrackedRun>((r) => ({ kind: "claim", id: r.id, client: r.client, status: r.status, progress: r.progress, ready: r.status === "map_ready" || r.status === "ready", href: runDestination("claim", r) }));
-    return { invoices, claims, active: [...invoiceRuns.filter((r) => INVOICE_WORKING.has(r.status)), ...claimRuns.filter((r) => claimsRunWorking(r))], ready: [...invoiceRuns, ...claimRuns].filter((r) => r.ready && readyKeys.has(`${r.kind}:${r.id}`)), refresh, failures };
-  }, [invoices, claims, failures, refresh, readyKeys]);
+    return { invoices, claims, active: [...invoiceRuns.filter((r) => INVOICE_WORKING.has(r.status)), ...claimRuns.filter((r) => claimsRunWorking(r))], ready: [...invoiceRuns, ...claimRuns].filter((r) => r.ready && readyKeys.has(`${r.kind}:${r.id}`)), refresh, failures, loaded };
+  }, [invoices, claims, failures, refresh, readyKeys, loaded]);
   return <ActivityContext.Provider value={value}>{children}</ActivityContext.Provider>;
 }
 

@@ -262,7 +262,7 @@ export function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => voi
 
   return (
     <div>
-      <div className="hero" style={{ marginBottom: 12 }}>
+      <div className="hero">
         <div>
           <h1>New claims run</h1>
           <span className="sub">One run per monthly batch{settings ? ` · ${settings.client}` : ""}</span>
@@ -313,7 +313,7 @@ export function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => voi
               type="file"
               multiple
               accept={[".zip", ...READABLE_EXT].join(",")}
-              style={{ display: "none" }}
+              hidden
               onChange={(e) => {
                 addFileList(e.target.files, false);
                 e.target.value = "";
@@ -326,7 +326,7 @@ export function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => voi
               // every file arrives with webkitRelativePath.
               {...({ webkitdirectory: "" } as Record<string, string>)}
               multiple
-              style={{ display: "none" }}
+              hidden
               onChange={(e) => {
                 addFileList(e.target.files, true);
                 e.target.value = "";
@@ -395,9 +395,9 @@ export function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => voi
         {/* Always shown while a link mode is possible — the toggle must
             not vanish under the reviewer while useLink is on. */}
         {(linkAllowed || local) && (
-          <div className="switchrow" style={{ paddingBottom: 0 }}>
+          <div className="switchrow flush">
             <div className="grow">
-              <b style={{ color: "var(--muted)" }}>
+              <b className="muted">
                 {useLink ? "Upload files instead" : "Link a folder instead"}
               </b>
               <Info
@@ -422,7 +422,7 @@ export function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => voi
       </div>
 
       <div className={listingFile ? "card wstep" : "card wstep opt"}>
-        <div className="whead" style={{ marginBottom: 8 }}>
+        <div className="whead tight">
           <span className="wnum">2</span>
           <h3>
             Client's summary <span className="opt-tag">optional</span>
@@ -440,7 +440,7 @@ export function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => voi
             ref={listingInput}
             type="file"
             accept=".xlsx,.xlsm"
-            style={{ display: "none" }}
+            hidden
             onChange={(e) => setListingFile(e.target.files?.[0] ?? null)}
           />
           <button className="btn sm" onClick={() => listingInput.current?.click()}>
@@ -460,7 +460,7 @@ export function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => voi
       </div>
 
       <div className="card wstep">
-        <div className="whead" style={{ marginBottom: 8 }}>
+        <div className="whead tight">
           <span className="wnum">3</span>
           <h3>Date &amp; instructions</h3>
         </div>
@@ -476,7 +476,7 @@ export function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => voi
             aria-invalid={!dateOk}
           />
         </label>
-        <label className="editrow" style={{ alignItems: "flex-start" }}>
+        <label className="editrow top">
           <span>
             Instructions <span className="opt-tag">optional</span>
             <Info text="A short paragraph about this client's oddities. The saved playbook is prefilled." />
@@ -495,7 +495,7 @@ export function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => voi
           <div className="bar-fill" style={{ width: `${Math.round(progress * 100)}%` }} />
         </div>
       )}
-      <div className="actions" style={{ marginTop: 4 }}>
+      <div className="actions tight">
         <button className="btn primary" disabled={!valid} title={why} onClick={start}>
           {busy ? (progress > 0 && progress < 1 ? `Uploading ${Math.round(progress * 100)}%…` : "Starting…") : "Start claims run"}
         </button>

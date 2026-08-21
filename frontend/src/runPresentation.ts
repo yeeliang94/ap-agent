@@ -19,6 +19,12 @@ export function runDestination(
   return runPath(kind, run.id, "progress");
 }
 
+/** "map_ready" → "Map ready": status words read as a sentence, never a code or Title Case. */
+export function sentence(text: string): string {
+  const words = text.replaceAll("_", " ").trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : words;
+}
+
 export function runOutcome(status: string, open: number, kind: RunKind): string {
   if (status === "failed") return "See what failed";
   if (kind === "claim" && status === "map_ready") return "Organize claims";

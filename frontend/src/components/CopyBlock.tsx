@@ -21,7 +21,7 @@ export default function CopyBlock({
   }
   return (
     <div className="card copyblock">
-      <div className="row" style={{ border: "none", padding: 0 }}>
+      <div className="row">
         <div className="grow">
           <b>{title}</b>
           <span className="sub">{hint}</span>

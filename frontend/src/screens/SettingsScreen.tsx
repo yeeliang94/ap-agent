@@ -307,7 +307,7 @@ function ClaimsProfileCard() {
         </span>
         <input value={optionalItems} onChange={(e) => setOptionalItems(e.target.value)} />
       </label>
-      <label className="editrow" style={{ alignItems: "flex-start" }}>
+      <label className="editrow top">
         <span>
           Playbook
           <Info text={"Prefilled into every new run's instructions." + stamp("playbook")} />
@@ -316,7 +316,7 @@ function ClaimsProfileCard() {
       </label>
       {toggleable.length > 0 && (
         <>
-          <span className="sub" style={{ margin: "10px 0 0" }}>
+          <span className="sub spaced">
             Checks — a switched-off check raises no flags on new runs.
           </span>
           {toggleable.map((code) => (

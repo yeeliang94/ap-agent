@@ -16,8 +16,19 @@ export interface RunProgress {
 }
 export interface ItemProgress { id: string; name: string; status: string; progress?: RunProgress; error?: string; }
 export interface ReviewGroup { id: string; name: string; unresolved: number; amountAtRisk?: string; complete: boolean; sourceOrder: number; }
-export interface PreviewSource { file?: string; documentId?: string; page?: number; position?: string; sheet?: string; row?: number; cell?: string; summary?: string; }
-export interface ReviewFinding { id: string; groupId: string; title: string; reason: string; basis?: string; status: string; blocking: boolean; amountAtRisk?: string; source?: PreviewSource; sourceOrder?: number; }
+export interface PreviewSource { file?: string; documentId?: string; page?: number; position?: string; box?: number[]; sheet?: string; row?: number; cell?: string; summary?: string; }
+export interface ReviewFinding {
+  id: string; groupId: string; title: string; reason: string; basis?: string; status: string; blocking: boolean;
+  amountAtRisk?: string; source?: PreviewSource; sourceOrder?: number;
+  /** Catalogue words for the reviewer: what this kind of finding means, and the move to make. */
+  meaning?: string; whatToDo?: string;
+  /** "Aegene Ong_Receipt.pdf · page 1, right" / "Expense Report, row 10" — the file and place this finding points at. */
+  where?: string;
+  /** "2026-07-07 · Taxi · MYR 45.00" — the Claim Line the finding is about, when there is one. */
+  line?: string;
+  /** The workbook, sheet and row that Claim Line was read from, so the preview can show the cells. */
+  lineSource?: PreviewSource;
+}
 
 export interface RunSummary {
   id: string;
@@ -402,6 +413,8 @@ export interface ClaimEvidence {
   file: string;
   page: number;
   position: string;
+  /** The AI's approximate outline: [left, top, right, bottom] in percent of the page; null when not recorded. */
+  box?: [number, number, number, number] | null;
   values: Record<string, unknown>;
   confidence: Record<string, string>;
   matched_row_id: string;
@@ -419,6 +432,8 @@ export interface ClaimFlag {
   reason: string;
   basis: string;
   cite: { file?: string; page?: number; position?: string; sheet?: string; row?: number; cell?: string;
+    /** The AI's approximate outline of the cited receipt: [left, top, right, bottom] in percent of the page. */
+    box?: number[];
     signals?: { kind: string; value: string; file?: string; sheet?: string; row?: number; cell?: string }[] };
   status: string;
   resolution: string;
@@ -720,12 +735,38 @@ export function claimsFileUrl(
   path: string,
   page = 1,
   highlight = "",
-  full = false
+  full = false,
+  box?: number[]
 ): string {
   const q = new URLSearchParams({ path, page: String(page) });
   if (highlight) q.set("highlight", highlight);
   if (full) q.set("full", "true");
+  if (box && box.length === 4) q.set("box", box.join(","));
   return `/api/claims-runs/${runId}/file?${q}`;
+}
+
+/** An excerpt of one workbook sheet as plain cells (GET /claims-runs/{id}/sheet). */
+export interface SheetExcerpt {
+  file: string;
+  sheet: string;
+  sheets: string[];
+  focus: number | null;
+  header: { n: number; cells: string[] } | null;
+  rows: { n: number; cells: string[] }[];
+  columns: string[];
+  more_columns: boolean;
+}
+
+export async function getClaimsSheet(runId: string, path: string, sheet?: string, row?: number, context?: { before: number; after: number }): Promise<SheetExcerpt> {
+  const q = new URLSearchParams({ path });
+  if (sheet) q.set("sheet", sheet);
+  if (row) q.set("row", String(row));
+  if (context) { q.set("before", String(context.before)); q.set("after", String(context.after)); }
+  const r = await fetch(`/api/claims-runs/${runId}/sheet?${q}`);
+  if (!r.ok) return fail(r, "Could not load the sheet excerpt");
+  const body = (await r.json()) as Partial<SheetExcerpt>;
+  if (!Array.isArray(body.rows) || !Array.isArray(body.columns)) throw new Error("Could not load the sheet excerpt");
+  return body as SheetExcerpt;
 }
 
 /** Per-client steering: the structured profile, the playbook paragraph,

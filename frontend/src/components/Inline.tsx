@@ -21,9 +21,9 @@ export function InlineReason({ prompt, placeholder, initial, confirmLabel, busy,
   const [value, setValue] = useState(initial);
   const ok = value.trim().length > 0;
   return (
-    <form className="actions" style={{ marginTop: 4 }}
+    <form className="actions tight"
       onSubmit={(ev) => { ev.preventDefault(); if (ok && !busy) onConfirm(value.trim()); }}>
-      <span className="sub" style={{ flexBasis: "100%" }}>{prompt}</span>
+      <span className="sub full">{prompt}</span>
       <input aria-label={prompt} value={value} placeholder={placeholder} autoFocus disabled={busy}
         onChange={(ev) => setValue(ev.target.value)} />
       <button type="submit" className="btn primary" disabled={busy || !ok} title={ok ? "" : "Type something first"}>{confirmLabel}</button>
@@ -42,8 +42,8 @@ export function InlineConfirm({ question, confirmLabel, busy, onConfirm, onCance
   onCancel: () => void;
 }) {
   return (
-    <div className="actions" role="group" aria-label={question} style={{ marginTop: 4 }}>
-      <span className="sub" style={{ flexBasis: "100%" }}>{question}</span>
+    <div className="actions tight" role="group" aria-label={question}>
+      <span className="sub full">{question}</span>
       <button type="button" className="btn warn" disabled={busy} onClick={onConfirm}>{confirmLabel}</button>
       <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
     </div>

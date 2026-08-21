@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { getSettings, getSharePointStatus, uploadBatch } from "../api";
 import { useRunActivity } from "../activity";
 import { Link, useRouter } from "../router";
-import { claimsStatusLabel, runDestination, runOutcome, runPath } from "../runPresentation";
+import { claimsStatusLabel, runDestination, runOutcome, runPath, sentence } from "../runPresentation";
 import { NewClaimsRunCard } from "./ClaimsList";
 
 export function RunListPage({ kind }: { kind: "invoice" | "claim" }) {
-  const { invoices, claims, failures } = useRunActivity();
+  const { invoices, claims, failures, loaded } = useRunActivity();
   const rows = kind === "invoice" ? invoices : claims;
+  const listLoaded = loaded[kind];
   const noun = kind === "invoice" ? "Invoice" : "Claim";
   return <section className="standard-page">
     <header className="page-header">
@@ -25,12 +26,13 @@ export function RunListPage({ kind }: { kind: "invoice" | "claim" }) {
           <div className="run-main"><strong>{run.client}</strong><span>{new Date(run.created_at).toLocaleString()}</span></div>
           <div className="run-source"><span className="meta-label">Source</span><span title={source}>{source}</span></div>
           <div className="run-count"><span className="meta-label">Progress</span><span>{count}{run.open_flags ? ` · ${run.open_flags} unresolved` : ""}</span></div>
-          <div className="run-outcome"><span className={`status ${run.status === "failed" ? "failed" : run.status === "ready" ? "ready" : "working"}`}>{isClaim ? claimsStatusLabel(run) : run.status.replaceAll("_", " ")}</span></div>
+          <div className="run-outcome"><span className={`status ${run.status === "failed" ? "failed" : run.status === "ready" ? "ready" : "working"}`}>{isClaim ? claimsStatusLabel(run) : sentence(run.status)}</span></div>
           <Link className="btn" to={destination}>{runOutcome(run.status, run.open_flags, kind)}</Link>
           {run.status === "failed" && run.error ? <p className="run-error">{run.error}</p> : null}
         </article>;
       })}
-      {!rows.length ? <div className="empty-state" role="listitem"><h2>No {noun.toLowerCase()} runs yet</h2><p>Start a run to process the first batch.</p><Link className="btn primary" to={`/${kind === "invoice" ? "invoices" : "claims"}/new`}>New run</Link></div> : null}
+      {!listLoaded && !rows.length ? <><p className="sr-only" role="status">Loading {noun.toLowerCase()} runs…</p>{[0, 1, 2].map((i) => <div className="run-row placeholder" role="listitem" aria-hidden key={i}><div className="run-main"><span className="skeleton w-60" /><span className="skeleton w-80" /></div><div className="run-source"><span className="skeleton w-40" /><span className="skeleton w-80" /></div><div className="run-count"><span className="skeleton w-40" /><span className="skeleton w-60" /></div><div className="run-outcome"><span className="skeleton w-60" /></div><span className="skeleton tall action" /></div>)}</> : null}
+      {listLoaded && !rows.length ? <div className="empty-state" role="listitem"><h2>No {noun.toLowerCase()} runs yet</h2><p>Start a run to process the first batch.</p><Link className="btn primary" to={`/${kind === "invoice" ? "invoices" : "claims"}/new`}>New run</Link></div> : null}
     </div>
   </section>;
 }
