@@ -5,6 +5,9 @@ import {
   FlagCatalogue,
   SwitchBoard,
   getClaimsSettings,
+  getSharePointStatus,
+  connectSharePoint,
+  disconnectSharePoint,
   getFlagCatalogue,
   getSettings,
   getSwitches,
@@ -12,6 +15,7 @@ import {
   saveSettings,
   saveSwitches,
 } from "../api";
+import { Link, useRouter } from "../router";
 import Info from "../components/Info";
 import Switch from "../components/Switch";
 
@@ -19,22 +23,34 @@ import Switch from "../components/Switch";
 // workspace values, the claims profile & playbook, every feature switch —
 // plus the read-only .env deployment facts. Secrets stay in .env; this
 // screen only ever shows whether they are set.
-export default function SettingsScreen() {
+export default function SettingsScreen({ section }: { section?: "workspace" | "claims" | "features" | "deployment" }) {
+  const current = section || "workspace";
+  const { navigate } = useRouter();
   return (
-    <section>
-      <div className="hero">
-        <div>
+    <section className="standard-page settings-page">
+      <div className="page-header"><div>
           <h1>Settings</h1>
-          <span className="sub">
-            Reviewer-changeable values and every feature switch. IT-managed values are read-only.
-          </span>
-        </div>
-      </div>
-      <WorkspaceCard />
-      <ClaimsProfileCard />
-      <SwitchboardCard />
+          <p>Workspace behavior and deployment controls.</p>
+        </div></div>
+      <label className="settings-mobile-select">Settings section<select value={current} onChange={(e) => navigate(`/settings/${e.target.value}`)}><option value="workspace">Workspace and connections</option><option value="claims">Claims rules</option><option value="features">Features</option><option value="deployment">Deployment</option></select></label>
+      <div className="settings-layout"><nav className="settings-nav" aria-label="Settings sections"><Link to="/settings/workspace" ariaCurrent={current === "workspace" ? "page" : undefined}>Workspace and connections</Link><Link to="/settings/claims" ariaCurrent={current === "claims" ? "page" : undefined}>Claims rules</Link><Link to="/settings/features" ariaCurrent={current === "features" ? "page" : undefined}>Features</Link><Link to="/settings/deployment" ariaCurrent={current === "deployment" ? "page" : undefined}>Deployment</Link></nav><div className="settings-content">
+      {(!section || current === "workspace") ? <><ConnectionSettings /><WorkspaceCard /></> : null}
+      {(!section || current === "claims") ? <ClaimsProfileCard /> : null}
+      {(!section || current === "features") ? <SwitchboardCard show="features" /> : null}
+      {(!section || current === "deployment") ? <SwitchboardCard show="deployment" /> : null}
+      </div></div>
     </section>
   );
+}
+
+function ConnectionSettings() {
+  const [status, setStatus] = useState<{ required: boolean; connected: boolean } | null>(null);
+  const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  const load = () => getSharePointStatus().then(setStatus).catch(() => setError("Could not check the SharePoint connection"));
+  useEffect(() => { void load(); }, []);
+  if (!status?.required) return null;
+  const toggle = async () => { setBusy(true); setError(""); try { if (status.connected) await disconnectSharePoint(); else await connectSharePoint(); await load(); } catch (e) { setError(e instanceof Error ? e.message : "Connection failed"); } finally { setBusy(false); } };
+  return <div className="settings-section"><div className="settings-section-head"><div><h2>SharePoint connection</h2><p>Used by invoice references and linked claim batches.</p></div><span className={`status ${status.connected ? "ready" : "failed"}`}>{status.connected ? "Connected" : "Not connected"}</span></div><button className="btn" disabled={busy} onClick={toggle}>{busy ? "Working…" : status.connected ? "Disconnect" : "Connect SharePoint"}</button>{error ? <p className="error">{error}</p> : null}</div>;
 }
 
 // ---- workspace (whose documents, who signs the draft) -----------------------
@@ -334,7 +350,7 @@ function ClaimsProfileCard() {
 
 // ---- feature switches + deployment facts ------------------------------------
 
-function SwitchboardCard() {
+function SwitchboardCard({ show = "both" }: { show?: "features" | "deployment" | "both" }) {
   const [board, setBoard] = useState<SwitchBoard | null>(null);
   const [busyKey, setBusyKey] = useState("");
   const [error, setError] = useState("");
@@ -372,6 +388,7 @@ function SwitchboardCard() {
 
   return (
     <>
+      {show !== "deployment" ? (
       <div className="card">
         <h3 className="section-title">
           Feature switches
@@ -394,6 +411,8 @@ function SwitchboardCard() {
         ))}
         {error && <p className="error">{error}</p>}
       </div>
+      ) : null}
+      {show !== "features" ? (
       <div className="card">
         <h3 className="section-title">
           Deployment
@@ -408,6 +427,7 @@ function SwitchboardCard() {
           </div>
         ))}
       </div>
+      ) : null}
     </>
   );
 }

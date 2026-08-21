@@ -285,7 +285,7 @@ async function walkEntry(entry: FileSystemEntry, prefix: string, out: Picked[]):
 // The uploads-first start (redesign): drop or pick the month's batch — a
 // folder, a zip, or loose files — then the optional listing workbook, the
 // received date and the optional instructions paragraph.
-function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => void }) {
+export function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => void }) {
   const [settings, setSettings] = useState<ClaimsSettings | null>(null);
   const [picked, setPicked] = useState<Picked[]>([]);
   const [folderUrl, setFolderUrl] = useState("");
@@ -420,7 +420,7 @@ function NewClaimsRunCard({ onStarted }: { onStarted: (id: string) => void }) {
     <div>
       <div className="hero" style={{ marginBottom: 12 }}>
         <div>
-          <h1>Claims</h1>
+          <h1>New claims run</h1>
           <span className="sub">One run per monthly batch{settings ? ` · ${settings.client}` : ""}</span>
         </div>
       </div>

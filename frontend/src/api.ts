@@ -1,11 +1,30 @@
 // All backend calls in one place, with the shapes the API returns.
 
+export type RunPhase = "preparing" | "organizing" | "checking" | "finalizing";
+export type ProgressUnit = "files" | "documents" | "claims" | "assignments" | "references" | "output" | "items" | "claim";
+export interface RunProgress {
+  phase?: RunPhase;
+  step?: string;
+  done?: number;
+  total?: number;
+  unit?: ProgressUnit | string;
+  updated_at?: string;
+  /** Compatibility fields emitted by older claims runs. */
+  what?: string;
+  file?: string;
+  employees?: number;
+}
+export interface ItemProgress { id: string; name: string; status: string; progress?: RunProgress; error?: string; }
+export interface ReviewGroup { id: string; name: string; unresolved: number; amountAtRisk?: string; complete: boolean; sourceOrder: number; }
+export interface PreviewSource { file?: string; documentId?: string; page?: number; position?: string; sheet?: string; row?: number; summary?: string; }
+export interface ReviewFinding { id: string; groupId: string; title: string; reason: string; basis?: string; status: string; blocking: boolean; amountAtRisk?: string; source?: PreviewSource; }
+
 export interface RunSummary {
   id: string;
   client: string;
   status: string;
   error: string;
-  progress: { done?: number; total?: number };
+  progress: RunProgress;
   documents_total: number;
   open_flags: number;
   /** Diary counts. A run can be "ready" AND have errors — that pairing is
@@ -112,6 +131,7 @@ export interface Doc {
   corrections: Record<string, { from: unknown; to: unknown; reason: string }>;
   status: string;
   error: string;
+  page_count: number | null;
 }
 
 // Fields a human may correct, mirroring the backend's rule.
@@ -251,10 +271,10 @@ export async function decideFlag(
   if (!r.ok) throw new Error("Could not record decision");
 }
 
-export function documentFileUrl(runId: string, docId: string): string {
+export function documentFileUrl(runId: string, docId: string, page = 1): string {
   // The preview endpoint returns the first page as PNG for every file type,
   // so the review screen never depends on the browser's PDF plugin.
-  return `/api/runs/${runId}/documents/${docId}/preview`;
+  return `/api/runs/${runId}/documents/${docId}/preview?page=${page}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +293,7 @@ export interface ClaimsRunSummary {
   client: string;
   status: string; // queued | surveying | mapping | map_ready | verifying | ready | failed
   error: string;
-  progress: { done?: number; total?: number; what?: string; file?: string; employees?: number };
+  progress: RunProgress;
   folder: string;
   employee_count: number;
   employees_done: number;
@@ -355,6 +375,7 @@ export interface ClaimEmployee {
   gl: string;
   category_basis: string;
   summary: Record<string, unknown>;
+  progress?: RunProgress;
 }
 
 export interface ClaimRow {
