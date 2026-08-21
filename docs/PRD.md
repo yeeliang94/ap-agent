@@ -44,8 +44,9 @@ the invoice pipeline today. Single user, no login, as today.
 **Success criteria.**
 1. On the synthetic sample (10 employees, planted errors), **every planted
    error is flagged**, and false flags average **≤ 1 per employee**.
-2. **Every flag cites a place**: file + page (+ left/middle/right for a
-   receipt) or sheet + row. Clicking the flag shows that place.
+2. **Every flag cites a place**: file + page (+ the receipt's approximate
+   outline, a box in percent of the page, with left/middle/right as the
+   coarser fallback) or sheet + row. Clicking the flag shows that place.
 3. **Second run, same client, no corrections**: with the first run's
    confirmed map remembered, the second run's map needs no manual changes
    on the sample.
@@ -343,7 +344,8 @@ comparison and every sum.
   Each page is read by the AI once to say what it is: *receipts page* /
   *mileage-map page* / *copy of the report* / *other*, **and** in the same
   read: for a receipts page, the list of receipts on it (vendor, date,
-  amount, currency, position left/middle/right, and anything hard to read);
+  amount, currency, position left/middle/right, an approximate outline box,
+  and anything hard to read);
   for a map page, the list of trips (date, purpose, from, to, whether the
   text says "and back", the km printed on the map).
 - Receipts pages are read **twice** independently (as the pipeline does

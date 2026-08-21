@@ -24,11 +24,12 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import math
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_ai import BinaryContent
 
 from ..model_layer import USAGE_LIMITS, create_agent
@@ -81,8 +82,44 @@ class ReceiptRead(BaseModel):
     amount: Decimal = Field(gt=0, allow_inf_nan=False, description="the receipt TOTAL")
     currency: str = Field(pattern=CURRENCY_PATTERN, description="3-letter code; RM means MYR")
     position: Position = Field(description="where on the page: left / middle / right third")
+    # The rectangle that encloses this receipt, as whole-number PERCENTAGES
+    # of the page (left, top, right, bottom; 0 = left/top edge, 100 =
+    # right/bottom edge). Approximate is fine: it is drawn on the preview so
+    # a person finds the receipt, never used to decide anything.
+    box: list[int] | None = Field(
+        default=None,
+        description="[left, top, right, bottom] as percentages 0-100 of the page width/height enclosing just this receipt",
+    )
     # field -> note, ONLY for fields that were hard to read
     low_confidence: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("box", mode="before")
+    @classmethod
+    def _sane_box(cls, value):
+        """A malformed box is dropped, never a reason to reject the whole
+        read (the amounts and dates matter more than the outline)."""
+        return normalise_box(value)
+
+
+def normalise_box(value) -> list[int] | None:
+    """[left, top, right, bottom] clamped to 0..100 and ordered; None when the
+    value is not four numbers or has no area. Fractions (0..1) are scaled up."""
+    if value is None:
+        return None
+    try:
+        nums = [float(v) for v in value]
+    except (TypeError, ValueError):
+        return None
+    if len(nums) != 4 or not all(math.isfinite(n) for n in nums):  # not four numbers, or NaN / infinite
+        return None
+    if all(0 <= n <= 1 for n in nums) and max(nums) > 0:
+        nums = [n * 100 for n in nums]
+    x0, y0, x1, y1 = (min(100, max(0, round(n))) for n in nums)
+    x0, x1 = sorted((x0, x1))
+    y0, y1 = sorted((y0, y1))
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    return [int(x0), int(y0), int(x1), int(y1)]
 
 
 class TripRead(BaseModel):
@@ -116,7 +153,11 @@ _INSTRUCTIONS = (
     "YYYY-MM-DD; Malaysian receipts print DAY/MONTH/YEAR, so 10/07/2026 is 10 "
     "July 2026; empty if none), the receipt TOTAL amount, currency (RM means "
     "MYR), and its position on the page: left / middle / right third (a lone "
-    "receipt is 'middle'; two receipts are left and right). CRITICAL: if any "
+    "receipt is 'middle'; two receipts are left and right), and its box: "
+    "[left, top, right, bottom] as whole-number percentages of the page "
+    "width and height (0 = left/top edge, 100 = right/bottom edge) that "
+    "just enclose that receipt's paper — approximate is fine, it is only "
+    "drawn on the preview so a person can find the receipt. CRITICAL: if any "
     "digit of the amount or date is smudged, blurred or could plausibly be "
     "misread, list that field in low_confidence with a short note — a wrong "
     "value stated confidently is the worst possible answer. Never invent.\n"
@@ -131,28 +172,45 @@ _INSTRUCTIONS = (
 
 # ---- rendering -----------------------------------------------------------------
 
-def render_page(path: Path, page: int = 1, highlight: str = "", full: bool = False) -> bytes:
+def render_page(path: Path, page: int = 1, highlight: str = "", full: bool = False,
+                box: list[int] | None = None) -> bytes:
     """One page as PNG. page is 1-based; raises IndexError when out of
     range and ValueError for a file type that cannot be rendered (the
     callers map those to 404 / 415). ONLY the requested page is
     rasterised — a single-page request on a 200-page bundle used to
-    render all 200. highlight shades everything BUT the named third of
-    the page, so a receipt's cited position stands out in the preview."""
+    render all 200. With a box (the AI's [left, top, right, bottom] in
+    percent of the page) everything outside the box is shaded and the box
+    outlined; without one, highlight = left/middle/right shades everything
+    BUT the named third of the page — the older, coarser citation."""
     from PIL import Image, ImageDraw
 
     if full:
         img = _render_full(path, page)
     else:
         img = Image.open(io.BytesIO(document_page_png(path, page))).convert("RGB")
-    if highlight in ("left", "middle", "right"):
-        w, h = img.size
+    w, h = img.size
+    region = None
+    box = normalise_box(box)
+    if box:
+        x0, y0, x1, y1 = box
+        # a little breathing room so the outline sits outside the paper's edge
+        pad_x, pad_y = max(4, w // 100), max(4, h // 100)
+        region = (max(0, w * x0 // 100 - pad_x), max(0, h * y0 // 100 - pad_y),
+                  min(w - 1, w * x1 // 100 + pad_x), min(h - 1, h * y1 // 100 + pad_y))
+    elif highlight in ("left", "middle", "right"):
         thirds = {"left": (0, w // 3), "middle": (w // 3, 2 * w // 3), "right": (2 * w // 3, w)}
+        x0, x1 = thirds[highlight]
+        region = (x0, 0, x1 - 1, h - 1)
+    if region:
+        rx0, ry0, rx1, ry1 = region
         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
         d = ImageDraw.Draw(overlay)
-        x0, x1 = thirds[highlight]
-        d.rectangle((0, 0, x0, h), fill=(120, 120, 120, 110))
-        d.rectangle((x1, 0, w, h), fill=(120, 120, 120, 110))
-        d.rectangle((x0, 0, x1 - 1, h - 1), outline=(14, 124, 107, 255), width=6)
+        shade = (120, 120, 120, 110)
+        d.rectangle((0, 0, w, ry0), fill=shade)            # above
+        d.rectangle((0, ry1 + 1, w, h), fill=shade)        # below
+        d.rectangle((0, ry0, rx0, ry1), fill=shade)        # left of
+        d.rectangle((rx1 + 1, ry0, w, ry1), fill=shade)    # right of
+        d.rectangle((rx0, ry0, rx1, ry1), outline=(14, 124, 107, 255), width=6)
         img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -398,7 +456,8 @@ def _merge_receipt_reads(a: PageRead, b: PageRead) -> tuple[list[dict], list[str
                 conf["currency"] = f"two independent reads disagree: {r.currency} vs {twin.currency}"
         out.append({"vendor": r.vendor, "date": r.date if _iso(r.date) else "",
                     "amount": _money_text(r.amount), "currency": r.currency,
-                    "position": r.position, "confidence": conf, **alt})
+                    "position": r.position, "box": r.box or (twin.box if twin else None),
+                    "confidence": conf, **alt})
     # Whatever the second read saw and the first did not is kept — two
     # receipts can share a position, so the leftovers of a position that
     # already paired are extra receipts, not duplicates of one.
@@ -409,7 +468,7 @@ def _merge_receipt_reads(a: PageRead, b: PageRead) -> tuple[list[dict], list[str
         for r in extras:
             out.append({"vendor": r.vendor, "date": r.date if _iso(r.date) else "",
                         "amount": _money_text(r.amount), "currency": r.currency,
-                        "position": r.position,
+                        "position": r.position, "box": r.box,
                         "confidence": {**r.low_confidence,
                                        "receipt": "only one of two reads saw this receipt"}})
     return out, notes

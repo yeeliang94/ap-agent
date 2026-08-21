@@ -15,7 +15,7 @@ claims_* tables".
   ClaimRow       one expense or mileage line read from a report — or, for
                  a case with no report, one line built from a receipt
   ClaimEvidence  one receipt or one map trip found on a page, with WHERE
-                 it is (file, page, left/middle/right)
+                 it is (file, page, left/middle/right, and an approximate box)
   ClaimFlag      one thing a person must decide, with its reason, its
                  basis (the rule and where it came from) and its citation
   ClaimSourceArtifact     one submitted file with its hash, proposed role and
@@ -173,6 +173,10 @@ class ClaimEvidence(Base):
     page: Mapped[int] = mapped_column(Integer, default=0)
     # left / middle / right for a receipt; "" for a map trip
     position: Mapped[str] = mapped_column(String, default="")
+    # The AI's approximate outline of a receipt: [left, top, right, bottom]
+    # in percent of the page, drawn on the preview. None when the read
+    # did not give one (older runs, map trips).
+    box: Mapped[list | None] = mapped_column(JSON, default=None, nullable=True)
     # Receipt: vendor, date, amount, currency. Map trip: date, purpose,
     # from, to, return_trip, km_printed (a number, or "unreadable").
     values: Mapped[dict] = mapped_column(JSON, default=dict)

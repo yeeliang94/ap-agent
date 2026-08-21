@@ -160,7 +160,7 @@ def _shared_receipt_flags(s, run_id: str, profile: dict) -> int:
             others = [x for x in group if x.employee_id != e.employee_id]
             names = sorted({(employees.get(x.employee_id).name or employees.get(x.employee_id).folder)
                             if employees.get(x.employee_id) else "?" for x in others})
-            as_dict = lambda x: {"file": x.file, "page": x.page, "position": x.position, "values": x.values or {}}  # noqa: E731
+            as_dict = lambda x: {"file": x.file, "page": x.page, "position": x.position, "box": x.box, "values": x.values or {}}  # noqa: E731
             v = e.values or {}
             s.add(ClaimFlag(
                 run_id=run_id, employee_id=e.employee_id, case_id=e.case_id or cases_mod.case_id_for_employee(s, e.employee_id),
@@ -637,7 +637,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
     for r in receipts:
         r["id"] = new_id()
         ev_dicts.append({"id": r["id"], "kind": "receipt", "file": r["file"], "page": r["page"],
-                         "position": r["position"],
+                         "position": r["position"], "box": r.get("box"),
                          "values": {"vendor": r["vendor"], "date": r["date"], "amount": r["amount"],
                                     "currency": r["currency"],
                                     **{k: r[k] for k in ("date_alt", "amount_alt") if r.get(k)}},
@@ -669,7 +669,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
                        matched_evidence_id=r.get("matched_evidence_id") or eid))
     for ed in ev_dicts:
         s.add(ClaimEvidence(id=ed["id"], run_id=run.id, employee_id=emp.id, case_id=case_id, kind=ed["kind"], file=ed["file"],
-                            page=ed["page"], position=ed["position"], values=ed["values"],
+                            page=ed["page"], position=ed["position"], box=ed.get("box"), values=ed["values"],
                             confidence=ed["confidence"],
                             matched_row_id=result["matches"].get(ed["id"], "")
                             or next((r["id"] for r in rows if r.get("matched_evidence_id") == ed["id"]), "")))
@@ -796,7 +796,7 @@ async def run_checks_for(s, run: ClaimsRun, emp: ClaimEmployee, profile: dict,
     rows = [{"id": r.id, "kind": r.kind, "sheet": r.sheet, "row": r.row, "values": dict(r.values)}
             for r in row_objs]
     evidence = [{"id": e.id, "kind": e.kind, "file": e.file, "page": e.page, "position": e.position,
-                 "values": dict(e.values), "confidence": dict(e.confidence or {})} for e in ev_objs]
+                 "box": e.box, "values": dict(e.values), "confidence": dict(e.confidence or {})} for e in ev_objs]
     tie = TieBreak(usage or evidence_mod.Usage(cap=WORKER_REQUEST_CAP))
     result = await checks_mod.run_checks(rows, evidence, profile,
                                          {"name": emp.name, "er_code": emp.er_code}, searched, tie)

@@ -130,6 +130,9 @@ def _v1_case_model(engine) -> None:
         for table in ("claim_rows", "claim_evidence", "claim_flags"):
             _add_column(conn, table, "case_id", "VARCHAR DEFAULT ''")
         _add_column(conn, "claim_flags", "artifact_id", "VARCHAR DEFAULT ''")
+        # v3's column, added here too for the same reason as progress above:
+        # the backfill below queries ClaimEvidence in its current ORM shape.
+        _add_column(conn, "claim_evidence", "box", "JSON")
     # 2. one Claim Case per existing employee; case ids on their rows,
     #    evidence and flags.
     from . import cases as cases_mod
@@ -160,3 +163,9 @@ def _v1_case_model(engine) -> None:
 def _v2_worker_progress(engine) -> None:
     with engine.begin() as conn:
         _add_column(conn, "claim_employees", "progress", "JSON DEFAULT '{}'")
+
+
+@migration(3, "receipt outline (box) on evidence, for the preview")
+def _v3_evidence_box(engine) -> None:
+    with engine.begin() as conn:
+        _add_column(conn, "claim_evidence", "box", "JSON")

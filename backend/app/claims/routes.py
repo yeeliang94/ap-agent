@@ -571,12 +571,23 @@ def _map_changes(old: dict, new: dict) -> list[str]:
 
 @router.get("/{run_id}/file")
 def get_claims_file(run_id: str, path: str, page: int = 1, highlight: str = "",
-                    full: bool = False):
+                    full: bool = False, box: str = ""):
     """A page of one of the run's files as a PNG (or the file itself for a
-    workbook). `highlight` = left/middle/right shades the named third of the
-    page so a receipt's cited position is obvious. `full` renders at full
-    resolution (map pages)."""
-    from .evidence import render_page
+    workbook). `box` = "left,top,right,bottom" in percent of the page (the
+    AI's approximate outline of the cited receipt) outlines that region and
+    shades the rest; without it, `highlight` = left/middle/right shades the
+    named third of the page. `full` renders at full resolution (map pages)."""
+    from .evidence import normalise_box, render_page
+
+    box_values = None
+    if box:
+        parts = box.split(",")
+        try:
+            box_values = normalise_box([float(p) for p in parts])
+        except ValueError:
+            box_values = None
+        if box_values is None:
+            raise HTTPException(400, "box must be four numbers: left,top,right,bottom in percent of the page.")
 
     db = SessionLocal()
     try:
@@ -594,7 +605,7 @@ def get_claims_file(run_id: str, path: str, page: int = 1, highlight: str = "",
     if page < 1:
         raise HTTPException(404, "No such page.")
     try:
-        png = render_page(target, page, highlight=highlight, full=full)
+        png = render_page(target, page, highlight=highlight, full=full, box=box_values)
     except IndexError:
         # The file is here, that page of it is not.
         raise HTTPException(404, "No such page.")
@@ -604,6 +615,116 @@ def get_claims_file(run_id: str, path: str, page: int = 1, highlight: str = "",
         # this type has no page image — the screen offers the download.
         raise HTTPException(415, f"{target.name} cannot be shown as a page image ({exc}).")
     return Response(content=png, media_type="image/png")
+
+
+def _cell_text(value) -> str:
+    """A cell as the reviewer would read it in Excel: dates without a
+    midnight time, whole numbers without '.0', nothing invented."""
+    import datetime as _dt
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, _dt.datetime):
+        return value.date().isoformat() if value.time() == _dt.time(0, 0) else value.isoformat(sep=" ")
+    if isinstance(value, _dt.date):
+        return value.isoformat()
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else f"{value:.4f}".rstrip("0").rstrip(".")
+    return str(value).strip()
+
+
+def _looks_numeric(text: str) -> bool:
+    try:
+        float(text.replace(",", ""))
+        return True
+    except ValueError:
+        return False
+
+
+SHEET_EXCERPT_MAX_COLUMNS = 14
+# Deeper than any claim summary; keeps one request from walking a
+# million-row sheet.
+SHEET_EXCERPT_MAX_ROW = 20_000
+
+
+@router.get("/{run_id}/sheet")
+def get_claims_sheet(run_id: str, path: str, sheet: str = "", row: int = 0,
+                     before: int = 6, after: int = 4) -> dict:
+    """An excerpt of one sheet of a run's workbook as plain cells: the table
+    header (the last all-words row above `row`) and the rows around `row`,
+    so the Review screen can show a cited Claim Line beside its receipt
+    without the reviewer downloading the workbook. Values only (formulas
+    already computed); nothing is rendered or interpreted."""
+    db = SessionLocal()
+    try:
+        if not db.get(ClaimsRun, run_id):
+            raise HTTPException(404, "No such claims run.")
+    finally:
+        db.close()
+    base = runner.files_dir(run_id)
+    target = (base / path).resolve()
+    if base.resolve() not in target.parents or not target.is_file():
+        raise HTTPException(404, "No such file in this run.")
+    if target.suffix.lower() not in (".xlsx", ".xlsm"):
+        raise HTTPException(415, f"{target.name} is not a workbook.")
+    import openpyxl
+    from openpyxl.utils import get_column_letter
+    try:
+        wb = openpyxl.load_workbook(target, read_only=True, data_only=True)
+    except Exception as exc:  # a hostile or broken file: say so, do not 500
+        raise HTTPException(415, f"{target.name} could not be opened as a workbook ({exc}).")
+    if row < 0 or row > SHEET_EXCERPT_MAX_ROW:
+        raise HTTPException(400, f"row must be between 1 and {SHEET_EXCERPT_MAX_ROW}.")
+    try:
+        if sheet and sheet not in wb.sheetnames:
+            raise HTTPException(404, f"No sheet named {sheet!r} in {target.name}.")
+        ws = wb[sheet] if sheet else wb[wb.sheetnames[0]]
+        focus = row if row >= 1 else 0
+        before, after = max(0, min(before, 40)), max(0, min(after, 40))
+        start = max(1, (focus or 1) - before)
+        end = (focus or 1) + after
+        # Only the columns the excerpt can show are read (one more, to know
+        # whether the sheet goes on to the right); the scan stops at `end`.
+        max_col = SHEET_EXCERPT_MAX_COLUMNS + 1
+        header = None
+        rows: list[dict] = []
+        prev_words: dict | None = None  # the row above, if it can be a header
+        prev_is_data = False
+        more_columns = False
+        for idx, values in enumerate(ws.iter_rows(min_row=1, max_row=end, max_col=max_col, values_only=True), 1):
+            values = list(values)
+            if len(values) > SHEET_EXCERPT_MAX_COLUMNS:
+                more_columns = more_columns or values[SHEET_EXCERPT_MAX_COLUMNS] not in (None, "")
+                values = values[:SHEET_EXCERPT_MAX_COLUMNS]
+            cells = [_cell_text(v) for v in values]
+            filled = [v for v in values if v not in (None, "")]
+            # A data row holds something other than words (a date, a number),
+            # judged by the cells' own types. The table header is the last
+            # all-words row above the cited line that is FOLLOWED by a data
+            # row and NOT preceded by one — a text-only line inside the table
+            # (a note row) is between data rows and so never mistaken for it.
+            is_data = any(not isinstance(v, str) or _looks_numeric(v) for v in filled)
+            if focus and idx <= focus and prev_words and is_data:
+                header = prev_words
+            all_words = len(filled) >= 3 and all(isinstance(v, str) and not _looks_numeric(v) for v in filled)
+            prev_words = {"n": idx, "cells": cells} if all_words and idx < focus and not prev_is_data else None
+            prev_is_data = is_data
+            if idx >= start:
+                rows.append({"n": idx, "cells": cells})
+        sheets = list(wb.sheetnames)
+        title = ws.title
+    finally:
+        wb.close()
+    width = 0
+    for r in ([header] if header else []) + rows:
+        last = max((i + 1 for i, c in enumerate(r["cells"]) if c), default=0)
+        width = max(width, last)
+    for r in ([header] if header else []) + rows:
+        r["cells"] = (r["cells"] + [""] * width)[:width]
+    return {"file": target.name, "sheet": title, "sheets": sheets, "focus": focus or None,
+            "header": header, "rows": rows, "columns": [get_column_letter(i + 1) for i in range(width)],
+            "more_columns": more_columns}
 
 
 # ---- Map & Group actions (H6) -------------------------------------------------------
@@ -1260,12 +1381,12 @@ def _evidence_item_dict(e: ClaimEvidence, artifact_of: dict) -> dict:
     return {"id": e.id, "artifact_id": artifact_of.get(e.file, ""), "case_id": e.case_id, "kind": e.kind,
             "values": e.values, "confidence": e.confidence, "extraction_method": "page read (AI, twice for receipts)",
             "citation": {"artifact_id": artifact_of.get(e.file, ""), "path": e.file, "page": e.page,
-                         "position": e.position}, "line_id": e.matched_row_id}
+                         "position": e.position, "box": e.box}, "line_id": e.matched_row_id}
 
 
 def _evidence_dict(e: ClaimEvidence) -> dict:
     return {"id": e.id, "employee_id": e.employee_id, "case_id": e.case_id, "kind": e.kind, "file": e.file,
-            "page": e.page, "position": e.position, "values": e.values,
+            "page": e.page, "position": e.position, "box": e.box, "values": e.values,
             "confidence": e.confidence, "matched_row_id": e.matched_row_id}
 
 

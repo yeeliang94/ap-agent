@@ -91,7 +91,10 @@ def _row_cite(row: dict) -> dict:
 
 
 def _ev_cite(ev: dict) -> dict:
-    return {"file": ev.get("file", ""), "page": ev.get("page", 0), "position": ev.get("position", "")}
+    cite = {"file": ev.get("file", ""), "page": ev.get("page", 0), "position": ev.get("position", "")}
+    if ev.get("box"):
+        cite["box"] = list(ev["box"])  # the AI's approximate outline, drawn on the preview
+    return cite
 
 
 def _where(ev: dict) -> str:

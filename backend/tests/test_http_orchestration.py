@@ -396,6 +396,62 @@ def test_the_file_route_refuses_escapes_and_names_unshowable_types(db, monkeypat
         r = client.get(f"/api/claims-runs/{run_id}/file", params={"path": path})
         assert r.status_code == 404, (path, r.status_code)
     assert client.get(f"/api/claims-runs/{run_id}/file?path=page.png&page=0").status_code == 404
+    # a box that is not four finite numbers is a 400, never a 500
+    for bad in ("1,2,3", "a,b,c,d", "inf,0,50,50", "nan,0,50,50"):
+        assert client.get(f"/api/claims-runs/{run_id}/file", params={"path": "page.png", "box": bad}).status_code == 400, bad
+    assert client.get(f"/api/claims-runs/{run_id}/file", params={"path": "page.png", "box": "10,10,60,60"}).status_code == 200
+
+
+# ---- /sheet -----------------------------------------------------------------
+
+def test_the_sheet_route_returns_the_header_and_the_rows_around_the_cited_line(db):
+    import datetime
+    import openpyxl
+
+    run_id = _map_ready_run(db, id="rs", status="ready")
+    files = runner.files_dir(run_id)
+    files.mkdir(parents=True, exist_ok=True)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Expense Report"
+    ws.append(["Name:", "Aegene Ong"])
+    ws.append([])
+    ws.append(["Date", "Expense Item", "Itemized Receipt Included (Y/N)", "Total (MYR)"])
+    for n in range(1, 30):
+        ws.append([datetime.datetime(2026, 7, n % 28 + 1), f"Taxi {n}", "Y", 10.0 * n + 0.5])
+    wb.create_sheet("KM")
+    wb.save(files / "report.xlsx")
+    (files / "notes.txt").write_text("not a workbook")
+
+    r = client.get(f"/api/claims-runs/{run_id}/sheet", params={"path": "report.xlsx", "sheet": "Expense Report", "row": 20})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["sheet"] == "Expense Report" and body["sheets"] == ["Expense Report", "KM"]
+    assert body["focus"] == 20
+    # the all-words header row is found even though it is outside the window
+    assert body["header"]["n"] == 3 and body["header"]["cells"][0] == "Date"
+    numbers = [row["n"] for row in body["rows"]]
+    assert numbers[0] == 14 and numbers[-1] == 24 and 20 in numbers
+    focus = next(row for row in body["rows"] if row["n"] == 20)
+    # dates read as dates, money without a trailing .0 artefact, no formulas, no guesses
+    assert focus["cells"][0] == "2026-07-18" and focus["cells"][3] == "170.5"
+    assert body["columns"] == ["A", "B", "C", "D"]
+
+    # a row number a sheet could never have is refused, not walked to
+    assert client.get(f"/api/claims-runs/{run_id}/sheet", params={"path": "report.xlsx", "sheet": "Expense Report", "row": 10 ** 9}).status_code == 400
+    # a text-only data row between the header and the cited line does not
+    # displace the header (rows are judged by their cells' types)
+    ws2 = openpyxl.load_workbook(files / "report.xlsx")["Expense Report"]
+    ws2.insert_rows(6)
+    for col, text in enumerate(["note", "carried over from June", "see e-mail", "n/a"], 1):
+        ws2.cell(row=6, column=col, value=text)
+    ws2.parent.save(files / "report.xlsx")
+    r2 = client.get(f"/api/claims-runs/{run_id}/sheet", params={"path": "report.xlsx", "sheet": "Expense Report", "row": 21})
+    assert r2.status_code == 200 and r2.json()["header"]["n"] == 3, r2.text
+    assert client.get(f"/api/claims-runs/{run_id}/sheet", params={"path": "report.xlsx", "sheet": "Nope", "row": 2}).status_code == 404
+    assert client.get(f"/api/claims-runs/{run_id}/sheet", params={"path": "notes.txt"}).status_code == 415
+    for path in ("../../../../etc/passwd", "/etc/passwd", "sub/../../outside.xlsx"):
+        assert client.get(f"/api/claims-runs/{run_id}/sheet", params={"path": path}).status_code == 404, path
 
 
 # ---- local-mode ingestion ----------------------------------------------------
