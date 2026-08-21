@@ -22,6 +22,17 @@ PAGE_DPI = 150
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 
+def document_page_count(path: Path) -> int:
+    """Return a preview page count without rasterising the document."""
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        with pymupdf.open(path) as pdf:
+            return pdf.page_count
+    if suffix in IMAGE_SUFFIXES:
+        return 1
+    raise ValueError(f"Unsupported document type: {path.name}")
+
+
 def document_page_png(path: Path, page: int) -> bytes:
     """ONE page (1-based) as a downsized PNG — and only that page is
     rasterised. A single-page request must never cost a whole bundle:

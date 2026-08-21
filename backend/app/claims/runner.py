@@ -25,6 +25,7 @@ from pathlib import Path
 from .. import config, switches, telemetry
 from ..db import SessionLocal
 from ..docsource import SourceUnavailable, get_source
+from ..progress import progress
 from . import source as batch_source
 from .models import IN_PROGRESS_STATUSES, ClaimsRun
 
@@ -135,7 +136,8 @@ async def process_run(run_id: str) -> None:
                             else f"{source_words.get(source_label, 'an uploaded zip')}."))
 
         # ---- bring the files in ----------------------------------------
-        _advance(db, run, ("queued",), status="surveying", progress={})
+        _advance(db, run, ("queued",), status="surveying", progress=progress(
+            "preparing", "preparing_files", 0, 0, "files"))
         started = time.monotonic()
         dest = files_dir(run_id)
         dest.mkdir(parents=True, exist_ok=True)
@@ -157,6 +159,8 @@ async def process_run(run_id: str) -> None:
         from . import survey as survey_mod
 
         started = time.monotonic()
+        _set(db, run, progress=progress(
+            "preparing", "inspecting_contents", 0, len(files), "files"))
         try:
             survey = await asyncio.to_thread(survey_mod.survey_batch, dest, files)
         except batch_source.QuotaExceeded as exc:
@@ -183,7 +187,8 @@ async def process_run(run_id: str) -> None:
         from . import investigator
         from . import manifest as manifest_mod
 
-        _advance(db, run, ("surveying",), status="mapping", progress={})
+        _advance(db, run, ("surveying",), status="mapping", progress=progress(
+            "organizing", "organizing_files", 0, len(survey["files"]), "files"))
         started = time.monotonic()
         try:
             manifest = await asyncio.to_thread(manifest_mod.build_manifest, dest, files)
@@ -201,6 +206,8 @@ async def process_run(run_id: str) -> None:
                 "instructions and start again") from exc
         _still_running(db, run)
         claim_map, warnings, notes = result.map, list(result.warnings), list(result.notes)
+        _set(db, run, progress=progress(
+            "checking", "auditing_assignments", 0, len(warnings), "assignments"))
         run.manifest = manifest_mod.to_dicts(manifest)
         store_investigation(db, run, result)
         await _shadow_investigation(db, run, request, result)
@@ -212,7 +219,8 @@ async def process_run(run_id: str) -> None:
             telemetry.record(db, run_id, "map", telemetry.WARNING, "MAP_WARNING", text)
         n_emp = sum(1 for e in claim_map.get("employees", []) if e.get("is_employee", True))
         _advance(db, run, ("mapping",), map=claim_map, map_warnings=warnings, status="map_ready",
-                 progress={"employees": n_emp})
+                 progress=progress("finalizing", "organization_ready", n_emp, n_emp,
+                                   "claims", employees=n_emp))
         telemetry.record(db, run_id, "map", telemetry.INFO, "STAGE_DONE",
                          f"Map proposed in {_secs(started)}: {n_emp} employee(s), "
                          f"{len(warnings)} warning(s). Waiting for the reviewer to confirm.")
@@ -246,10 +254,11 @@ def _fetch_batch(db, run: ClaimsRun, dest: Path) -> list[dict]:
     source = get_source(run.folder_url)
 
     def on_progress(done: int, total: int, current: str | None) -> None:
-        progress = {"done": done, "total": total, "what": "downloading"}
+        payload = progress("preparing", "preparing_files", done, total, "files",
+                           what="downloading")
         if current:
-            progress["file"] = current
-        _set(db, run, progress=progress)
+            payload["file"] = current
+        _set(db, run, progress=payload)
 
     def on_retry(what: str, attempt: int, total: int, error: Exception) -> None:
         # SourceUnavailable is this app's reviewer-facing failure and is
@@ -286,7 +295,8 @@ async def start_verification(run_id: str) -> None:
             log.warning("claims run %s: verification requested while %s — ignored",
                         run_id, run.status if run else "missing")
             return
-        _set(db, run, progress={"done": 0, "total": 0})
+        _set(db, run, progress=progress(
+            "checking", "reading_claim_summary", 0, 0, "claims"))
         from . import worker
 
         await worker.verify_run(db, run)
@@ -313,7 +323,10 @@ def _fail(db, run_id: str, error: str, code: str) -> None:
         telemetry.record(db, run_id, "run", telemetry.INFO, "RUN_STOPPED",
                          f"Stage ended after the run was stopped: {error[:300]}")
         return
-    _set(db, run, status="failed", error=error[:1000])
+    old = run.progress or {}
+    _set(db, run, status="failed", error=error[:1000], progress=progress(
+        old.get("phase", "finalizing"), "failed", old.get("done", 0),
+        old.get("total", 0), old.get("unit", "items")))
     telemetry.record(db, run_id, "run", telemetry.ERROR, code, f"Run stopped: {error}")
 
 
@@ -431,7 +444,11 @@ def fail_interrupted_runs() -> int:
     try:
         stuck = db.query(ClaimsRun).filter(ClaimsRun.status.in_(IN_PROGRESS_STATUSES)).all()
         for run in stuck:
-            _set(db, run, status="failed", error=INTERRUPTED_ERROR)
+            old = run.progress or {}
+            _set(db, run, status="failed", error=INTERRUPTED_ERROR,
+                 progress=progress(old.get("phase", "finalizing"), "interrupted",
+                                   old.get("done", 0), old.get("total", 0),
+                                   old.get("unit", "items")))
             telemetry.record(db, run.id, "run", telemetry.ERROR, "RUN_INTERRUPTED",
                              INTERRUPTED_ERROR)
         if stuck:

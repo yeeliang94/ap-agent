@@ -129,6 +129,9 @@ class ClaimEmployee(Base):
     # Counts, timing and AI cost for the diary and the summary table:
     # {"rows": n, "flagged": n, "verified": n, "seconds": s, "requests": n}
     summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Additive, reviewer-facing live progress. Written from a separate short
+    # session so a heartbeat never commits this worker's staged rows/evidence.
+    progress: Mapped[dict] = mapped_column(JSON, default=dict)
 
     run: Mapped["ClaimsRun"] = relationship(back_populates="employees")
 

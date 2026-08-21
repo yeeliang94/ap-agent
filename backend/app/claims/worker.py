@@ -22,6 +22,7 @@ from openpyxl import load_workbook
 
 from .. import config, telemetry
 from ..db import SessionLocal
+from ..progress import progress as build_progress
 from ..model_layer import USAGE_LIMITS, create_agent
 from . import cases as cases_mod
 from . import category as category_mod
@@ -69,6 +70,24 @@ def stop_if_cancelled(s, run: ClaimsRun) -> None:
         raise RunCancelled("the run was cancelled")
 
 
+def _worker_progress(run_id: str, employee_id: str, step: str) -> None:
+    """Commit only this worker's progress through a fresh, short session.
+
+    The worker's business session intentionally keeps rows, evidence and
+    flags staged until verification is complete. Updating through that
+    session would make live progress capable of publishing partial facts.
+    """
+    own = SessionLocal()
+    try:
+        (own.query(ClaimEmployee)
+         .filter(ClaimEmployee.id == employee_id, ClaimEmployee.run_id == run_id)
+         .update({"progress": build_progress("checking", step, 0, 1, "claim")},
+                 synchronize_session=False))
+        own.commit()
+    finally:
+        own.close()
+
+
 async def verify_run(db, run: ClaimsRun) -> None:
     """Run the pool over every pending employee, then close the run."""
     from .runner import _set
@@ -78,7 +97,8 @@ async def verify_run(db, run: ClaimsRun) -> None:
                                                ClaimEmployee.status == "pending").all()
     ids = [e.id for e in employees]
     total = db.query(ClaimEmployee).filter(ClaimEmployee.run_id == run.id).count()
-    _set(db, run, progress={"done": total - len(ids), "total": total})
+    _set(db, run, progress=build_progress(
+        "checking", "reading_claim_summary", total - len(ids), total, "claims"))
     telemetry.record(db, run.id, "verify", telemetry.INFO, "STAGE_STARTED",
                      f"Verifying {len(ids)} employee(s), {POOL_SIZE} at a time.")
     # The listing header map (Step 12) is read once, before the workers,
@@ -259,7 +279,8 @@ def _bump(run_id: str) -> None:
         done = s.query(ClaimEmployee).filter(
             ClaimEmployee.run_id == run_id,
             ClaimEmployee.status.in_(("verified", "failed", "skipped"))).count()
-        run.progress = {"done": done, "total": total}
+        run.progress = build_progress(
+            "checking", "matching_evidence", done, total, "claims")
         s.commit()
     finally:
         s.close()
@@ -309,7 +330,8 @@ def _finish_run(run_id: str, started: float) -> bool:
         cost = sum(int((e.summary or {}).get("requests", 0)) for e in employees)
         tokens = sum(int((e.summary or {}).get("tokens", 0)) for e in employees)
         run.status = "ready"
-        run.progress = {"done": len(employees), "total": len(employees)}
+        run.progress = build_progress(
+            "finalizing", "review_ready", len(employees), len(employees), "claims")
         s.commit()
         telemetry.record(s, run_id, "verify", telemetry.INFO, "STAGE_DONE",
                          f"Verification finished in {time.monotonic() - started:.0f}s: "
@@ -346,6 +368,7 @@ async def verify_employee(run_id: str, employee_id: str) -> None:
         if run is None or run.status == "failed":
             return  # the run was cancelled or failed: this worker does not start (H11)
         emp.status, emp.error = "verifying", ""
+        emp.progress = build_progress("checking", "reading_claim_summary", 0, 1, "claim")
         cases_mod.sync_case_from_employee(s, emp)
         s.commit()
         # A retry starts clean: the previous attempt's rows, evidence and
@@ -387,6 +410,7 @@ async def verify_employee(run_id: str, employee_id: str) -> None:
             _fail_employee(s, run_id, emp, reason, started, usage)
             return
         emp.status = "verified"
+        emp.progress = build_progress("finalizing", "claim_complete", 1, 1, "claim")
         emp.summary = {**(emp.summary or {}), "seconds": round(time.monotonic() - started, 1),
                        "requests": usage.requests, "tokens": usage.tokens}
         cases_mod.sync_case_from_employee(s, emp)
@@ -419,6 +443,7 @@ def _discard_partial(s, employee_id: str) -> ClaimEmployee:
 
 def _fail_employee(s, run_id: str, emp: ClaimEmployee, reason: str, started: float, usage) -> None:
     emp.status, emp.error = "failed", reason
+    emp.progress = build_progress("finalizing", "failed", 0, 1, "claim")
     emp.summary = {**(emp.summary or {}), "seconds": round(time.monotonic() - started, 1),
                    "requests": usage.requests, "tokens": usage.tokens}
     cases_mod.sync_case_from_employee(s, emp)
@@ -460,6 +485,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
         usage.reserve()
 
     # ---- 7. the report (+ KM tab) --------------------------------------------------
+    _worker_progress(run.id, emp.id, "reading_claim_summary")
     report_ok = False
     if not roles.get("no_report") and roles.get("report_file"):
         path = files / roles["report_file"]
@@ -498,6 +524,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
             budget()
             km_tab = roles.get("mileage_tab")
             if km_tab and km_tab in wb.sheetnames and km_tab != tab:
+                _worker_progress(run.id, emp.id, "checking_mileage")
                 try:
                     trips_rows, k_notes = await report_reader.read_km(wb[km_tab], usage, context=context)
                     notes += k_notes
@@ -516,6 +543,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
     stop_if_cancelled(s, run)  # report read done — before opening any evidence
 
     # ---- 8. the evidence pages ---------------------------------------------------------
+    _worker_progress(run.id, emp.id, "reading_evidence")
     receipts: list[dict] = []
     trips: list[dict] = []
     pages_read = 0
@@ -629,6 +657,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
             row["matched_evidence_id"] = rec["id"]
             rec["matched_row_id"] = row["id"]
     stop_if_cancelled(s, run)  # pages read — before the checks and their tie-break
+    _worker_progress(run.id, emp.id, "matching_evidence")
     result = await checks_mod.run_checks(row_dicts, ev_dicts, profile,
                                          {"name": emp.name, "er_code": emp.er_code},
                                          (pages_read, files_read), TieBreak(usage))
@@ -655,6 +684,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
     # ---- category ---------------------------------------------------------------------
     emp.category, emp.gl, emp.category_basis = "", "", ""
     stop_if_cancelled(s, run)  # checks done — before the category judge
+    _worker_progress(run.id, emp.id, "deciding_category")
     if categories and profile_mod.check_enabled(profile, "CATEGORY_UNCLEAR"):
         row_values = [r["values"] for r in rows if r["kind"] in ("expense", "derived")]
         examples = list((run.listing_headers or {}).get("past_examples") or [])
@@ -721,6 +751,7 @@ async def _work(s, run: ClaimsRun, emp: ClaimEmployee, usage: evidence_mod.Usage
     # session, so a run cancelled during the judgement above discards them
     # here instead of committing a half-verified case onto a failed run.
     stop_if_cancelled(s, run)
+    _worker_progress(run.id, emp.id, "finalizing_claim")
     cases_mod.sync_case_from_employee(s, emp)
     s.commit()
 

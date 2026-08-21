@@ -22,10 +22,11 @@ from pathlib import Path
 from .. import telemetry
 from ..db import SessionLocal
 from ..models import Document, Flag, Run
+from ..progress import progress
 from . import output, reference
 from .checks import run_checks
 from .extract import extract_all
-from .images import document_to_pngs
+from .images import document_page_count, document_to_pngs
 from .sort import attach_receipts, sort_document
 
 log = logging.getLogger("runner")
@@ -50,6 +51,7 @@ async def process_run(run_id: str, workspace: Path) -> None:
 
         telemetry.record(db, run_id, "run", telemetry.INFO, "RUN_STARTED",
                          f"Run started for {run.client} with {len(docs)} uploaded file(s).")
+        _set(db, run, progress=progress("preparing", "reading_references", 0, 1, "references"))
 
         # Take the run's own copy of the reference files FIRST. An
         # unreachable folder or an ambiguous file name is fatal, and finding
@@ -88,12 +90,18 @@ async def process_run(run_id: str, workspace: Path) -> None:
                          f"Payment listing ready in {_secs(started)}.")
 
         # ---- sort -------------------------------------------------------
-        _set(db, run, status="sorting", progress={"done": 0, "total": len(docs)})
+        _set(db, run, status="sorting", progress=progress(
+            "organizing", "sorting_documents", 0, len(docs), "documents"))
         started = time.monotonic()
         sort_failures: list[str] = []
         for i, doc in enumerate(docs, 1):
             try:
-                first_page = document_to_pngs(workspace / doc.filename)[0]
+                path = workspace / doc.filename
+                try:
+                    doc.page_count = document_page_count(path)
+                except Exception:
+                    doc.page_count = None
+                first_page = document_to_pngs(path)[0]
                 result = await sort_document(workspace / doc.filename, first_page)
                 doc.kind = result.kind
                 doc.status = "sorted"
@@ -106,7 +114,8 @@ async def process_run(run_id: str, workspace: Path) -> None:
                     f"Could not sort {doc.filename}", exc, document_id=doc.id)
                 doc.kind, doc.status, doc.error = "unknown", "error", reason
                 sort_failures.append(reason)
-            _set(db, run, progress={"done": i, "total": len(docs)})
+            _set(db, run, progress=progress(
+                "organizing", "sorting_documents", i, len(docs), "documents"))
         attach_receipts(docs)
         db.commit()
         _halt_if_all_failed(
@@ -118,9 +127,11 @@ async def process_run(run_id: str, workspace: Path) -> None:
 
         def on_progress() -> None:
             counter["done"] += 1
-            _set(db, run, progress={"done": counter["done"], "total": len(to_read)})
+            _set(db, run, progress=progress(
+                "organizing", "reading_documents", counter["done"], len(to_read), "documents"))
 
-        _set(db, run, status="extracting", progress={"done": 0, "total": len(to_read)})
+        _set(db, run, status="extracting", progress=progress(
+            "organizing", "reading_documents", 0, len(to_read), "documents"))
         started = time.monotonic()
         await extract_all(docs, workspace, on_progress)
         db.commit()
@@ -137,7 +148,8 @@ async def process_run(run_id: str, workspace: Path) -> None:
                               extract_failures, started))
 
         # ---- check ------------------------------------------------------
-        _set(db, run, status="checking", progress={})
+        _set(db, run, status="checking", progress=progress(
+            "checking", "running_checks", 0, len(to_read), "documents"))
         started = time.monotonic()
         check_notes: list[tuple[str, str]] = []
         try:
@@ -158,6 +170,7 @@ async def process_run(run_id: str, workspace: Path) -> None:
 
         # ---- draft outputs (regenerated after review decisions) --------
         started = time.monotonic()
+        _set(db, run, progress=progress("finalizing", "building_output", 0, 1, "output"))
         try:
             from ..settings_store import draft_settings
             run.outputs = await output.build_outputs(
@@ -169,7 +182,8 @@ async def process_run(run_id: str, workspace: Path) -> None:
             raise
         telemetry.record(db, run_id, "output", telemetry.INFO, "STAGE_DONE",
                          f"Copy-ready output built in {_secs(started)}.")
-        _set(db, run, status="ready")
+        _set(db, run, status="ready", progress=progress(
+            "finalizing", "review_ready", len(to_read), len(to_read), "documents"))
         telemetry.record(db, run_id, "run", telemetry.INFO, "RUN_READY",
                          "Run finished and is ready for review.")
         db.commit()
@@ -193,7 +207,10 @@ async def process_run(run_id: str, workspace: Path) -> None:
 def _fail(db, run_id: str, error: str, code: str) -> None:
     run = db.get(Run, run_id)
     if run:
-        _set(db, run, status="failed", error=error)
+        old = run.progress or {}
+        _set(db, run, status="failed", error=error, progress=progress(
+            old.get("phase", "finalizing"), "failed", old.get("done", 0),
+            old.get("total", 0), old.get("unit", "items")))
         telemetry.record(db, run_id, "run", telemetry.ERROR, code,
                          f"Run stopped: {error}")
 
@@ -322,7 +339,11 @@ def fail_interrupted_runs() -> int:
     try:
         stuck = db.query(Run).filter(Run.status.in_(IN_PROGRESS_STATUSES)).all()
         for run in stuck:
-            _set(db, run, status="failed", error=INTERRUPTED_ERROR)
+            old = run.progress or {}
+            _set(db, run, status="failed", error=INTERRUPTED_ERROR,
+                 progress=progress(old.get("phase", "finalizing"), "interrupted",
+                                   old.get("done", 0), old.get("total", 0),
+                                   old.get("unit", "items")))
             telemetry.record(db, run.id, "run", telemetry.ERROR, "RUN_INTERRUPTED",
                              INTERRUPTED_ERROR)
         if stuck:

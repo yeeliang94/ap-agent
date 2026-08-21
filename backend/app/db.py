@@ -59,3 +59,7 @@ def init_db() -> None:
         if "snapshot" not in cols:
             conn.exec_driver_sql("ALTER TABLE runs ADD COLUMN snapshot JSON DEFAULT '{}'")
             conn.commit()
+        document_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(documents)")]
+        if "page_count" not in document_cols:
+            conn.exec_driver_sql("ALTER TABLE documents ADD COLUMN page_count INTEGER")
+            conn.commit()

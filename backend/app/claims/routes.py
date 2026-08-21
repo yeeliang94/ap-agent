@@ -21,6 +21,7 @@ from sqlalchemy import func
 from .. import settings_store, switches, telemetry
 from ..db import SessionLocal
 from ..models import AuditEvent, RunEvent
+from ..progress import progress as build_progress
 from .. import config
 from . import cases as cases_mod
 from . import profile as profile_mod
@@ -400,7 +401,12 @@ def cancel_claims_run(run_id: str, body: S.RevisionBody | None = None) -> dict:
             raise HTTPException(400, f"Only a run that is still working can be cancelled (this one is {run.status}).")
         _revision_check(db, run, body or {}, required=False)
         cancelled_tools = agentic.cancel_run(run_id)
+        old_progress = run.progress or {}
         run.status, run.error = "failed", "cancelled by the reviewer"
+        run.progress = build_progress(
+            old_progress.get("phase", "finalizing"), "cancelled",
+            old_progress.get("done", 0), old_progress.get("total", 0),
+            old_progress.get("unit", "items"))
         _bump_revision(run)
         db.add(AuditEvent(run_id=run_id, actor="reviewer", action="run_cancelled",
                           detail="cancelled while " + (run.progress or {}).get("what", "working")))
@@ -1158,7 +1164,8 @@ def _employee_dict(e: ClaimEmployee) -> dict:
     return {"id": e.id, "folder": e.folder, "name": e.name, "er_code": e.er_code,
             "roles": e.roles, "status": e.status, "error": e.error,
             "report_total": e.report_total, "category": e.category, "gl": e.gl,
-            "category_basis": e.category_basis, "summary": e.summary}
+            "category_basis": e.category_basis, "summary": e.summary,
+            "progress": e.progress or {}}
 
 
 def _row_dict(r: ClaimRow) -> dict:

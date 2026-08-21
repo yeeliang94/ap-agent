@@ -123,6 +123,10 @@ def _v1_case_model(engine) -> None:
     with engine.begin() as conn:
         _add_column(conn, "claims_runs", "manifest", "JSON DEFAULT '[]'")
         _add_column(conn, "claims_runs", "revision", "INTEGER DEFAULT 0")
+        # The current ORM shape must be queryable while v1 backfills. v2
+        # records ownership of this additive field for databases that had
+        # already completed v1 before live worker progress existed.
+        _add_column(conn, "claim_employees", "progress", "JSON DEFAULT '{}'")
         for table in ("claim_rows", "claim_evidence", "claim_flags"):
             _add_column(conn, table, "case_id", "VARCHAR DEFAULT ''")
         _add_column(conn, "claim_flags", "artifact_id", "VARCHAR DEFAULT ''")
@@ -150,3 +154,9 @@ def _v1_case_model(engine) -> None:
         s.commit()
     finally:
         s.close()
+
+
+@migration(2, "live progress for concurrent claim workers")
+def _v2_worker_progress(engine) -> None:
+    with engine.begin() as conn:
+        _add_column(conn, "claim_employees", "progress", "JSON DEFAULT '{}'")

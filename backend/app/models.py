@@ -73,6 +73,9 @@ class Document(Base):
     # pending / sorted / extracted / checked / error
     status: Mapped[str] = mapped_column(String, default="pending")
     error: Mapped[str] = mapped_column(Text, default="")
+    # Number of previewable pages discovered during processing. NULL means
+    # an older run whose page count was never recorded.
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
 
     run: Mapped["Run"] = relationship(back_populates="documents")
 

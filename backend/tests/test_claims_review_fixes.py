@@ -78,6 +78,33 @@ def _run_with_case(s, *, claimant="A", reported_total="", status="verified", lis
     return run, e, case
 
 
+def test_worker_progress_is_isolated_and_does_not_publish_staged_rows(Session):
+    seed = Session()
+    run = ClaimsRun(client="c", status="verifying")
+    seed.add(run)
+    seed.commit()
+    first = ClaimEmployee(run_id=run.id, folder="A", status="verifying")
+    second = ClaimEmployee(run_id=run.id, folder="B", status="verifying")
+    seed.add_all([first, second])
+    seed.commit()
+    first_id, second_id, run_id = first.id, second.id, run.id
+    seed.close()
+
+    business = Session()
+    business.add(ClaimRow(run_id=run_id, employee_id=first_id, kind="expense",
+                          values={"amount": "10.00"}))  # intentionally uncommitted
+    worker._worker_progress(run_id, first_id, "reading_evidence")
+    worker._worker_progress(run_id, second_id, "checking_mileage")
+
+    observer = Session()
+    assert observer.query(ClaimRow).count() == 0
+    assert observer.get(ClaimEmployee, first_id).progress["step"] == "reading_evidence"
+    assert observer.get(ClaimEmployee, second_id).progress["step"] == "checking_mileage"
+    observer.close()
+    business.rollback()
+    business.close()
+
+
 # ---- 1. a receipt claimed by rows is never also "unclaimed" -------------------------
 
 def test_duplicate_receipt_is_not_also_unclaimed():

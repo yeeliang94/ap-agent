@@ -157,10 +157,21 @@ app.include_router(claims_settings_router, prefix="/api")
 
 # On Windows the frontend is built once (start.bat) and served from here,
 # so one process serves the whole app. /api routes above take precedence.
+from fastapi.responses import FileResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from . import config  # noqa: E402
 
 _dist = config.REPO_ROOT / "frontend" / "dist"
 if _dist.is_dir():
-    app.mount("/", StaticFiles(directory=_dist, html=True), name="frontend")
+    _assets = _dist / "assets"
+    if _assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=_assets), name="frontend-assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str):
+        """Serve the React shell for direct links and browser refreshes."""
+        candidate = (_dist / full_path).resolve()
+        if full_path and candidate.is_relative_to(_dist.resolve()) and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(_dist / "index.html")

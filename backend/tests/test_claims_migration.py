@@ -85,9 +85,9 @@ def _shape(engine) -> dict:
 def test_pre_migration_database_migrates_once_and_reopens_unchanged(tmp_path):
     engine = _old_database(tmp_path / "old.sqlite3")
     assert migrations.current_version(engine) == 0
-    assert migrations.run_migrations(engine) == [1]
+    assert migrations.run_migrations(engine) == [1, 2]
     first = _shape(engine)
-    assert first["versions"] == [1]
+    assert first["versions"] == [1, 2]
     # One case per employee, tied to it, mirroring its worker fields.
     assert len(first["cases"]) == 1
     cid, emp_id, label, status, reported, lines = first["cases"][0]
@@ -101,7 +101,7 @@ def test_pre_migration_database_migrates_once_and_reopens_unchanged(tmp_path):
     # Again: nothing to do, nothing changed.
     assert migrations.run_migrations(engine) == []
     assert _shape(engine) == first
-    assert migrations.current_version(engine) == 1
+    assert migrations.current_version(engine) == 2
     # A second engine on the same file (a restart) sees the same.
     engine2 = create_engine(f"sqlite:///{tmp_path / 'old.sqlite3'}", connect_args={"check_same_thread": False})
     assert migrations.run_migrations(engine2) == [] and _shape(engine2) == first
@@ -109,10 +109,12 @@ def test_pre_migration_database_migrates_once_and_reopens_unchanged(tmp_path):
 
 def test_fresh_database_gets_the_shape_and_the_version(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'new.sqlite3'}", connect_args={"check_same_thread": False})
-    assert migrations.run_migrations(engine) == [1]
+    assert migrations.run_migrations(engine) == [1, 2]
     with engine.connect() as conn:
         cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(claim_rows)")]
         assert "case_id" in cols
+        worker_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(claim_employees)")]
+        assert "progress" in worker_cols
         tables = {r[0] for r in conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"claim_cases", "claim_source_artifacts", "claim_evidence_assignments", "claim_investigations",
             "claim_tool_executions", "claims_schema"} <= tables

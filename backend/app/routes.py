@@ -6,7 +6,7 @@ import os
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import func
 
@@ -216,7 +216,7 @@ def get_run(run_id: str) -> dict:
                 {"id": d.id, "filename": d.filename, "kind": d.kind,
                  "fields": d.fields, "confidence": d.confidence,
                  "corrections": d.corrections,
-                 "status": d.status, "error": d.error}
+                 "status": d.status, "error": d.error, "page_count": d.page_count}
                 for d in docs
             ],
             "flags": [
@@ -362,11 +362,11 @@ def get_listing_draft(run_id: str):
 
 
 @router.get("/runs/{run_id}/documents/{doc_id}/preview")
-def get_document_preview(run_id: str, doc_id: str):
-    """First page as a PNG — browsers render images reliably, PDF plugins not."""
+def get_document_preview(run_id: str, doc_id: str, page: int = Query(1, ge=1)):
+    """One page as PNG. Page numbers are one-based and bounds checked."""
     from fastapi.responses import Response
 
-    from .pipeline.images import document_to_pngs
+    from .pipeline.images import document_page_count, document_page_png
 
     db = SessionLocal()
     try:
@@ -376,7 +376,21 @@ def get_document_preview(run_id: str, doc_id: str):
         path = config.RUNS_DIR / run_id / doc.filename
         if not path.exists():
             raise HTTPException(404, "File missing from workspace.")
-        return Response(content=document_to_pngs(path)[0], media_type="image/png")
+        count = doc.page_count
+        if count is None:
+            try:
+                count = document_page_count(path)
+            except ValueError as exc:
+                raise HTTPException(415, str(exc)) from exc
+        if page > count:
+            raise HTTPException(400, f"Page {page} is outside this document (1–{count}).")
+        try:
+            rendered = document_page_png(path, page)
+        except IndexError as exc:
+            raise HTTPException(400, f"Page {page} is outside this document (1–{count}).") from exc
+        except ValueError as exc:
+            raise HTTPException(415, str(exc)) from exc
+        return Response(content=rendered, media_type="image/png")
     finally:
         db.close()
 

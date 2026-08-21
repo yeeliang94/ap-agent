@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import pytest
+import pymupdf
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -107,6 +108,30 @@ def test_reason_must_be_a_real_string(db):
     assert r.status_code == 400
     r = _correct("docA", {"vendor": "X"}, reason="   ")
     assert r.status_code == 400
+
+
+def test_invoice_preview_is_page_aware_and_bounds_checked(db):
+    workspace = config.RUNS_DIR / "r1"
+    workspace.mkdir(parents=True, exist_ok=True)
+    path = workspace / "invoice_A-1.pdf"
+    pdf = pymupdf.open()
+    pdf.new_page().insert_text((72, 72), "page one")
+    pdf.new_page().insert_text((72, 72), "page two")
+    pdf.save(path)
+    pdf.close()
+    session = db()
+    session.get(Document, "docA").page_count = 2
+    session.commit()
+    session.close()
+
+    assert client.get("/api/runs/r1/documents/docA/preview?page=2").status_code == 200
+    invalid = client.get("/api/runs/r1/documents/docA/preview?page=3")
+    assert invalid.status_code == 400
+    assert "outside this document" in invalid.json()["detail"]
+    assert client.get("/api/runs/r1/documents/docA/preview?page=0").status_code == 422
+    detail = client.get("/api/runs/r1").json()
+    assert next(d for d in detail["documents"] if d["id"] == "docA")["page_count"] == 2
+    assert next(d for d in detail["documents"] if d["id"] == "docB")["page_count"] is None
 
 
 def test_all_fields_validated_before_any_applied(db):

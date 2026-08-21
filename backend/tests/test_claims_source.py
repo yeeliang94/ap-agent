@@ -162,7 +162,12 @@ def test_fetch_batch_scopes_the_session_and_records_a_recovered_retry(
     assert files[0]["path"] == "Alice/claim.pdf"
     assert (source.entered, source.exited, source.downloads) == (1, 1, 2)
     # The last update has no file in hand, so it names none.
-    assert run.progress == {"done": 1, "total": 1, "what": "downloading"}
+    assert {k: run.progress[k] for k in ("done", "total", "what")} == {
+        "done": 1, "total": 1, "what": "downloading"}
+    assert run.progress["phase"] == "preparing"
+    assert run.progress["step"] == "preparing_files"
+    assert run.progress["unit"] == "files"
+    assert run.progress["updated_at"]
     assert any(code == "SOURCE_RETRY"
                and "downloading Alice/claim.pdf" in message
                and "rate-limiting" in detail

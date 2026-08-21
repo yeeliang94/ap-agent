@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..progress import progress as build_progress
 from .investigator import contracts as C
 from .investigator.contracts import assignment_id_for, case_id_for
 from . import profile as profile_mod
@@ -523,7 +524,7 @@ def confirm_grouping(s, run: ClaimsRun, actor: str = "reviewer") -> tuple[int, d
         inv.status = "confirmed"
     grouping.refresh(s, run)  # CLAIMANT_UNKNOWN for cases still without a claimant; conflicts none
     run.status = "verifying"
-    run.progress = {"done": 0, "total": 0}
+    run.progress = build_progress("checking", "reading_claim_summary", 0, n, "claims")
     bump_revision(run)
     s.flush()
     return n, g
