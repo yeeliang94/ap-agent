@@ -124,6 +124,17 @@ def is_service_failure(reason: str) -> bool:
     return reason.strip().rstrip(".") in {r.rstrip(".") for r in SERVICE_REASONS}
 
 
+def is_transient(exc: BaseException) -> bool:
+    """Is this worth simply trying again?
+
+    True only for a connection that broke part-way through. A refusal, a
+    dead name, or a rejected certificate will fail identically on the
+    next attempt, and retrying those just makes a person wait longer for
+    the same answer.
+    """
+    return describe_failure(exc) == _STREAM_CUT
+
+
 def _status_of(exc: Exception) -> int | None:
     """The HTTP status behind an exception, however the library exposes it."""
     for attribute in ("status_code", "code"):

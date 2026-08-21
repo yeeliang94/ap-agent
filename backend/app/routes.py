@@ -271,8 +271,15 @@ async def sharepoint_connect() -> dict:
         from .telemetry import describe_failure
 
         log.warning("SharePoint sign-in failed: %s", exc, exc_info=True)
-        raise HTTPException(
-            502, f"Could not connect to SharePoint: {describe_failure(exc)}") from exc
+        # Which half broke is the difference between "the gateway is
+        # flaky" and "the sign-in never landed", and a reviewer reading
+        # only "could not connect" cannot tell those apart — nor could
+        # anyone reading the log afterwards.
+        phase = getattr(exc, "ap_phase", "")
+        detail = f"Could not connect to SharePoint: {describe_failure(exc)}"
+        if phase:
+            detail += f" This happened while {phase}."
+        raise HTTPException(502, detail) from exc
     return {"connected": True, "signed_in_as": who}
 
 

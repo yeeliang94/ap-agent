@@ -275,3 +275,94 @@ def test_connecting_without_a_configured_gateway_says_so(monkeypatch):
     r = client.post("/api/sharepoint/connect")
     assert r.status_code == 400
     assert "MCP_URL" in r.json()["detail"]
+
+
+# --- a hiccup on the gateway must not cost the reviewer a second click ------
+#
+# This gateway drops streams intermittently; docsource retries every tool
+# call for that reason. Connect retried nothing, so one hiccup killed the
+# whole click. Retrying it is right — but a retry that reopened the
+# browser would leave a person facing two sign-in windows, which is worse
+# than the failure. These tests hold both halves at once.
+
+class _Stub:
+    """Stands in for the OAuth provider; connect() only passes it along."""
+
+
+@pytest.fixture()
+def signed_in(monkeypatch):
+    """A saved sign-in, as there would be after the browser half worked."""
+    monkeypatch.setattr(sharepoint_auth, "storage",
+                        lambda: type("S", (), {"is_signed_in": lambda self: True})())
+
+
+def _record_attempts(monkeypatch, outcomes):
+    """Drive connect() through `outcomes`, noting how each was asked for."""
+    asked = []
+    monkeypatch.setattr(sharepoint_auth, "build_provider",
+                        lambda url, *, interactive: asked.append(interactive) or _Stub())
+
+    async def handshake(url, headers, provider):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(sharepoint_auth, "_handshake", handshake)
+    return asked
+
+
+@pytest.mark.anyio
+async def test_a_dropped_connection_is_retried_without_asking_again(
+        monkeypatch, signed_in, no_browser):
+    """The failure this was written for: the stream breaks once, and the
+    reviewer should simply see it connect."""
+    import httpx
+
+    asked = _record_attempts(monkeypatch, [httpx.ReadError(""), "Ada Lovelace"])
+    assert await sharepoint_auth.connect("https://gw.example.com/mcp", {}) == "Ada Lovelace"
+    # The whole guarantee, in one line: asked once, retried without asking.
+    assert asked == [True, False]
+
+
+@pytest.mark.anyio
+async def test_a_refusal_is_not_retried(monkeypatch, signed_in, no_browser):
+    """A refused connection fails identically next time. Retrying it only
+    makes the reviewer wait longer for the same answer."""
+    import httpx
+
+    asked = _record_attempts(
+        monkeypatch, [httpx.ConnectError("[Errno 61] Connection refused")])
+    with pytest.raises(httpx.ConnectError):
+        await sharepoint_auth.connect("https://gw.example.com/mcp", {})
+    assert asked == [True]
+
+
+@pytest.mark.anyio
+async def test_a_hiccup_before_any_sign_in_is_never_retried(monkeypatch, no_browser):
+    """No token was saved, so a retry would have to open the browser
+    again. It must not: one attempt, and the transport failure is
+    reported as what it was."""
+    import httpx
+
+    monkeypatch.setattr(sharepoint_auth, "storage",
+                        lambda: type("S", (), {"is_signed_in": lambda self: False})())
+    asked = _record_attempts(monkeypatch, [httpx.ReadError("")])
+    with pytest.raises(httpx.ReadError):
+        await sharepoint_auth.connect("https://gw.example.com/mcp", {})
+    assert asked == [True]
+
+
+@pytest.mark.anyio
+async def test_the_failure_says_which_half_of_connect_broke(monkeypatch, no_browser):
+    """Every previous report of this failure had to guess whether the
+    sign-in or the handshake after it broke. A saved token settles it, so
+    the answer is attached where both the log and the screen can say it."""
+    import httpx
+
+    monkeypatch.setattr(sharepoint_auth, "storage",
+                        lambda: type("S", (), {"is_signed_in": lambda self: False})())
+    _record_attempts(monkeypatch, [httpx.ReadError("")])
+    with pytest.raises(httpx.ReadError) as exc:
+        await sharepoint_auth.connect("https://gw.example.com/mcp", {})
+    assert exc.value.ap_phase == "signing in to the gateway"

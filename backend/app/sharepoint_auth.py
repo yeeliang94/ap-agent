@@ -43,6 +43,13 @@ CALLBACK_URL = f"http://127.0.0.1:{CALLBACK_PORT}/callback"
 # How long to wait for a person to finish signing in before giving up.
 SIGN_IN_TIMEOUT_SECONDS = 300.0
 
+# How many times the Connect handshake may be attempted. The gateway
+# drops streams intermittently — docsource retries every tool call for
+# exactly that reason — but Connect, the one operation a person sits and
+# watches, retried nothing at all, so a single hiccup killed the click.
+# Only the first attempt may sign in; see connect().
+CONNECT_ATTEMPTS = 3
+
 
 class SignInRequired(Exception):
     """SharePoint needs a sign-in that only the reviewer can give.
@@ -346,19 +353,14 @@ def build_provider(server_url: str, *, interactive: bool):
     return provider
 
 
-async def connect(server_url: str, headers: dict) -> str:
-    """Sign in now, at the reviewer's request. Returns who they signed in as.
+async def _handshake(server_url: str, headers: dict, provider) -> str:
+    """One real handshake against the gateway. Returns who we signed in as.
 
     Performs a real handshake, because a sign-in that is never used
     against the gateway has proved nothing.
     """
     from .mcp_client import McpSession
 
-    provider = build_provider(server_url, interactive=True)
-    if provider is None:
-        raise SignInRequired(
-            "Delegated SharePoint sign-in is switched off. Set MCP_OAUTH=true "
-            "in .env if this gateway needs it.")
     async with McpSession(server_url, headers, auth=provider) as session:
         for words in (("whoami",), ("who", "am", "i"), ("current", "user")):
             try:
@@ -373,3 +375,65 @@ async def connect(server_url: str, headers: dict) -> str:
                         return str(answer[key])
             return "signed in"
         return "signed in"
+
+
+def _phase_of_failure() -> str:
+    """Which half of Connect was in progress when it broke.
+
+    A saved sign-in is the dividing line, and it is the one fact that
+    every previous report of this failure had to guess at: with a token
+    in hand the browser half plainly worked and the gateway cut the
+    handshake that followed; without one the failure came first.
+    """
+    return ("the gateway handshake, after signing in"
+            if storage().is_signed_in() else "signing in to the gateway")
+
+
+async def connect(server_url: str, headers: dict) -> str:
+    """Sign in now, at the reviewer's request. Returns who they signed in as.
+
+    Retries a broken connection, because this gateway breaks connections
+    and a reviewer should not have to click twice for that. What it must
+    never do is ask a second time: a retry that reopened the browser
+    would leave a person staring at two sign-in windows, which is worse
+    than the failure it was trying to paper over. So only the FIRST
+    attempt is interactive. A retry is built non-interactively and
+    therefore either reuses the token the first attempt already saved or
+    does not happen at all.
+    """
+    import asyncio
+    import time
+
+    from .telemetry import describe_failure, is_transient
+
+    last: Exception | None = None
+    for attempt in range(1, CONNECT_ATTEMPTS + 1):
+        if attempt > 1 and not storage().is_signed_in():
+            # Nothing was saved, so a retry would have to ask again.
+            # Report the transport failure instead: it is the truth, and
+            # "sign in again" would be a lie about what went wrong.
+            break
+        provider = build_provider(server_url, interactive=(attempt == 1))
+        if provider is None:
+            raise SignInRequired(
+                "Delegated SharePoint sign-in is switched off. Set MCP_OAUTH=true "
+                "in .env if this gateway needs it.")
+        started = time.monotonic()
+        try:
+            return await _handshake(server_url, headers, provider)
+        except SignInRequired:
+            raise                      # the reviewer must act; retrying cannot help
+        except Exception as exc:
+            phase = _phase_of_failure()
+            exc.ap_phase = phase       # read by the route, so the screen says it too
+            last = exc
+            log.warning(
+                "Connect attempt %d of %d failed after %.1fs during %s: %s",
+                attempt, CONNECT_ATTEMPTS, time.monotonic() - started, phase,
+                describe_failure(exc), exc_info=True)
+            if attempt == CONNECT_ATTEMPTS or not is_transient(exc):
+                break
+            await asyncio.sleep(0.5 * attempt)
+    raise last if last is not None else SignInRequired(
+        "The SharePoint sign-in did not complete. Click Connect SharePoint "
+        "and try again.")
