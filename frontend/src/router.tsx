@@ -24,11 +24,8 @@ export function BrowserRouter({ children }: { children: ReactNode }) {
 
 export function useRouter() {
   const value = useContext(RouterContext);
-  if (value) return value;
-  return { location: readLocation(), navigate: (to: string, replace = false) => {
-    window.history[replace ? "replaceState" : "pushState"]({}, "", to);
-    window.dispatchEvent(new PopStateEvent("popstate"));
-  } };
+  if (!value) throw new Error("useRouter must be used inside BrowserRouter");
+  return value;
 }
 
 export function Link({ to, children, className, ariaCurrent, onClick }: {

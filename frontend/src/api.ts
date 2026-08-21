@@ -17,7 +17,7 @@ export interface RunProgress {
 export interface ItemProgress { id: string; name: string; status: string; progress?: RunProgress; error?: string; }
 export interface ReviewGroup { id: string; name: string; unresolved: number; amountAtRisk?: string; complete: boolean; sourceOrder: number; }
 export interface PreviewSource { file?: string; documentId?: string; page?: number; position?: string; sheet?: string; row?: number; summary?: string; }
-export interface ReviewFinding { id: string; groupId: string; title: string; reason: string; basis?: string; status: string; blocking: boolean; amountAtRisk?: string; source?: PreviewSource; }
+export interface ReviewFinding { id: string; groupId: string; title: string; reason: string; basis?: string; status: string; blocking: boolean; amountAtRisk?: string; source?: PreviewSource; sourceOrder?: number; }
 
 export interface RunSummary {
   id: string;

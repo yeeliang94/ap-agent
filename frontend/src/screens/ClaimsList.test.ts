@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { makeRunSummary } from "../test/fixtures";
-import { claimsStatusLabel, looksLikeLocalPath, mergePicked, Picked } from "./ClaimsList";
+import { claimsStatusLabel, runDestination } from "../runPresentation";
+import { looksLikeLocalPath, mergePicked, Picked } from "./ClaimsList";
 
 function picked(path: string, opts: { size?: number; mtime?: number; name?: string } = {}): Picked {
   const name = opts.name ?? path.split("/").pop()!;
@@ -60,7 +61,7 @@ describe("claimsStatusLabel", () => {
     });
 
     expect(claimsStatusLabel(run)).toBe(
-      "Copying files 7/311 · receipt-08.pdf",
+      "Preparing files 7/311 · receipt-08.pdf",
     );
   });
 
@@ -70,7 +71,16 @@ describe("claimsStatusLabel", () => {
       progress: { done: 311, total: 311 },
     });
 
-    expect(claimsStatusLabel(run)).toBe("Copying files 311/311");
+    expect(claimsStatusLabel(run)).toBe("Preparing files 311/311");
+  });
+});
+
+describe("runDestination", () => {
+  it("keeps all run-list and global-indicator destinations consistent", () => {
+    expect(runDestination("claim", { id: "r", status: "map_ready" })).toBe("/claims/r/organize");
+    expect(runDestination("claim", { id: "r", status: "ready", open_flags: 0 }, true)).toBe("/claims/r/export");
+    expect(runDestination("invoice", { id: "r", status: "ready", open_flags: 2 }, true)).toBe("/invoices/r/review");
+    expect(runDestination("invoice", { id: "r", status: "checking" })).toBe("/invoices/r/progress");
   });
 });
 

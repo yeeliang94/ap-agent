@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api";
 import { ClaimsSettings, SwitchBoard } from "../api";
 import SettingsScreen from "./SettingsScreen";
+import { BrowserRouter } from "../router";
 
 // The Settings screen: every switch is on screen, a flip is one audited
 // PUT, and the row says whether the reviewer or the .env default answers.
@@ -23,6 +24,7 @@ vi.mock("../api", async (importOriginal) => {
 
 const getSwitches = vi.mocked(api.getSwitches);
 const saveSwitches = vi.mocked(api.saveSwitches);
+const renderSettings = () => render(<BrowserRouter><SettingsScreen /></BrowserRouter>);
 
 const CLAIMS_SETTINGS: ClaimsSettings = {
   client: "Client ABC",
@@ -78,7 +80,7 @@ beforeEach(() => {
 describe("SettingsScreen — the switchboard", () => {
   it("shows each switch with its provenance, and a flip is one PUT", async () => {
     saveSwitches.mockResolvedValue(board(false, true));
-    render(<SettingsScreen />);
+    renderSettings();
 
     await waitFor(() => expect(screen.getByRole("switch", { name: "Case model" })).toBeTruthy());
     // Nobody saved a choice yet: the .env default answers, and says so.
@@ -92,7 +94,7 @@ describe("SettingsScreen — the switchboard", () => {
   });
 
   it("shows the read-only deployment facts without values of secrets", async () => {
-    render(<SettingsScreen />);
+    renderSettings();
     await waitFor(() => expect(screen.getByText("AI key")).toBeTruthy());
     expect(screen.getByText("set")).toBeTruthy();
   });

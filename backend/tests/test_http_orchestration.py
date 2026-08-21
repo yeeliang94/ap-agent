@@ -82,6 +82,13 @@ def quiet_startup(monkeypatch):
 
 # ---- #13 the dispatch itself ------------------------------------------------
 
+
+def test_unknown_api_get_is_a_json_404_not_the_spa():
+    response = client.get("/api/this-route-does-not-exist")
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"detail": "API route not found."}
+
 @needs_sample
 @pytest.mark.asyncio
 async def test_a_sync_route_really_dispatches_its_background_stage(db, monkeypatch, quiet_startup):

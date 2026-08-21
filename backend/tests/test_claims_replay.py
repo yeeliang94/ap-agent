@@ -99,7 +99,8 @@ async def test_bundle_reproduces_and_tampering_is_caught(db, monkeypatch):
 @pytest.mark.asyncio
 async def test_cancel_stops_tools_fails_the_run_and_nothing_becomes_ready(db, monkeypatch):
     s = db()
-    run = ClaimsRun(id="rc", client="c", status="verifying", snapshot={}, listing_headers={"state": "ok"}, progress={"what": "verifying"})
+    run = ClaimsRun(id="rc", client="c", status="verifying", snapshot={}, listing_headers={"state": "ok"},
+                    progress={"phase": "checking", "step": "matching_evidence", "done": 2, "total": 4, "unit": "claims"})
     emp = ClaimEmployee(run_id="rc", folder="X_1", name="X", roles={"no_report": True, "receipt_files": []}, status="pending")
     s.add_all([run, emp])
     s.commit()
@@ -125,7 +126,9 @@ async def test_cancel_stops_tools_fails_the_run_and_nothing_becomes_ready(db, mo
     s.add(ClaimsRun(id="rr", client="c", status="ready"))
     s.commit()
     assert client.post("/api/claims-runs/rr/cancel", json={}).status_code == 400
-    assert any(a["action"] == "run_cancelled" for a in client.get("/api/claims-runs/rc/audit").json())
+    cancellation = next(a for a in client.get("/api/claims-runs/rc/audit").json()
+                        if a["action"] == "run_cancelled")
+    assert cancellation["detail"] == "cancelled while matching evidence"
 
 
 def test_retention_prunes_scratch_and_keeps_the_snapshot(tmp_path, monkeypatch):

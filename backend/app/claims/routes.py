@@ -21,7 +21,7 @@ from sqlalchemy import func
 from .. import settings_store, switches, telemetry
 from ..db import SessionLocal
 from ..models import AuditEvent, RunEvent
-from ..progress import progress as build_progress
+from ..progress import terminal_progress
 from .. import config
 from . import cases as cases_mod
 from . import profile as profile_mod
@@ -402,14 +402,17 @@ def cancel_claims_run(run_id: str, body: S.RevisionBody | None = None) -> dict:
         _revision_check(db, run, body or {}, required=False)
         cancelled_tools = agentic.cancel_run(run_id)
         old_progress = run.progress or {}
+        cancelled_during = (
+            old_progress.get("what")
+            or old_progress.get("step")
+            or old_progress.get("phase")
+            or "working"
+        ).replace("_", " ")
         run.status, run.error = "failed", "cancelled by the reviewer"
-        run.progress = build_progress(
-            old_progress.get("phase", "finalizing"), "cancelled",
-            old_progress.get("done", 0), old_progress.get("total", 0),
-            old_progress.get("unit", "items"))
+        run.progress = terminal_progress(old_progress, "cancelled")
         _bump_revision(run)
         db.add(AuditEvent(run_id=run_id, actor="reviewer", action="run_cancelled",
-                          detail="cancelled while " + (run.progress or {}).get("what", "working")))
+                          detail="cancelled while " + cancelled_during))
         db.commit()
         telemetry.record(db, run_id, "run", telemetry.WARNING, "RUN_CANCELLED",
                          "Run cancelled by the reviewer" + ("; outstanding tool calls stopped." if cancelled_tools else "."))

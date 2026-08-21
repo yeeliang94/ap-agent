@@ -6,7 +6,7 @@ Run with:  uvicorn app.main:app --reload --port 8002
 import logging
 import sys
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from .db import init_db
@@ -154,6 +154,12 @@ from .claims.routes import settings_router as claims_settings_router  # noqa: E4
 
 app.include_router(claims_router, prefix="/api")
 app.include_router(claims_settings_router, prefix="/api")
+
+
+@app.get("/api/{full_path:path}", include_in_schema=False)
+def unknown_api_route(full_path: str):
+    """Keep unknown API GETs as JSON 404s before the SPA catch-all."""
+    raise HTTPException(status_code=404, detail="API route not found.")
 
 # On Windows the frontend is built once (start.bat) and served from here,
 # so one process serves the whole app. /api routes above take precedence.

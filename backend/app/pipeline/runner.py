@@ -22,7 +22,7 @@ from pathlib import Path
 from .. import telemetry
 from ..db import SessionLocal
 from ..models import Document, Flag, Run
-from ..progress import progress
+from ..progress import progress, terminal_progress
 from . import output, reference
 from .checks import run_checks
 from .extract import extract_all
@@ -207,10 +207,8 @@ async def process_run(run_id: str, workspace: Path) -> None:
 def _fail(db, run_id: str, error: str, code: str) -> None:
     run = db.get(Run, run_id)
     if run:
-        old = run.progress or {}
-        _set(db, run, status="failed", error=error, progress=progress(
-            old.get("phase", "finalizing"), "failed", old.get("done", 0),
-            old.get("total", 0), old.get("unit", "items")))
+        _set(db, run, status="failed", error=error,
+             progress=terminal_progress(run.progress, "failed"))
         telemetry.record(db, run_id, "run", telemetry.ERROR, code,
                          f"Run stopped: {error}")
 
@@ -339,11 +337,8 @@ def fail_interrupted_runs() -> int:
     try:
         stuck = db.query(Run).filter(Run.status.in_(IN_PROGRESS_STATUSES)).all()
         for run in stuck:
-            old = run.progress or {}
             _set(db, run, status="failed", error=INTERRUPTED_ERROR,
-                 progress=progress(old.get("phase", "finalizing"), "interrupted",
-                                   old.get("done", 0), old.get("total", 0),
-                                   old.get("unit", "items")))
+                 progress=terminal_progress(run.progress, "interrupted"))
             telemetry.record(db, run.id, "run", telemetry.ERROR, "RUN_INTERRUPTED",
                              INTERRUPTED_ERROR)
         if stuck:

@@ -2,14 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { getSettings, getSharePointStatus, uploadBatch } from "../api";
 import { useRunActivity } from "../activity";
 import { Link, useRouter } from "../router";
-import { claimsStatusLabel, NewClaimsRunCard } from "./ClaimsList";
-
-function outcome(status: string, open: number, kind: "invoice" | "claim") {
-  if (status === "failed") return "See what failed";
-  if (kind === "claim" && status === "map_ready") return "Organize claims";
-  if (status === "ready") return open ? "Continue review" : "Open export";
-  return "View progress";
-}
+import { claimsStatusLabel, runDestination, runOutcome } from "../runPresentation";
+import { NewClaimsRunCard } from "./ClaimsList";
 
 export function RunListPage({ kind }: { kind: "invoice" | "claim" }) {
   const { invoices, claims, failures } = useRunActivity();
@@ -26,15 +20,13 @@ export function RunListPage({ kind }: { kind: "invoice" | "claim" }) {
         const isClaim = "employee_count" in run;
         const source = isClaim ? run.folder : "Uploaded zip";
         const count = isClaim ? `${run.employees_done} of ${run.employee_count || "—"} claims` : `${run.documents_total} documents`;
-        const destination = isClaim
-          ? `/claims/${run.id}/${run.status === "map_ready" ? "organize" : run.status === "ready" ? (run.open_flags ? "review" : "export") : "progress"}`
-          : `/invoices/${run.id}/${run.status === "ready" ? (run.open_flags ? "review" : "export") : "progress"}`;
+        const destination = runDestination(kind, run, true);
         return <article className="run-row" role="listitem" key={run.id}>
           <div className="run-main"><strong>{run.client}</strong><span>{new Date(run.created_at).toLocaleString()}</span></div>
           <div className="run-source"><span className="meta-label">Source</span><span title={source}>{source}</span></div>
           <div className="run-count"><span className="meta-label">Progress</span><span>{count}{run.open_flags ? ` · ${run.open_flags} unresolved` : ""}</span></div>
           <div className="run-outcome"><span className={`status ${run.status === "failed" ? "failed" : run.status === "ready" ? "ready" : "working"}`}>{isClaim ? claimsStatusLabel(run) : run.status.replaceAll("_", " ")}</span></div>
-          <Link className="btn" to={destination}>{outcome(run.status, run.open_flags, kind)}</Link>
+          <Link className="btn" to={destination}>{runOutcome(run.status, run.open_flags, kind)}</Link>
           {run.status === "failed" && run.error ? <p className="run-error">{run.error}</p> : null}
         </article>;
       })}

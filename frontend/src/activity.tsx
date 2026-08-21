@@ -1,5 +1,6 @@
 import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { ClaimsRunSummary, RunSummary, claimsRunWorking, listClaimsRuns, listRuns } from "./api";
+import { runDestination } from "./runPresentation";
 
 type RunKind = "invoice" | "claim";
 export type TrackedRun = { kind: RunKind; id: string; client: string; status: string; progress: RunSummary["progress"]; ready: boolean; href: string };
@@ -44,8 +45,8 @@ export function RunActivityProvider({ children }: { children: ReactNode }) {
   }, [anyWorking, refresh]);
 
   const value = useMemo<ActivityValue>(() => {
-    const invoiceRuns = invoices.map<TrackedRun>((r) => ({ kind: "invoice", id: r.id, client: r.client, status: r.status, progress: r.progress, ready: r.status === "ready", href: `/invoices/${r.id}/${r.status === "ready" ? "review" : "progress"}` }));
-    const claimRuns = claims.map<TrackedRun>((r) => ({ kind: "claim", id: r.id, client: r.client, status: r.status, progress: r.progress, ready: r.status === "map_ready" || r.status === "ready", href: `/claims/${r.id}/${r.status === "map_ready" ? "organize" : r.status === "ready" ? "review" : "progress"}` }));
+    const invoiceRuns = invoices.map<TrackedRun>((r) => ({ kind: "invoice", id: r.id, client: r.client, status: r.status, progress: r.progress, ready: r.status === "ready", href: runDestination("invoice", r) }));
+    const claimRuns = claims.map<TrackedRun>((r) => ({ kind: "claim", id: r.id, client: r.client, status: r.status, progress: r.progress, ready: r.status === "map_ready" || r.status === "ready", href: runDestination("claim", r) }));
     return { invoices, claims, active: [...invoiceRuns.filter((r) => INVOICE_WORKING.has(r.status)), ...claimRuns.filter((r) => claimsRunWorking(r))], ready: [...invoiceRuns, ...claimRuns].filter((r) => r.ready && readyKeys.has(`${r.kind}:${r.id}`)), refresh, failures };
   }, [invoices, claims, failures, refresh, readyKeys]);
   return <ActivityContext.Provider value={value}>{children}</ActivityContext.Provider>;
