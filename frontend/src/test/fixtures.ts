@@ -161,11 +161,20 @@ export const CATALOGUE: FlagCatalogue = {
     what_to_do: "Find it or leave the line out.",
     kind: "evidence", blocks: "open", toggle: true,
   },
+  // The catalogue's default class is "info"; the checks escalate a flag of this
+  // code to status "open" when the receipt is at or above the client's threshold.
   UNCLAIMED_RECEIPT: {
     code: "UNCLAIMED_RECEIPT",
     title: "Receipt supports no row",
     meaning: "",
     what_to_do: "",
-    kind: "note", blocks: "open", toggle: true,
+    kind: "note", blocks: "info", toggle: true,
+  },
+  PURPOSE_UNKNOWN: {
+    code: "PURPOSE_UNKNOWN",
+    title: "No stated purpose",
+    meaning: "",
+    what_to_do: "",
+    kind: "note", blocks: "info", toggle: true,
   },
 };

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { getSettings, getSharePointStatus, uploadBatch } from "../api";
 import { useRunActivity } from "../activity";
 import { Link, useRouter } from "../router";
-import { claimsStatusLabel, runDestination, runOutcome } from "../runPresentation";
+import { claimsStatusLabel, runDestination, runOutcome, runPath } from "../runPresentation";
 import { NewClaimsRunCard } from "./ClaimsList";
 
 export function RunListPage({ kind }: { kind: "invoice" | "claim" }) {
@@ -50,7 +50,7 @@ export function InvoiceNewPage() {
   const start = async () => {
     if (!file) return;
     setBusy(true); setError("");
-    try { const result = await uploadBatch(client, file); await refresh(); navigate(`/invoices/${result.run_id}/progress`); }
+    try { const result = await uploadBatch(client, file); await refresh(); navigate(runPath("invoice", result.run_id, "progress")); }
     catch (e) { setError(e instanceof Error ? e.message : "Upload failed"); setBusy(false); }
   };
   return <section className="standard-page narrow-form">
@@ -68,5 +68,5 @@ export function InvoiceNewPage() {
 export function ClaimsNewPage() {
   const { navigate } = useRouter();
   const { refresh } = useRunActivity();
-  return <section className="standard-page"><NewClaimsRunCard onStarted={(id) => { void refresh(); navigate(`/claims/${id}/progress`); }} /></section>;
+  return <section className="standard-page"><NewClaimsRunCard onStarted={(id) => { void refresh(); navigate(runPath("claim", id, "progress")); }} /></section>;
 }

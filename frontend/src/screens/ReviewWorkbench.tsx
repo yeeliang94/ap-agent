@@ -1,0 +1,79 @@
+import { useEffect, useMemo, useState } from "react";
+import {
+  ClaimCase, ClaimFlag, ClaimsRunDetail, Doc, FlagItem, ReviewFinding, ReviewGroup, RunDetailData,
+  CORRECTABLE, claimsFileUrl, correctClaimRow, correctFields, decideClaimFlag, decideFlag, documentFileUrl,
+} from "../api";
+import { useAction } from "../hooks/useAction";
+import { Link, setQuery, useRouter } from "../router";
+import { runPath } from "../runPresentation";
+
+// The review workbench of a finished run (invoice or claims): findings grouped
+// by document / Claim, the cited source beside them, one decision at a time.
+
+type ReviewModel = { groups: ReviewGroup[]; findings: ReviewFinding[]; docs: Map<string, Doc>; flags: Map<string, FlagItem | ClaimFlag>; claimRun?: ClaimsRunDetail };
+
+// What a finding asks of the reviewer. The flag's own status is the authority:
+// the backend decides per flag ("open" = a person must decide, "info" = a note)
+// and escalates above the catalogue's default class — an unclaimed receipt at
+// or above the client's threshold is "open" although UNCLAIMED_RECEIPT is an
+// "info" code — so the catalogue is never consulted for this.
+type FindingState = "decide" | "note" | "reviewed";
+function findingState(f: ReviewFinding): FindingState {
+  if (f.status === "open") return f.blocking ? "decide" : "note";
+  return f.status === "info" ? "note" : "reviewed";
+}
+const STATE_RANK: Record<FindingState, number> = { decide: 0, note: 1, reviewed: 2 };
+const STATE_LABEL: Record<FindingState, string> = { decide: "Needs decision", note: "Information", reviewed: "Reviewed" };
+
+function amountNumber(value?: string) { const parsed = Number(String(value || "").replace(/[^0-9.-]/g, "")); return Number.isFinite(parsed) ? parsed : 0; }
+function sortReviewFindings(findings: ReviewFinding[]) {
+  return [...findings].sort((a, b) =>
+    STATE_RANK[findingState(a)] - STATE_RANK[findingState(b)] || amountNumber(b.amountAtRisk) - amountNumber(a.amountAtRisk) || (a.sourceOrder || 0) - (b.sourceOrder || 0));
+}
+function sortReviewGroups(groups: ReviewGroup[], findings: ReviewFinding[]) {
+  const needsDecision = (groupId: string) => findings.some((finding) => finding.groupId === groupId && findingState(finding) === "decide");
+  return [...groups].sort((a, b) =>
+    Number(needsDecision(b.id)) - Number(needsDecision(a.id)) || amountNumber(b.amountAtRisk) - amountNumber(a.amountAtRisk) || a.sourceOrder - b.sourceOrder);
+}
+function buildReview(kind: "invoice" | "claim", run: RunDetailData | ClaimsRunDetail): ReviewModel {
+  if (kind === "invoice") {
+    const invoice = run as RunDetailData; const docs = new Map(invoice.documents.map((d) => [d.id, d])); const flags = new Map<string, FlagItem | ClaimFlag>();
+    const findings = invoice.flags.map((f, i) => { const document = docs.get(f.document_id); const amount = document?.fields?.amount; flags.set(f.id, f); return { id: f.id, groupId: f.document_id || "run", title: f.code.replaceAll("_", " "), reason: f.reason, basis: f.basis, status: f.status, blocking: true, amountAtRisk: amount == null ? undefined : String(amount), source: f.document_id ? { documentId: f.document_id, page: 1 } : { summary: f.basis }, sourceOrder: i } satisfies ReviewFinding; });
+    const groupIds = new Set(findings.map((f) => f.groupId)); const groups = [...groupIds].map((id, i) => { const fs = findings.filter((f) => f.groupId === id); return { id, name: docs.get(id)?.filename || "Run checks", unresolved: fs.filter((f) => f.status === "open").length, amountAtRisk: fs.map((f) => f.amountAtRisk).find(Boolean), complete: fs.every((f) => f.status !== "open"), sourceOrder: i }; });
+    return { groups, findings, docs, flags };
+  }
+  const claims = run as ClaimsRunDetail; const cases = claims.cases?.length ? claims.cases : claims.employees.map((e) => ({ id: e.id, employee_id: e.id, label: e.name || e.folder } as ClaimCase)); const docs = new Map<string, Doc>(); const flags = new Map<string, FlagItem | ClaimFlag>();
+  const groupFor = (flag: ClaimFlag) => flag.case_id || flag.employee_id || "run";
+  const findings = claims.flags.map((f, i) => { const row = claims.rows.find((r) => r.id === f.row_id); const amount = row?.values?.total || row?.values?.amount; flags.set(f.id, f); return { id: f.id, groupId: groupFor(f), title: claims.catalogue?.[f.code]?.title || f.code.replaceAll("_", " "), reason: f.reason, basis: f.basis, status: f.status, blocking: f.status !== "info", amountAtRisk: amount ? String(amount) : undefined, source: f.cite ? { file: f.cite.file, page: f.cite.page || 1, position: f.cite.position, sheet: f.cite.sheet, row: f.cite.row } : undefined, sourceOrder: i } satisfies ReviewFinding; });
+  const ids = new Set(findings.map((f) => f.groupId)); const groups = [...ids].map((id, i) => { const fs = findings.filter((f) => f.groupId === id); const c = cases.find((x) => x.id === id || x.employee_id === id); return { id, name: c?.label || c?.name || "Run checks", unresolved: fs.filter((f) => f.status === "open").length, amountAtRisk: c?.lines_total, complete: fs.every((f) => f.status !== "open"), sourceOrder: i }; });
+  return { groups, findings, docs, flags, claimRun: claims };
+}
+
+export default function ReviewWorkbench({ kind, run, reload }: { kind: "invoice" | "claim"; run: RunDetailData | ClaimsRunDetail; reload: () => Promise<void> }) {
+  const { location, navigate } = useRouter(); const model = useMemo(() => buildReview(kind, run), [kind, run]); const query = new URLSearchParams(location.search);
+  const ordered = sortReviewFindings(model.findings); const orderedGroups = sortReviewGroups(model.groups, model.findings); const first = ordered[0]; const groupId = query.get("group") || first?.groupId || orderedGroups[0]?.id; const groupFindings = sortReviewFindings(model.findings.filter((f) => f.groupId === groupId)); const findingId = query.get("finding") || groupFindings[0]?.id; const finding = model.findings.find((f) => f.id === findingId) || first; const group = model.groups.find((g) => g.id === groupId);
+  const [view, setView] = useState<"preview" | "findings">("findings"); const [note, setNote] = useState(""); const [page, setPage] = useState(finding?.source?.page || 1); const [correcting, setCorrecting] = useState(false); const [linesOpen, setLinesOpen] = useState(false); const action = useAction(reload, "Could not record the decision");
+  useEffect(() => setPage(finding?.source?.page || 1), [finding?.id, finding?.source?.page]);
+  const select = (g: string, f?: string) => navigate(setQuery({ group: g, finding: f }));
+  const decide = async (outcome: "keep" | "exclude") => { if (!finding) return; const ok = await action.run(() => kind === "invoice"
+    ? decideFlag(run.id, finding.id, outcome === "keep" ? "accepted" : "rejected", note)
+    : decideClaimFlag(run.id, finding.id, outcome === "keep" ? "dismissed" : "accepted", note || (outcome === "exclude" ? "Excluded during review" : ""), (run as ClaimsRunDetail).revision),
+  { key: `decision:${finding.id}` }); if (!ok) return; const rest = sortReviewFindings(model.findings.filter((f) => f.status === "open" && f.id !== finding.id)); const next = rest.find((f) => f.groupId === finding.groupId) || rest[0]; if (next) select(next.groupId, next.id); setNote(""); };
+  if (!model.findings.length) return <div className="completion-panel"><span className="completion-mark">✓</span><h2>Review complete</h2><p>There are no unresolved findings.</p><Link className="btn primary" to={runPath(kind, run.id, "export")}>Open export</Link></div>;
+  const claimSource = finding?.source?.file; const doc = finding?.source?.documentId ? model.docs.get(finding.source.documentId) : undefined;
+  return <div className="review-workbench"><aside className="group-index"><h2>{kind === "claim" ? "Claims" : "Documents"}</h2>{orderedGroups.map((g) => <button className={g.id === groupId ? "selected" : ""} key={g.id} onClick={() => select(g.id)}><span>{g.name}</span><small>{g.unresolved ? `${g.unresolved} unresolved` : "Complete"}{g.amountAtRisk ? ` · RM ${g.amountAtRisk}` : ""}</small></button>)}</aside><div className="mobile-review-nav"><label>{kind === "claim" ? "Claim" : "Document"}<select value={groupId} onChange={(e) => select(e.target.value)}>{orderedGroups.map((g) => <option value={g.id} key={g.id}>{g.name} · {g.unresolved} unresolved</option>)}</select></label><div role="tablist" aria-label="Review view"><button role="tab" aria-selected={view === "preview"} onClick={() => setView("preview")}>Preview</button><button role="tab" aria-selected={view === "findings"} onClick={() => setView("findings")}>Findings</button></div></div><section className={`preview-pane ${view === "preview" ? "mobile-current" : ""}`}><header><div><span className="eyebrow">Source</span><h2>{doc?.filename || claimSource || group?.name}</h2></div>{doc && (doc.page_count || 1) > 1 ? <div className="page-controls"><button disabled={page <= 1} onClick={() => setPage(page - 1)}>←</button><span>Page {page} of {doc.page_count}</span><button disabled={page >= (doc.page_count || 1)} onClick={() => setPage(page + 1)}>→</button></div> : null}</header>{doc ? <img src={documentFileUrl(run.id, doc.id, page)} alt={`Page ${page} of ${doc.filename}`} /> : claimSource ? <img src={claimsFileUrl(run.id, claimSource, page, finding?.source?.position || "")} alt={`Cited page ${page} from ${claimSource}`} /> : <div className="source-summary"><h3>Source summary</h3><p>{finding?.source?.summary || finding?.basis || "This finding does not have a previewable citation."}</p>{finding?.source?.sheet ? <p>{finding.source.sheet}{finding.source.row ? `, row ${finding.source.row}` : ""}</p> : null}</div>}</section><aside className={`findings-pane ${view === "findings" ? "mobile-current" : ""}`}><header><div><span className="eyebrow">{group?.name}</span><h2>Findings</h2></div><div className="finding-head-actions"><span className="status working">{group?.unresolved || 0} unresolved</span>{kind === "claim" && groupId !== "run" ? <button className="btn sm" onClick={() => setLinesOpen(true)}>Claim lines</button> : null}</div></header><div className="finding-list">{groupFindings.map((f) => <button key={f.id} className={f.id === finding?.id ? "selected" : ""} onClick={() => select(f.groupId, f.id)}><span>{f.title}</span><small>{STATE_LABEL[findingState(f)]}</small></button>)}</div>{finding ? <article className="finding-detail"><h3>{finding.title}</h3><p>{finding.reason}</p>{finding.basis ? <div className="finding-basis"><strong>Basis</strong>{finding.basis}</div> : null}</article> : null}{correcting && finding ? <CorrectionPanel kind={kind} run={run} finding={finding} doc={doc} onDone={async () => { setCorrecting(false); await reload(); }} onCancel={() => setCorrecting(false)} /> : null}</aside><div className="decision-bar review-decisions"><input aria-label="Decision note" placeholder="Decision note" value={note} onChange={(e) => setNote(e.target.value)} />{finding?.status === "open" ? <>{kind === "claim" && finding.groupId === "run" ? <button className="btn primary" disabled={Boolean(action.busy)} onClick={() => decide("exclude")}>Mark reviewed</button> : <><button className="btn primary" disabled={Boolean(action.busy) || (kind === "claim" && !note.trim())} onClick={() => decide("keep")}>{kind === "invoice" ? "Include in output" : "Keep in payment"}</button><button className="btn danger" disabled={Boolean(action.busy)} onClick={() => decide("exclude")}>{kind === "invoice" ? "Exclude and query" : `Exclude${finding.amountAtRisk ? ` RM ${finding.amountAtRisk}` : ""} from payment`}</button><button className="btn" disabled={Boolean(action.busy)} onClick={() => setCorrecting(true)}>Correct value</button></>}</> : <span>Decision recorded</span>}{action.error ? <span className="error">{action.error}</span> : null}</div>{kind === "claim" && linesOpen ? <ClaimLinesDrawer run={run as ClaimsRunDetail} groupId={groupId} onClose={() => setLinesOpen(false)} /> : null}</div>;
+}
+
+function ClaimLinesDrawer({ run, groupId, onClose }: { run: ClaimsRunDetail; groupId: string; onClose: () => void }) {
+  const employeeIds = new Set((run.cases || []).filter((c) => c.id === groupId).flatMap((c) => [c.id, c.employee_id])); employeeIds.add(groupId);
+  const rows = run.rows.filter((row) => row.case_id === groupId || employeeIds.has(row.employee_id));
+  return <div className="drawer-layer"><button className="drawer-backdrop" aria-label="Close claim lines" onClick={onClose} /><aside className="activity-drawer claim-lines-drawer" role="dialog" aria-modal="true" aria-labelledby="claim-lines-title"><header><div><h2 id="claim-lines-title">Claim lines</h2><p>{rows.length} lines in the selected Claim.</p></div><button className="icon-button" aria-label="Close claim lines" onClick={onClose}>×</button></header><div className="claim-lines-list">{rows.map((row) => <article key={row.id}><strong>{String(row.values.item_name || row.values.item || row.values.reason || "Claim line")}</strong><span>{String(row.values.date || "No date")} · {String(row.values.currency || "MYR")} {String(row.values.total || row.values.amount || "—")}</span><small>{row.verdict.replaceAll("_", " ")} · {row.origin?.replaceAll("_", " ")}</small></article>)}</div></aside></div>;
+}
+
+function CorrectionPanel({ kind, run, finding, doc, onDone, onCancel }: { kind: "invoice" | "claim"; run: RunDetailData | ClaimsRunDetail; finding: ReviewFinding; doc?: Doc; onDone: () => Promise<void>; onCancel: () => void }) {
+  const claimRun = run as ClaimsRunDetail; const flag = kind === "claim" ? claimRun.flags.find((f) => f.id === finding.id) : undefined; const row = flag ? claimRun.rows.find((r) => r.id === flag.row_id) : undefined; const fields = kind === "invoice" ? CORRECTABLE[doc?.kind || ""] || [] : row ? Object.keys(row.values).filter((key) => ["date", "item", "reason", "amount", "currency", "rate", "total"].includes(key)) : [];
+  const source = kind === "invoice" ? doc?.fields || {} : row?.values || {}; const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(fields.map((f) => [f, String(source[f] ?? "")]))); const [reason, setReason] = useState(""); const action = useAction(onDone, "Correction failed");
+  const save = () => action.run(() => kind === "invoice" && doc ? correctFields(run.id, doc.id, values, reason) : row ? correctClaimRow(run.id, row.id, values, reason, claimRun.revision) : Promise.resolve(), { key: "correction" });
+  if (!fields.length) return <div className="correction-panel"><p>No directly correctable value is attached to this finding.</p><button className="btn" onClick={onCancel}>Close</button></div>;
+  return <div className="correction-panel"><h3>Correct value</h3>{fields.map((field) => <label key={field}>{field.replaceAll("_", " ")}<input value={values[field]} onChange={(e) => setValues({ ...values, [field]: e.target.value })} /></label>)}<label>Reason<input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Required audit reason" /></label><div className="actions"><button className="btn primary" disabled={Boolean(action.busy) || !reason.trim()} onClick={save}>{action.busy ? "Saving…" : "Save correction"}</button><button className="btn" disabled={Boolean(action.busy)} onClick={onCancel}>Cancel</button></div>{action.error ? <p className="error">{action.error}</p> : null}</div>;
+}

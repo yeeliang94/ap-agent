@@ -88,4 +88,46 @@ describe("RunWorkspace organization contracts", () => {
     await waitFor(() => expect(window.location.search).toContain("finding=f-low"));
     expect(screen.getByRole("heading", { name: "Claim amount unconfirmed" })).toBeTruthy();
   });
+
+  it("reads whether a finding needs a decision from the flag's status, not the catalogue's default class", async () => {
+    // checks.py escalates per flag: an unclaimed receipt at or above the client's threshold is
+    // "open" (a person must decide) although UNCLAIMED_RECEIPT is an "info" code in the catalogue.
+    const escalated = makeFlag({ id: "f-big", code: "UNCLAIMED_RECEIPT", status: "open", evidence_id: "ev1" });
+    const note = makeFlag({ id: "f-note", code: "PURPOSE_UNKNOWN", status: "info" });
+    getClaimsRun.mockResolvedValue(makeRun({ status: "ready", cases: [makeCase()], grouping: grouping(), flags: [note, escalated], catalogue: CATALOGUE }));
+    window.history.replaceState({}, "", "/claims/run1/review");
+    render(<BrowserRouter><RunActivityProvider><RunWorkspace kind="claim" runId="run1" view="review" /></RunActivityProvider></BrowserRouter>);
+
+    expect(await screen.findByRole("heading", { name: "Receipt supports no row" })).toBeTruthy();
+    const listed = [...document.querySelectorAll(".finding-list button")].map((b) => `${b.querySelector("span")?.textContent} · ${b.querySelector("small")?.textContent}`);
+    expect(listed).toEqual(["Receipt supports no row · Needs decision", "No stated purpose · Information"]);
+    expect(screen.getByRole("button", { name: "Keep in payment" })).toBeTruthy();
+  });
+
+  it("forgets a split selection when another Claim is selected", async () => {
+    const second = makeCase({ id: "c2", employee_id: "e2", label: "Second Claim" });
+    const file = (id: string, path: string, case_id: string): api.ClaimArtifact => ({ id, path, sha256: id, media_type: "pdf", size: 1, pages: 1, sheets: [], inspection_state: "inspected", failure_reason: "", proposed_role: "receipts", role_reason: "", disposition: "used", disposition_reason: "", disposition_by: "adapter", needs_confirmation: false, case_id });
+    getClaimsRun.mockResolvedValue(makeRun({ status: "map_ready", cases: [makeCase(), second], grouping: grouping(true),
+      artifacts: [file("a1", "first/report.xlsx", "c1"), file("a2", "second/receipt-2.pdf", "c2"), file("a3", "second/receipt-3.pdf", "c2")] }));
+    renderOrganizer();
+
+    fireEvent.click(await screen.findByText("Advanced actions"));
+    fireEvent.change(screen.getByLabelText("New split Claim name"), { target: { value: "Part" } });
+    fireEvent.click(screen.getByLabelText("report.xlsx"));
+    fireEvent.click(screen.getByRole("button", { name: /Second Claim/ }));
+
+    fireEvent.click(screen.getByText("Advanced actions"));
+    expect((screen.getByLabelText("receipt-2.pdf") as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByLabelText("New split Claim name") as HTMLInputElement).value).toBe("");
+    expect((screen.getByRole("button", { name: "Split into new Claim" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("sends a finished organization to the organize workbench through runDestination", async () => {
+    getClaimsRun.mockResolvedValue(makeRun({ status: "map_ready", cases: [makeCase()], artifacts: [], grouping: grouping() }));
+    window.history.replaceState({}, "", "/claims/run1/progress");
+    render(<BrowserRouter><RunActivityProvider><RunWorkspace kind="claim" runId="run1" view="progress" /></RunActivityProvider></BrowserRouter>);
+
+    const link = await screen.findByRole("link", { name: "Organize claims" });
+    expect(link.getAttribute("href")).toBe("/claims/run1/organize");
+  });
 });

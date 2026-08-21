@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { makeRunSummary } from "../test/fixtures";
-import { claimsStatusLabel, runDestination } from "../runPresentation";
+import { claimsStatusLabel, runDestination, runPath } from "../runPresentation";
 import { looksLikeLocalPath, mergePicked, Picked } from "./ClaimsList";
 
 function picked(path: string, opts: { size?: number; mtime?: number; name?: string } = {}): Picked {
@@ -81,6 +81,7 @@ describe("runDestination", () => {
     expect(runDestination("claim", { id: "r", status: "ready", open_flags: 0 }, true)).toBe("/claims/r/export");
     expect(runDestination("invoice", { id: "r", status: "ready", open_flags: 2 }, true)).toBe("/invoices/r/review");
     expect(runDestination("invoice", { id: "r", status: "checking" })).toBe("/invoices/r/progress");
+    expect(runPath("claim", "r", "export")).toBe("/claims/r/export");
   });
 });
 

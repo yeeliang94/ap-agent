@@ -18,11 +18,11 @@ def progress(phase: str, step: str, done: int = 0, total: int = 0,
     }
 
 
-def terminal_progress(previous: dict | None, step: str, *, phase: str | None = None) -> dict:
+def terminal_progress(previous: dict | None, step: str) -> dict:
     """Finish or stop a run without duplicating its last trustworthy counts."""
     old = previous or {}
     return progress(
-        phase or old.get("phase", "finalizing"),
+        old.get("phase", "finalizing"),
         step,
         old.get("done", 0),
         old.get("total", 0),

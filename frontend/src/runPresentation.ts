@@ -1,6 +1,12 @@
 import { ClaimsRunSummary } from "./api";
 
 export type RunKind = "invoice" | "claim";
+export type RunView = "progress" | "organize" | "review" | "export";
+
+/** The one place a run's URL is spelled: /invoices|claims/<id>/<view>. */
+export function runPath(kind: RunKind, runId: string, view: RunView): string {
+  return `/${kind === "invoice" ? "invoices" : "claims"}/${runId}/${view}`;
+}
 
 /** One authoritative mapping from a run outcome to its reviewer destination. */
 export function runDestination(
@@ -8,10 +14,9 @@ export function runDestination(
   run: { id: string; status: string; open_flags?: number },
   openCompletedExport = false,
 ): string {
-  const base = `/${kind === "invoice" ? "invoices" : "claims"}/${run.id}`;
-  if (kind === "claim" && run.status === "map_ready") return `${base}/organize`;
-  if (run.status === "ready") return `${base}/${openCompletedExport && !run.open_flags ? "export" : "review"}`;
-  return `${base}/progress`;
+  if (kind === "claim" && run.status === "map_ready") return runPath(kind, run.id, "organize");
+  if (run.status === "ready") return runPath(kind, run.id, openCompletedExport && !run.open_flags ? "export" : "review");
+  return runPath(kind, run.id, "progress");
 }
 
 export function runOutcome(status: string, open: number, kind: RunKind): string {
